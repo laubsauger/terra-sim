@@ -1,6 +1,6 @@
 // Life test page: worldgen + derive, hand-painted biome/veg, the full look (or bare lighting with
 // ?look=0) and createLife. Driven from life.spec.ts via window.lt; frames render on demand.
-// URL: ?seed=<u32>&paint=stripes|natural&look=0|1&quality=low|high
+// URL: ?seed=<u32>&paint=stripes|natural&look=0|1&bare=0|1&quality=low|high&tod=<0..1>
 import * as THREE from 'three/webgpu';
 import { createStage } from '../../../src/render/stage';
 import { GpuFields } from '../../../src/core/gpu';
@@ -18,8 +18,8 @@ import { createLife } from '../../../src/life/life';
 import { birdFloor, fishValid } from '../../../src/life/creatures';
 import {
   FLORA, FLORA_RULES, KIND_COUNT, KIND_BASE, KIND_NAMES, NSLOT, SPECIES_KIND, CREATURES, GRAZING, slotInfo, slotXZ,
-  TREELINE, TREELINE_BIOME, LIFE_BIOMES, Sp,
-  floraDecide, cornerWater, slopeAt, heightAt, columnAt, waterNear, smoothSurf, type ColumnMap,
+  TREELINE, TREELINE_BIOME, LIFE_BIOMES, Sp, NSLOT_LS, grazingPatches,
+  floraDecide, cornerWater, slopeAt, heightAt, columnAt, waterNear, baseSink, type ColumnMap,
 } from '../../../src/life/lifeModel';
 import { paintStripes, paintNatural, repaint, paintAll } from './lifeWorld';
 
@@ -47,15 +47,16 @@ async function main() {
 
   let look: Look | null = null;
   if (q.get('look') !== '0') {
-    try { look = createLook(stage, fields, { highQuality: q.get('quality') !== 'low' }); } catch (e) { console.warn('life page: createLook failed, bare lighting: ' + (e as Error).message); }
+    try { look = createLook(stage, fields, { highQuality: q.get('quality') !== 'low', timeOfDay: q.has('tod') ? Number(q.get('tod')) : undefined }); } catch (e) { console.warn('life page: createLook failed, bare lighting: ' + (e as Error).message); }
   }
   if (!look) {
     renderer.shadowMap.enabled = true;
     createLighting(scene, { shadows: true });
-    scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
+    // bare=1: life only (data tests stay independent of in-progress terrain/sides/water shaders)
+    if (q.get('bare') !== '1') scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
   }
   const quality = q.get('quality') !== 'low';
-  const life = createLife(fields, renderer, scene, { highQuality: quality });
+  const life = createLife(fields, renderer, scene, { highQuality: quality, camera });
   life.setSeaLevel(sea);
 
   let t = 0;
@@ -71,7 +72,7 @@ async function main() {
   const readMap = async (): Promise<ColumnMap & { veg: Float32Array }> => {
     const s = new Float32Array(await fields.read(renderer, 'surfY'));
     return {
-      surfY: s, surfR: smoothSurf(s),
+      surfY: s, surfR: new Float32Array(await readAttr(life.flora.buffers.renderH)),
       water: new Float32Array(await fields.read(renderer, 'water')),
       biome: new Uint32Array(await fields.read(renderer, 'biome')),
       veg: new Float32Array(await fields.read(renderer, 'veg')),
@@ -81,6 +82,9 @@ async function main() {
 
   async function flora(opts: { snapped: boolean; quality?: number }) {
     const m = await readMap();
+    // fine ground cover: compact every live slot (no camera culling) so lists can be checked exactly
+    life.flora.setCamera(null);
+    life.flora.cullFine(renderer);
     const st = new Float32Array(await readAttr(life.flora.buffers.state));
     const args = new Uint32Array(await readAttr(life.flora.buffers.args));
     const lists = new Uint32Array(await readAttr(life.flora.buffers.lists));
@@ -91,7 +95,7 @@ async function main() {
     let live = 0, growing = 0, shrinking = 0;
     const perSpecies: Record<number, number> = {};
     for (let s = 0; s < NSLOT; s++) {
-      const y = st[s * 4]!, prev = st[s * 4 + 1]!, tgt = st[s * 4 + 2]!, sp = st[s * 4 + 3]!;
+      const y = st[s * 4]!, prev = st[s * 4 + 1]!, tgt = st[s * 4 + 2]!, sp = Math.floor(st[s * 4 + 3]!);
       if (opts.snapped) {
         const ref = floraDecide(m, s, opts.quality ?? (quality ? 1 : FLORA.LOW_QUALITY), sea);
         if (ref.species !== sp || Math.abs(ref.scale - tgt) > 1e-4 || Math.abs(prev - tgt) > 1e-6) {
@@ -112,7 +116,8 @@ async function main() {
       const set = slotInfo(s).set;
       const rule = FLORA_RULES[b < LIFE_BIOMES ? b : 0]![set]!;
       // allowed: the rule's species, plus the altitude substitutes (pine for broadleaf, treeline shrubs/tufts)
-      const allowed = new Set([rule.a, rule.b]);
+      const allowed = new Set<number>([...rule.sp, rule.flower]);
+      if (set === 2 && rule.density > 0) allowed.add(Sp.REED);
       if (set === 0 && (allowed.has(Sp.BROADLEAF) || allowed.has(Sp.BROADLEAF_RAIN))) allowed.add(Sp.PINE);
       if (set === 1 && TREELINE_BIOME[b]) { allowed.add(Sp.SHRUB_TUNDRA); allowed.add(Sp.GRASS_ALPINE); }
       allowed.delete(Sp.NONE);
@@ -126,9 +131,12 @@ async function main() {
         if (set === 0) { z0.trees++; z0.scaleSum += tgt; if (sp === Sp.PINE && b === 4) z0.pines++; if (b === 4) z0.tempTrees++; }
         else if (sp === Sp.SHRUB_TUNDRA || sp === Sp.GRASS_ALPINE) z0.line++;
       }
-      if (cornerWater(m, x, z) > FLORA.WET_MAX) bad.wet++;
-      if (slopeAt(m, x, z) > FLORA.SLOPE_MAX) bad.steep++;
-      if (Math.abs(y - heightAt(m, x, z)) > 1e-3) bad.yMismatch++;
+      const cw = cornerWater(m, x, z);
+      if (sp === Sp.REED ? cw > Math.fround(FLORA.REED_MAX) : cw > Math.fround(FLORA.WET_MAX)) bad.wet++;
+      if (slopeAt(m, x, z) > FLORA.SLOPE_MAX_SET[set]!) bad.steep++;
+      // base = terrain as drawn, sunk on slopes by the footprint (lifeModel.baseSink)
+      const yRef = heightAt(m, x, z) - baseSink(slopeAt(m, x, z), sp, tgt);
+      if (Math.abs(y - yRef) > 2e-3) { bad.yMismatch++; if (bad.examples.length < 5) bad.examples.push(`y slot ${s} sp ${sp}: gpu ${y} cpu ${yRef} (h ${heightAt(m, x, z)})`); }
     }
     for (let k = 0; k < KIND_COUNT; k++) {
       const n = args[k * 5 + 1]!;
@@ -137,6 +145,7 @@ async function main() {
       for (let i = 0; i < n; i++) seen.add(lists[KIND_BASE[k]! + i]!);
       kinds[k]!.listOk = n === liveSlots[k]!.size && seen.size === n && [...seen].every((s) => liveSlots[k]!.has(s));
     }
+    life.flora.setCamera(camera);
     const named = Object.fromEntries(kinds.map((k, i) => [KIND_NAMES[i], k]));
     const biomeCols: Record<number, number> = {};
     for (let c = 0; c < NCOL; c++) {
@@ -149,11 +158,45 @@ async function main() {
     return { live, growing, shrinking, kinds: named, perSpecies, bad, biomeCols, zone };
   }
 
+  /**
+   * Clumping of the fine ground cover (painted world, snapped): per 0.2-unit cell, live fine plants
+   * over eligible fine slots (inside, dry, gentle). Returns mean, p95, bare-cell share and flower stats.
+   */
+  async function clumps() {
+    const m = await readMap();
+    const st = new Float32Array(await readAttr(life.flora.buffers.state));
+    const CELLW = 0.2, NC = Math.round((2 * HALF) / CELLW);
+    const live = new Float64Array(NC * NC), elig = new Float64Array(NC * NC), flw = new Float64Array(NC * NC);
+    const species: Record<number, number> = {};
+    let fineLive = 0;
+    for (let s = NSLOT_LS; s < NSLOT; s++) {
+      const [x, z] = slotXZ(s);
+      if (Math.abs(x) > HALF - 0.01 || Math.abs(z) > HALF - 0.01) continue;
+      if (cornerWater(m, x, z) > FLORA.WET_MAX || slopeAt(m, x, z) > FLORA.SLOPE_MAX_SET[2]!) continue;
+      const ci = Math.min(NC - 1, Math.floor((x + HALF) / CELLW)) + Math.min(NC - 1, Math.floor((z + HALF) / CELLW)) * NC;
+      elig[ci] = elig[ci]! + 1;
+      const sp = Math.floor(st[s * 4 + 3]!);
+      if (sp === 0 || st[s * 4 + 2]! <= 0) continue;
+      live[ci] = live[ci]! + 1; fineLive++;
+      species[sp] = (species[sp] ?? 0) + 1;
+      if (sp === Sp.F_FLOWER) flw[ci] = flw[ci]! + 1;
+    }
+    const dens: number[] = [], fsh: number[] = [];
+    for (let i = 0; i < NC * NC; i++) if (elig[i]! >= 40) { dens.push(live[i]! / elig[i]!); fsh.push(live[i]! ? flw[i]! / live[i]! : 0); }
+    dens.sort((a, b) => a - b); fsh.sort((a, b) => a - b);
+    const mean = dens.reduce((a, b) => a + b, 0) / Math.max(1, dens.length);
+    const q = (arr: number[], f: number) => arr[Math.min(arr.length - 1, Math.floor(arr.length * f))] ?? 0;
+    const fmean = fsh.reduce((a, b) => a + b, 0) / Math.max(1, fsh.length);
+    return { cells: dens.length, mean, p50: q(dens, 0.5), p95: q(dens, 0.95), max: q(dens, 1), bareShare: dens.filter((d) => d < mean * 0.25).length / Math.max(1, dens.length),
+      flowerMean: fmean, flowerP95: q(fsh, 0.95), flowerCellsNone: fsh.filter((f) => f === 0).length / Math.max(1, fsh.length), fineLive, species };
+  }
+
   /** Step creatures for `seconds` of fixed dt on the current map; check invariants every step. */
   async function creatures(seconds: number, dt = 1 / 60) {
     const m = await readMap();
     life.creatures.setMap(m);
-    const v = { birdOut: 0, birdLow: 0, birdHigh: 0, critterWet: 0, critterBiome: 0, fishOut: 0, fishAbove: 0, examples: [] as string[] };
+    const v = { birdOut: 0, birdLow: 0, birdHigh: 0, critterWet: 0, critterBiome: 0, critterSmallPatch: 0, fishOut: 0, fishAbove: 0, examples: [] as string[] };
+    const patches = grazingPatches(m);
     let minClear = Infinity, maxAbs = 0, maxFishDepth = 0;
     const start = life.creatures.snapshot();
     const path = { bird: 0, critter: 0, fish: 0 };
@@ -174,6 +217,8 @@ async function main() {
       for (const c of s.critters) {
         if (m.water[columnAt(c.x, c.z)]! > 0 || waterNear(m, c.x, c.z) > CREATURES.CRITTER_WET) { v.critterWet++; if (v.examples.length < 5) v.examples.push(`critter wet ${c.x},${c.z}`); }
         if (!GRAZING.has(m.biome[columnAt(c.x, c.z)]!)) v.critterBiome++;
+        const l = patches.label[columnAt(c.x, c.z)]!;
+        if (l < 0 || patches.size[l]! < CREATURES.HERD_MIN_AREA) v.critterSmallPatch++;
       }
       for (const f of s.fish) {
         if (!fishValid(m, f.x, f.z)) v.fishOut++;
@@ -232,13 +277,19 @@ async function main() {
       }
       return best;
     }
+    const groups: Record<string, number[]> = {
+      meadow: [Sp.F_GRASS, Sp.F_GRASS_TALL, Sp.F_SEED, Sp.F_CLOVER, Sp.F_FLOWER], meadowmid: [Sp.F_GRASS, Sp.F_GRASS_TALL, Sp.F_SEED, Sp.F_CLOVER, Sp.F_FLOWER],
+      steppe: [Sp.FEATHER, Sp.F_STRAW, Sp.TUSSOCK], steppemid: [Sp.FEATHER, Sp.F_STRAW, Sp.TUSSOCK],
+      ground: [Sp.BOULDER, Sp.STONE, Sp.BUSH_GREEN, Sp.SAGEBRUSH, Sp.TUSSOCK],
+    };
     const kind = KIND_NAMES.indexOf(what as (typeof KIND_NAMES)[number]);
-    if (kind < 0) return null;
+    if (kind < 0 && !groups[what]) return null;
+    const want = (sp: number) => (groups[what] ? groups[what]!.includes(sp) : SPECIES_KIND[sp] === kind);
     const st = new Float32Array(await readAttr(life.flora.buffers.state));
     // densest spot: the live slot of this kind with most same-kind neighbours, sampled
     let best: number[] | null = null, bestN = -1;
     const pts: [number, number][] = [];
-    for (let s = 0; s < NSLOT; s++) if (st[s * 4 + 3]! > 0 && SPECIES_KIND[st[s * 4 + 3]!] === kind && st[s * 4 + 2]! > 0) pts.push(slotXZ(s));
+    for (let s = 0; s < NSLOT; s++) if (st[s * 4 + 3]! > 0 && want(Math.floor(st[s * 4 + 3]!)) && st[s * 4 + 2]! > 0) pts.push(slotXZ(s));
     for (let i = 0; i < pts.length; i += Math.max(1, Math.floor(pts.length / 300))) {
       const [x, z] = pts[i]!;
       if (Math.abs(x) > HALF - 0.4 || Math.abs(z) > HALF - 0.4) continue;
@@ -252,11 +303,11 @@ async function main() {
   const w = window as unknown as Record<string, unknown>;
   w.lt = {
     meta: { sea, paint, quality, hasLook: !!look },
-    life, fields, renderer, stage,
-    frame, flora, creatures, spot,
+    life, fields, renderer, stage, look,
+    frame, flora, creatures, spot, clumps,
     async frames(n: number, dt = 1 / 60) { for (let i = 0; i < n; i++) await frame(dt); },
     refresh(snap: boolean) { life.flora.refresh(renderer, snap); },
-    advance(s: number) { life.flora.frame(s, t); },
+    advance(s: number) { life.flora.frame(renderer, s, t); },
     repaint(from: number, to: number) { repaint(fields, biome, from, to); },
     paintAll(b: number) { paintAll(fields, biome, water, b); },
     reset() { biome.set(paint === 'natural' ? paintNatural(fields, surfY, water, sea) : paintStripes(fields, surfY, water, sea)); },
@@ -267,7 +318,7 @@ async function main() {
       else {
         const p = await spot(name);
         if (!p) return false;
-        const off = name === 'fish' ? [0.22, 0.3, 0.22] : name === 'fishlow' ? [0.3, 0.07, 0.3] : name === 'bird' ? [0.35, 0.12, 0.4] : name === 'critter' ? [0.26, 0.15, 0.3] : name === 'treeline' ? [0.9, 0.35, 1.0] : [0.55, 0.35, 0.6];
+        const off = name === 'fish' ? [0.22, 0.3, 0.22] : name === 'fishlow' ? [0.3, 0.07, 0.3] : name === 'bird' ? [0.35, 0.12, 0.4] : name === 'critter' ? [0.26, 0.15, 0.3] : name === 'treeline' ? [0.9, 0.35, 1.0] : name === 'meadow' || name === 'steppe' ? [0.28, 0.1, 0.32] : name === 'ground' ? [0.13, 0.075, 0.16] : name === 'meadowmid' || name === 'steppemid' ? [0.85, 0.42, 0.95] : [0.55, 0.35, 0.6];
         let o = off;
         if (name === 'fishlow') {
           // grazing view across open water: turn the offset until the camera hovers over the sea

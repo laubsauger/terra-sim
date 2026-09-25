@@ -12,7 +12,7 @@ import { BLOCK_SIZE } from '../sim/layout';
 import { Biome } from '../sim/biomeModel';
 import { voxelToWorldY, AMB_PERIOD } from '../render/space';
 import {
-  CREATURES as C, GRAZING, type ColumnMap, heightAt, columnAt, waterNear, slopeAt, toCell,
+  CREATURES as C, GRAZING, type ColumnMap, heightAt, columnAt, waterNear, slopeAt, toCell, grazingPatches, flockCount,
 } from './lifeModel';
 import { birdGeometry, critterGeometry, fishGeometry } from './geometry';
 
@@ -66,6 +66,7 @@ export function fishValid(m: ColumnMap, x: number, z: number): boolean {
 interface Flock { hx: number; hz: number; alt: number; radius: number; dir: number; timer: number; color: THREE.Color }
 interface Bird { x: number; y: number; z: number; vx: number; vy: number; vz: number; flock: number; phase: number; rate: number; amp: number; glide: number; bank: number }
 interface Critter { x: number; z: number; yaw: number; walking: number; head: number; phase: number; mode: 0 | 1; timer: number; herd: number; variant: number; turn: number; active: boolean }
+interface Herd { x: number; z: number; patch: number }
 interface School { cx: number; cz: number; tx: number; tz: number; spin: number; variant: number; active: boolean }
 interface Fish { x: number; z: number; vx: number; vz: number; school: number; ang: number; rad: number; frac: number; phase: number; seed: number }
 
@@ -123,7 +124,9 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
   const schools: School[] = [];
   const fish: Fish[] = [];
 
-  const maxBirds = C.BIRD_FLOCKS[0] * C.BIRD_MAX, maxCritters = C.CRITTERS[0];
+  const maxBirds = C.BIRD_FLOCKS[0] * C.BIRD_MAX, maxCritters = C.HERDS_MAX[0] * C.HERD_MAX;
+  const herds: Herd[] = [];
+  let patches: { label: Int32Array; size: number[] } | null = null;
   const maxFish = C.FISH_SCHOOLS[0] * C.FISH_MAX;
 
   // ---- meshes ----
@@ -136,7 +139,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
   {
     const A = attribute('instA', 'vec4') as unknown as V4, B = attribute('instB', 'vec4') as unknown as V4;
     const Cc = attribute('instC', 'vec4') as unknown as V4;
-    const SIZE = 0.024;
+    const SIZE = C.BIRD_SIZE;
     const orient = (v: V3): V3 => rotY(rotX(rotZ(v, B.y), B.x), cos(A.w), sin(A.w));
     const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.7, side: THREE.DoubleSide });
     mat.positionNode = Fn(() => {
@@ -160,7 +163,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
   const crit = instanced(critterGeometry(), maxCritters, ['instA', 'instB']);
   {
     const A = attribute('instA', 'vec4') as unknown as V4, B = attribute('instB', 'vec4') as unknown as V4;
-    const SIZE = 0.03;
+    const SIZE = C.CRITTER_SIZE;
     const body = uniformArray(CRITTER_COLORS.map((c) => lin(c[0]!)), 'color');
     const head = uniformArray(CRITTER_COLORS.map((c) => lin(c[1]!)), 'color');
     const legs = uniformArray(CRITTER_COLORS.map((c) => lin(c[2]!)), 'color');
@@ -190,7 +193,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
     })();
     mat.colorNode = varying(Fn(() => {
       const vi = uint(B.w);
-      const under = smoothstep(0.58, 0.46, positionGeometry.y);
+      const under = float(1).sub(smoothstep(0.46, 0.58, positionGeometry.y));
       const bodyC = mix(body.element(vi) as unknown as V3, belly.element(vi) as unknown as V3, under);
       const c = select(isLeg, legs.element(vi), select(isHead, head.element(vi), bodyC)) as unknown as V3;
       const ao = mix(float(0.55), float(1), smoothstep(0.2, 0.6, positionGeometry.y));
@@ -266,7 +269,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
 
   function spawnBirds(m: ColumnMap) {
     flocks.length = 0; birds.length = 0;
-    const nf = C.BIRD_FLOCKS[high ? 0 : 1];
+    const nf = flockCount(m, high);
     for (let fi = 0; fi < nf; fi++) {
       const f: Flock = { hx: 0, hz: 0, alt: between(0.6, 0.95), radius: between(0.35, 0.65), dir: rand() < 0.5 ? -1 : 1, timer: between(15, 30), color: lin(BIRD_COLORS[fi % BIRD_COLORS.length]!) };
       landHome(m, f);
@@ -280,26 +283,66 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
     }
   }
 
-  function spawnCritter(m: ColumnMap, c: Critter, near?: [number, number]): void {
-    const ok = (x: number, z: number) => critterValid(m, x, z);
-    const p = (near && randomWhere(ok, 40, near[0], near[1], 0.08)) || randomWhere(ok, 600);
+  /** Column is on a grazing patch big enough for herds. */
+  const onHerdPatch = (x: number, z: number, patch = -1) => {
+    const l = patches!.label[columnAt(x, z)]!;
+    return patch !== -2 && l >= 0 && patches!.size[l]! >= C.HERD_MIN_AREA && (patch < 0 || l === patch);
+  };
+  function spawnCritter(m: ColumnMap, c: Critter): void {
+    const h = herds[c.herd];
+    const mates = critters.filter((o) => o !== c && o.active && o.herd === c.herd);
+    const ok = (x: number, z: number) => critterValid(m, x, z) && !!h && onHerdPatch(x, z, h.patch)
+      && mates.every((o) => Math.hypot(o.x - x, o.z - z) >= C.HERD_SPACING);
+    const p = h ? randomWhere(ok, 60, h.x, h.z, C.HERD_RADIUS) : null;
     if (!p) { c.active = false; return; }
     c.x = p[0]; c.z = p[1]; c.active = true;
     const b = m.biome[columnAt(c.x, c.z)];
     c.variant = b === Biome.SAVANNA ? 3 : rand() < 0.05 ? 1 : rand() < 0.2 ? 2 : 0;
   }
-  function spawnCritters(m: ColumnMap) {
-    critters.length = 0;
-    const n = C.CRITTERS[high ? 0 : 1];
-    let herdAt: [number, number] | undefined;
-    let herd = -1;
+  /** Herds this map supports: one per HERD_COLS grazing columns on patches big enough for a herd. */
+  function herdTarget(): number {
+    let eligible = 0;
+    for (const n of patches!.size) if (n >= C.HERD_MIN_AREA) eligible += n;
+    return eligible < C.HERD_MIN_AREA ? 0 : Math.min(C.HERDS_MAX[high ? 0 : 1], Math.max(1, Math.floor(eligible / C.HERD_COLS)));
+  }
+  /** Found a herd (centre uniform over eligible land, i.e. ∝ patch area, apart from other herds). */
+  function addHerd(m: ColumnMap): boolean {
+    const alive = herds.filter((h) => h.patch !== -2);
+    const p = randomWhere((x, z) => critterValid(m, x, z) && onHerdPatch(x, z)
+      && alive.every((o) => Math.hypot(o.x - x, o.z - z) >= C.HERD_APART), 800);
+    if (!p) return false;
+    let idx = herds.findIndex((h) => h.patch === -2);
+    const h: Herd = { x: p[0], z: p[1], patch: patches!.label[columnAt(p[0], p[1])]! };
+    if (idx < 0) { idx = herds.length; herds.push(h); } else herds[idx] = h;
+    const n = Math.round(between(C.HERD_MIN, C.HERD_MAX));
     for (let i = 0; i < n; i++) {
-      if (i % 5 === 0) { herd++; herdAt = undefined; }
-      const c: Critter = { x: 0, z: 0, yaw: rand() * TAU, walking: 0, head: 1, phase: rand() * TAU, mode: rand() < 0.5 ? 0 : 1, timer: between(1, 6), herd, variant: 0, turn: 0, active: false };
-      spawnCritter(m, c, herdAt);
-      if (c.active && !herdAt) herdAt = [c.x, c.z];
+      const c: Critter = { x: 0, z: 0, yaw: rand() * TAU, walking: 0, head: 1, phase: rand() * TAU, mode: rand() < 0.5 ? 0 : 1, timer: between(1, 6), herd: idx, variant: 0, turn: 0, active: false };
       critters.push(c);
+      spawnCritter(m, c);
     }
+    return true;
+  }
+  function spawnCritters(m: ColumnMap) {
+    critters.length = 0; herds.length = 0;
+    patches = grazingPatches(m);
+    for (let t = herdTarget(); herds.length < t && addHerd(m););
+  }
+  /** Map changed: re-anchor herds on the new patches, dissolve herds on patches that got too small, add/drop herds to match the grazing area. */
+  function updateHerds(m: ColumnMap) {
+    patches = grazingPatches(m);
+    herds.forEach((h, i) => {
+      if (h.patch === -2) return;
+      const act = critters.filter((c) => c.herd === i && c.active);
+      if (act.length) { h.x = act.reduce((a, c) => a + c.x, 0) / act.length; h.z = act.reduce((a, c) => a + c.z, 0) / act.length; }
+      const l = patches!.label[columnAt(h.x, h.z)]!;
+      h.patch = l >= 0 && patches!.size[l]! >= C.HERD_MIN_AREA ? l : -2;
+    });
+    const target = herdTarget();
+    let alive = herds.filter((h) => h.patch !== -2).length;
+    for (let i = herds.length - 1; i >= 0 && alive > target; i--) if (herds[i]!.patch !== -2) { herds[i]!.patch = -2; alive--; }
+    for (let i = critters.length - 1; i >= 0; i--) if (herds[critters[i]!.herd]!.patch === -2) critters.splice(i, 1);
+    for (; alive < target && addHerd(m); alive++);
+    for (const c of critters) if (!c.active || !critterValid(m, c.x, c.z) || !onHerdPatch(c.x, c.z, herds[c.herd]!.patch)) spawnCritter(m, c);
   }
 
   function spawnFish(m: ColumnMap) {
@@ -399,7 +442,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
         const h = herdC.get(c.herd);
         if (h && h[2] > 1) {
           const hx = h[0] / h[2] - c.x, hz = h[1] / h[2] - c.z;
-          if (Math.hypot(hx, hz) > 0.1) want = Math.atan2(hx, hz);
+          if (Math.hypot(hx, hz) > 0.16) want = Math.atan2(hx, hz);
         }
         let dy = want - c.yaw;
         dy = Math.atan2(Math.sin(dy), Math.cos(dy));
@@ -483,7 +526,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
       const [A, B] = crit.attrs as [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute];
       let n = 0;
       for (const c of critters) {
-        if (!c.active) continue;
+        if (!c.active || n >= maxCritters) continue;
         A.setXYZW(n, c.x, voxelToWorldY(heightAt(m, c.x, c.z)) - 0.002, c.z, c.yaw);
         B.setXYZW(n, c.phase, c.walking, c.head, c.variant);
         n++;
@@ -518,7 +561,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
     setMap(m) {
       map = m;
       if (!spawned) { respawnAll(m); return; }
-      for (const c of critters) if (!c.active || !critterValid(m, c.x, c.z)) spawnCritter(m, c);
+      updateHerds(m);
       for (const s of schools) if (!s.active) {
         const p = randomWhere((x, z) => fishValid(m, x, z), 800);
         if (p) { s.active = true; s.cx = s.tx = p[0]; s.cz = s.tz = p[1]; for (const f of fish) if (f.school === schools.indexOf(s)) { f.x = s.cx; f.z = s.cz; } }

@@ -15,10 +15,12 @@ import { NanGuard } from './core/nanGuard';
 import { createSavePanel, showToast } from './ui/savePanel';
 import { createLook } from './render/look';
 import { createLife } from './life/life';
+import { createAtmosphere } from './atmo/atmosphere';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
-import { createOverlays } from './overlay/overlays';
+import { createOverlays, simSource } from './overlay/overlays';
+import { createOverlayPanel } from './ui/overlayPanel';
 import { createAmbientCam } from './ui/ambientCam';
 import { Ambience } from './audio/ambience';
 import { TickBudget } from './core/tickBudget';
@@ -74,9 +76,10 @@ async function main() {
   const loadSlot = new URLSearchParams(location.search).get('load'); // ?load=<slot key>|latest
   if (loadSlot) await saves.loadSlot(loadSlot).catch(() => {}); // failure is toasted; the fresh world keeps running
 
-  const look = createLook(stage, fields, { highQuality: params.get('highQuality') as boolean });
-  const life = createLife(fields, stage.renderer, stage.scene, { highQuality: params.get('highQuality') as boolean, seed: params.get('seed') as number });
-  params.onChange((k, v) => { if (k === 'highQuality') { look.setHighQuality(v as boolean); life.setHighQuality(v as boolean); } });
+  const look = createLook(stage, fields, { highQuality: params.get('highQuality') as boolean, motion: sim.tectonics });
+  const life = createLife(fields, stage.renderer, stage.scene, { highQuality: params.get('highQuality') as boolean, seed: params.get('seed') as number, camera: stage.camera });
+  const atmo = createAtmosphere(fields, stage.renderer, stage.scene, stage.camera, { highQuality: params.get('highQuality') as boolean });
+  params.onChange((k, v) => { if (k === 'highQuality') { look.setHighQuality(v as boolean); life.setHighQuality(v as boolean); atmo.setHighQuality(v as boolean); } });
   setVertEx(params.get('verticalExaggeration') as number);
   params.onChange((key, v) => { if (key === 'verticalExaggeration') setVertEx(v as number); });
 
@@ -90,7 +93,10 @@ async function main() {
   const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields, stage.scene);
   const probe = createProbeUI(stage.renderer, stage.camera, fields, god.isInspect);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
-  const overlays = createOverlays(fields, stage.scene);
+  // overlays (T47): per-frame prep via stage.onFrame; colours pre-compensate the post exposure + tone map
+  const overlays = createOverlays({ fields, scene: stage.scene, renderer: stage.renderer, camera: stage.camera, source: simSource(sim),
+    exposure: () => look.post.u.exposure.value, onFrame: (cb) => stage.onFrame(cb) });
+  createOverlayPanel(panel.folders.Overlays, overlays);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
   const audio = new Ambience();
   let volcanic = 0, seenEvents = 0;
@@ -121,6 +127,7 @@ async function main() {
     life.setSeaLevel(sim.stats?.seaLevel ?? 76);
     if (ran > 0) life.invalidate();
     life.update(dt, clock.ambTime);
+    atmo.update(dt, clock.ambTime, { events: sim.events.log, seaLevel: sim.stats?.seaLevel });
     saves.frame();
     savePanel.update();
     timebar.update();
@@ -142,7 +149,7 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life,
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo,
     save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }

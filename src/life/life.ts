@@ -5,12 +5,14 @@ import * as THREE from 'three/webgpu';
 import type { GpuFields } from '../core/gpu';
 import { createFlora, type Flora } from './flora';
 import { createCreatures, type Creatures } from './creatures';
-import { FLORA, CREATURES, smoothSurf, type ColumnMap } from './lifeModel';
+import { FLORA, CREATURES, type ColumnMap } from './lifeModel';
 
 export interface LifeOptions {
-  /** Low tier: half the flora slots, fewer flocks/critters/schools. */
+  /** Low tier: half the flora slots (all three grids), fewer flocks/critters/schools. */
   highQuality?: boolean;
   seed?: number;
+  /** Render camera: fine ground cover is frustum-culled and thinned with distance from it. */
+  camera?: THREE.Camera;
 }
 
 export interface Life {
@@ -35,6 +37,7 @@ const MIN_INVALIDATE_S = 0.5;
 
 export function createLife(fields: GpuFields, renderer: THREE.WebGPURenderer, scene: THREE.Scene, opts: LifeOptions = {}): Life {
   const flora = createFlora(fields, { highQuality: opts.highQuality });
+  if (opts.camera) flora.setCamera(opts.camera);
   const creatures = createCreatures({ highQuality: opts.highQuality, seed: opts.seed });
   const object = new THREE.Group();
   object.name = 'life';
@@ -52,9 +55,9 @@ export function createLife(fields: GpuFields, renderer: THREE.WebGPURenderer, sc
   async function readMap(): Promise<void> {
     reading = true;
     try {
-      const [s, w, b] = await Promise.all([fields.read(renderer, 'surfY'), fields.read(renderer, 'water'), fields.read(renderer, 'biome')]);
-      const surfY = new Float32Array(s);
-      const m: ColumnMap = { surfY, surfR: smoothSurf(surfY), water: new Float32Array(w), biome: new Uint32Array(b) };
+      const [s, w, b, r] = await Promise.all([fields.read(renderer, 'surfY'), fields.read(renderer, 'water'), fields.read(renderer, 'biome'),
+        renderer.getArrayBufferAsync(flora.buffers.renderH as unknown as THREE.StorageBufferAttribute)]);
+      const m: ColumnMap = { surfY: new Float32Array(s), surfR: new Float32Array(r), water: new Float32Array(w), biome: new Uint32Array(b) };
       creatures.setMap(m);
       resolveReady();
     } finally {
@@ -76,7 +79,7 @@ export function createLife(fields: GpuFields, renderer: THREE.WebGPURenderer, sc
         sinceMap = 0;
         readMap().catch((e) => console.error('life: map readback failed: ' + (e as Error).message));
       }
-      flora.frame(dt, ambTime);
+      flora.frame(renderer, dt, ambTime);
       creatures.step(dt, ambTime);
     },
     setEnabled(v) {
