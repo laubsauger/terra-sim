@@ -18,6 +18,7 @@ import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
 import { createOverlays } from './overlay/overlays';
+import { createAmbientCam } from './ui/ambientCam';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -73,9 +74,12 @@ async function main() {
   const probe = createProbeUI(stage.renderer, stage.camera, fields);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   const overlays = createOverlays(fields, stage.scene);
+  const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); };
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible);
+    ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean)); };
+  params.onChange((key) => { if (key === 'ambientMode') applyUi(); });
   applyUi();
   bindKeys({
     toggleUI: () => { uiVisible = !uiVisible; applyUi(); },
@@ -93,6 +97,8 @@ async function main() {
     timebar.update();
     probe.update(dt);
     statsPane.update();
+    ambientCam.notice(sim.events.log, () => sim.stats?.seaLevel ?? 76);
+    ambientCam.update(dt);
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
