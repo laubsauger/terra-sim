@@ -12,10 +12,6 @@ export const SLAB_GAIN = 1.2;
 export const CONT_DRAG = 0.7;
 /** Speed factor per unit of continental-collision contact fraction (collisions jam plates). */
 export const COLLISION_BRAKE = 2.5;
-/** Continental contact cells above which two plates start locking (velocities converge). */
-export const LOCK_CONTACT = 8;
-/** Time for a fully engaged collision to match plate velocities. */
-export const LOCK_MY = 15;
 export const RELAX_MY = 40; // speed changes play out over tens of My (10 read as random speed changes)
 export const HEADING_SIGMA = 0.04; // rad / sqrt(My): plates keep a direction for ~100s of My
 
@@ -56,17 +52,8 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
     p.vel[0] += (tx - p.vel[0]) * a;
     p.vel[1] += (tz - p.vel[1]) * a;
   }
-  if (!contact) return;
-  for (const p of plates) for (const q of plates) {
-    if (!p.alive || !q.alive || q.id <= p.id) continue;
-    const c = contact[p.id]![q.id]!;
-    if (c < LOCK_CONTACT) continue;
-    const ap = stats.area[p.id]! / Math.max(1, runs), aq = stats.area[q.id]! / Math.max(1, runs);
-    if (ap <= 0 || aq <= 0) continue;
-    const engage = Math.min(1, c / Math.sqrt(Math.min(ap, aq))) * Math.min(1, windowMy / LOCK_MY);
-    const mx = (p.vel[0] * ap + q.vel[0] * aq) / (ap + aq), mz = (p.vel[1] * ap + q.vel[1] * aq) / (ap + aq);
-    for (const r of [p, q]) { r.vel[0] += (mx - r.vel[0]) * engage; r.vel[1] += (mz - r.vel[1]) * engage; }
-  }
+  // No velocity averaging between colliding plates: averaging opposite vectors stalled every plate and
+  // rotated headings (B16). Collisions act only through the jam brake on speed above; plates keep course.
 }
 
 /**

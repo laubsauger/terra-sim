@@ -47,17 +47,24 @@ describe('plate kinematics', () => {
   });
 });
 
-describe('collision locking (B5)', () => {
-  // Colliding continents must decelerate relative to each other, not grind at full speed forever.
-  it('plates in sustained continental contact converge to a shared velocity', () => {
+describe('collisions brake, never stall or rotate plates (B16)', () => {
+  // Averaging colliding plates' velocities stalled the world and swung headings; the brake only slows.
+  it('plates in sustained continental contact slow down but keep their headings', () => {
     const { plates, stats } = setup();
-    plates[0]!.vel = [2, 0]; plates[1]!.vel = [-2, 0];
+    plates[0]!.vel = [1.6, 0]; plates[1]!.vel = [-1.6, 0];
     const contact = Array.from({ length: 16 }, () => new Array(16).fill(0));
-    contact[0]![1] = contact[1]![0] = 200;
+    contact[0]![1] = contact[1]![0] = 400;
     const rng = new PCG32(6);
-    for (let i = 0; i < 30; i++) updateKinematics(plates, stats, 40, 2, rng, undefined, contact); // 60 My of contact
-    const rel = Math.hypot(plates[0]!.vel[0] - plates[1]!.vel[0], plates[0]!.vel[1] - plates[1]!.vel[1]);
-    expect(rel).toBeLessThan(0.5);
+    const free = setup();
+    free.plates[0]!.vel = [1.6, 0]; free.plates[1]!.vel = [-1.6, 0];
+    const rng2 = new PCG32(6);
+    for (let i = 0; i < 30; i++) {
+      updateKinematics(plates, stats, 40, 2, rng, undefined, contact);
+      updateKinematics(free.plates, free.stats, 40, 2, rng2);
+    }
+    expect(Math.hypot(...plates[0]!.vel)).toBeLessThan(Math.hypot(...free.plates[0]!.vel) * 0.8);
+    expect(Math.cos(Math.atan2(plates[0]!.vel[1], plates[0]!.vel[0]))).toBeGreaterThan(0.8);  // still heading +x
+    expect(Math.cos(Math.atan2(plates[1]!.vel[1], plates[1]!.vel[0]))).toBeLessThan(-0.8);   // still heading -x
   });
 });
 

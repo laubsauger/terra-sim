@@ -15,10 +15,10 @@ import type { PCG32 } from '../core/rng';
 export const MIN_PLATES = 3;
 export const MAX_ALIVE = 12;
 export const ABSORB_AREA = Math.round(NCOL * 0.012);
-export const SPLIT_AREA = Math.round(NCOL * 0.24); // big plates rift, but plate identity should persist for long stretches
-export const SPLIT_COOLDOWN_MY = 60;
-export const SUTURE_CONTACT = 48;     // continental boundary cells
-export const SUTURE_WINDOWS = 10;     // sustained this many windows
+export const SPLIT_AREA = Math.round(NCOL * 0.22); // big plates rift, but plate identity should persist for long stretches
+export const SPLIT_COOLDOWN_MY = 45;
+export const SUTURE_CONTACT = 96;     // continental boundary cells (broad collision front)
+export const SUTURE_WINDOWS = 25;     // sustained this many windows
 export const RIFT_SPEED = 0.8;        // cells/My each side after a split
 export const SUTURE_MIN_AGE = 30;     // My; young rift plates never re-suture
 
@@ -226,8 +226,7 @@ export class Lifecycle {
       this.lastSplitMy = geoMy;
     } else if (op.kind === 'merge') {
       const a = plates[op.from]!, b = plates[op.into]!;
-      b.vel = [(a.vel[0] + b.vel[0]) / 2, (a.vel[1] + b.vel[1]) / 2];
-      b.heading = Math.atan2(b.vel[1], b.vel[0]);
+      // the larger plate (b, 'into') keeps its motion; averaging swung the survivor's heading (B16)
       b.continental = a.continental || b.continental;
       a.alive = false;
       this.remapValues[op.from]!.x = op.into;
