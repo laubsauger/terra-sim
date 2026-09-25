@@ -121,7 +121,7 @@ T22|.|M3 melt gen (ridge, arc, hotspot), ascent, chambers|V3
 T23|.|M3 eruption + 2D lava flow + cool/solidify into voxels|V3
 T24|x|M4 shallow water pipe model, torus wrap, quasi-steady substeps|V1,V4
 T25|x|M4 hydraulic erosion/deposit (`kGeo`) + thermal erosion|V3
-T26|.|M4 sediment layering into voxels, diagenesis, metamorphism|V21
+T26|x|M4 sediment layering into voxels, diagenesis, metamorphism|V21
 T27|.|M4 water budget: ocean+surface+vapor+ice, numeric renormalize|V4
 T28|x|M5 surfTemp: latitude cos, lapse, ice-age offset|-
 T29|x|M5 wind bands, vapor advect, orographic precip, rain shadow|V4
