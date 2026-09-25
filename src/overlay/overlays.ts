@@ -23,7 +23,8 @@ const hashColor = (id: THREE.Node<'uint'>): V3 => {
   const f = fract(h);
   return vec3(sin(f.mul(6.283)).mul(0.4).add(0.55), sin(f.mul(6.283).add(2.1)).mul(0.4).add(0.55), sin(f.mul(6.283).add(4.2)).mul(0.4).add(0.55)) as V3;
 };
-const BIOME_COLORS = [0x2b5fa8, 0xeaf2f7, 0x9aa38a, 0x37644a, 0x3f8a3a, 0x9bc15a, 0xe0c27c, 0xc7b35a, 0x1f6b2c, 0xf1dca2, 0x8f8a86]
+// ids: OCEAN ICE TUNDRA TAIGA TEMPERATE_FOREST GRASSLAND DESERT SAVANNA RAINFOREST BEACH ALPINE STEPPE SHRUBLAND COLD_DESERT
+const BIOME_COLORS = [0x2b5fa8, 0xeaf2f7, 0x9aa38a, 0x37644a, 0x3f8a3a, 0x9bc15a, 0xe0c27c, 0xc7b35a, 0x1f6b2c, 0xf1dca2, 0x8f8a86, 0xc9b56e, 0x8d9a5b, 0xb8ab98]
   .map((h) => new THREE.Color(h).convertSRGBToLinear());
 
 export const OVERLAYS: OverlayDef[] = [

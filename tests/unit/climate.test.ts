@@ -4,7 +4,7 @@ import {
   CLIMATE, DEFAULT_CLIMATE_UNIFORMS, windU, windV, faceZPos, seaLevelTemp, glacierFlux, vaporFlux, f32Quantum,
   makeClimateState, makeClimateScratch, climateTransportCpu,
 } from '../../src/sim/climateModel';
-import { Biome, BIOME_COUNT, BIOME_VEG_TARGET, classifyBiome, vegErodibilityFactor } from '../../src/sim/biomeModel';
+import { Biome, BIOME, BIOME_COUNT, BIOME_VEG_TARGET, classifyBiome, classifyBiomeVeg, climateVeg, treelineTemp, vegErodibilityFactor } from '../../src/sim/biomeModel';
 
 let seed = 987654321;
 const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
@@ -103,28 +103,74 @@ describe('latitude, temperature, wind (V1)', () => {
 });
 
 describe('biome classification (T31)', () => {
-  it('Whittaker corners', () => {
-    expect(classifyBiome(26, 0, 10, 0, 0)).toBe(Biome.DESERT);          // hot, dry
-    expect(classifyBiome(26, 0.001, 10, 0, 0)).toBe(Biome.RAINFOREST);  // hot, wet
-    expect(classifyBiome(26, 0.0002, 10, 0, 0)).toBe(Biome.SAVANNA);
-    expect(classifyBiome(12, 0.0003, 10, 0, 0)).toBe(Biome.TEMPERATE_FOREST);
-    expect(classifyBiome(12, 0.0001, 10, 0, 0)).toBe(Biome.GRASSLAND);
-    expect(classifyBiome(0, 0.0003, 10, 0, 0)).toBe(Biome.TAIGA);
-    expect(classifyBiome(-10, 0.0003, 10, 0, 0)).toBe(Biome.TUNDRA);
-    expect(classifyBiome(-10, 0.0003, 30, 0, 0)).toBe(Biome.ALPINE);
-    expect(classifyBiome(20, 0.001, 0.5, 0, 0)).toBe(Biome.BEACH);
+  const P = BIOME.P_REF;
+  // alt 2: lowland, well above the lowland treeline temperature for these climates
+  it('Whittaker bands incl. semi-arid belts', () => {
+    expect(classifyBiome(26, 0, 2, 0, 0, false)).toBe(Biome.DESERT);            // hot, dry
+    expect(classifyBiome(26, 0.1 * P, 2, 0, 0, false)).toBe(Biome.SHRUBLAND);   // hot, semi-arid
+    expect(classifyBiome(26, 0.4 * P, 2, 0, 0, false)).toBe(Biome.SAVANNA);
+    expect(classifyBiome(26, 2 * P, 2, 0, 0, false)).toBe(Biome.RAINFOREST);
+    expect(classifyBiome(16, 0.1 * P, 2, 0, 0, false)).toBe(Biome.SHRUBLAND);   // warm temperate, semi-arid
+    expect(classifyBiome(16, 0.02 * P, 2, 0, 0, false)).toBe(Biome.DESERT);
+    expect(classifyBiome(8, 0.1 * P, 2, 0, 0, false)).toBe(Biome.STEPPE);       // cool, semi-arid
+    expect(classifyBiome(8, 0.02 * P, 2, 0, 0, false)).toBe(Biome.COLD_DESERT); // cool, dry
+    expect(classifyBiome(8, 0.3 * P, 2, 0, 0, false)).toBe(Biome.GRASSLAND);
+    expect(classifyBiome(8, 0.8 * P, 2, 0, 0, false)).toBe(Biome.TEMPERATE_FOREST);
+    expect(classifyBiome(0, 0.6 * P, 2, 0, 0, false)).toBe(Biome.TAIGA);
+    expect(classifyBiome(0, 0.1 * P, 2, 0, 0, false)).toBe(Biome.STEPPE);
+    expect(classifyBiome(-15, 0.6 * P, 2, 0, 0, false)).toBe(Biome.TUNDRA);     // below the polar treeline
+  });
+  it('beach needs low ground next to open water', () => {
+    expect(classifyBiome(20, P, 0.5, 0, 0, true)).toBe(Biome.BEACH);
+    expect(classifyBiome(20, P, 0.5, 0, 0, false)).not.toBe(Biome.BEACH);
   });
   it('ice and water override climate', () => {
     expect(classifyBiome(-20, 0, 10, 0, 1)).toBe(Biome.ICE);
     expect(classifyBiome(26, 0.001, -10, 16, 0)).toBe(Biome.OCEAN);
     expect(classifyBiome(-5, 0, -10, 16, 1)).toBe(Biome.ICE); // sea ice
   });
+
+  // Treeline: a wet mid-latitude mountain climbs forest → taiga → alpine; lowland polar cold is
+  // tundra, not alpine. The life pass renders trees → shrubs → grass → rock from veg, so veg must
+  // fall smoothly across the line and reach bare rock high up.
+  const slope = (alt: number) => classifyBiomeVeg(12 - CLIMATE.LAPSE * alt, 0.8 * P, alt, 0, 0, false);
+  it('forest turns alpine above the altitude treeline; polar lowland cold is tundra', () => {
+    expect(slope(2).biome).toBe(Biome.TEMPERATE_FOREST);
+    expect(slope(16).biome).toBe(Biome.TAIGA);
+    expect(slope(30).biome).toBe(Biome.ALPINE);
+    expect(treelineTemp(30)).toBeCloseTo(BIOME.TREE_T_HIGH, 6);
+    expect(classifyBiome(-12, 0.8 * P, 8, 0, 0, false)).toBe(Biome.TUNDRA); // cold from latitude, not altitude
+  });
+  it('veg falls smoothly across the treeline to bare rock', () => {
+    // alt where the slope crosses the alpine treeline (T = T_tree): 12 - 0.6·alt = 2 → alt ≈ 16.7
+    let prev = slope(14).veg, maxStep = 0;
+    for (let alt = 14; alt <= 50; alt += 0.05) {
+      const v = slope(alt).veg;
+      expect(v).toBeLessThanOrEqual(prev + 1e-9); // never greener higher up
+      maxStep = Math.max(maxStep, prev - v);
+      prev = v;
+    }
+    expect(maxStep).toBeLessThan(0.02); // no cliff at the biome switch (0.05-voxel steps)
+    expect(slope(14).veg).toBeGreaterThan(0.6);
+    expect(slope(50).veg).toBe(0);
+  });
+  // Rain-shadow gradients are horizontal: veg must also grade smoothly with moisture, not step at
+  // the desert/steppe/grassland/forest borders.
+  it('veg rises smoothly with moisture across the Whittaker borders', () => {
+    let prev = climateVeg(15, 0), maxStep = 0;
+    for (let m = 0; m <= 1.5; m += 0.005) { const v = climateVeg(15, m); expect(v).toBeGreaterThanOrEqual(prev - 1e-12); maxStep = Math.max(maxStep, v - prev); prev = v; }
+    expect(maxStep).toBeLessThan(0.02);
+    expect(climateVeg(15, 0)).toBeLessThan(0.1);
+    expect(climateVeg(15, 1.2)).toBeGreaterThan(0.9);
+  });
   // Saves, render splats and flora index by biome id: ids are append-only.
   it('keeps persisted ids stable and the veg table complete', () => {
     expect(Biome).toEqual({ OCEAN: 0, ICE: 1, TUNDRA: 2, TAIGA: 3, TEMPERATE_FOREST: 4, GRASSLAND: 5, DESERT: 6,
-      SAVANNA: 7, RAINFOREST: 8, BEACH: 9, ALPINE: 10 });
+      SAVANNA: 7, RAINFOREST: 8, BEACH: 9, ALPINE: 10, STEPPE: 11, SHRUBLAND: 12, COLD_DESERT: 13 });
+    expect(BIOME_COUNT).toBe(14);
     expect(BIOME_VEG_TARGET.length).toBe(BIOME_COUNT);
-    expect(BIOME_VEG_TARGET[Biome.RAINFOREST]).toBeGreaterThan(BIOME_VEG_TARGET[Biome.DESERT]!);
+    expect(BIOME_VEG_TARGET[Biome.RAINFOREST]).toBeGreaterThan(BIOME_VEG_TARGET[Biome.STEPPE]!);
+    expect(BIOME_VEG_TARGET[Biome.STEPPE]).toBeGreaterThan(BIOME_VEG_TARGET[Biome.COLD_DESERT]!);
   });
   // Erosion coupling: dense cover protects soil, bare ground erodes at full rate.
   it('veg lowers erodibility: factor 1 when bare, 0.3 at full cover', () => {

@@ -229,3 +229,76 @@ test.describe.serial('climate + biome on a synthetic ridge world', () => {
     expect(m.nonFinite).toBe(0);
   });
 });
+
+// A normal generated world run through the full Sim: the biome map must be a real mix, not
+// forest-vs-desert, and the GPU classifier must agree with classifyBiomeVeg on real data.
+interface GenMetrics { land: number; share: Record<string, number>; mismatch: number; badVeg: number; distinct: number }
+let g: GenMetrics;
+
+test.describe.serial('biomes on a generated world (full sim, 1500 ticks)', () => {
+  test.beforeAll(async ({ browser }) => {
+    test.setTimeout(180_000);
+    const page = await browser.newPage();
+    await page.goto('/tests/gpu/support/blank.html');
+    g = await page.evaluate(async () => {
+      const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+      const { GpuFields } = await import('/src/core/gpu.ts');
+      const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+      const { Sim } = await import('/src/sim/sim.ts');
+      const { Params } = await import('/src/core/params.ts');
+      const { generateWorld } = await import('/src/sim/worldgen.ts');
+      const BM = await import('/src/sim/biomeModel.ts');
+      const { NX, NZ, NCOL } = await import('/src/sim/layout.ts');
+      const r = await makeRenderer();
+      const f = new GpuFields(); registerSimFields(f); f.freeze();
+      const w = generateWorld(1, { plates: 7 });
+      uploadWorld(f, w);
+      const sim = new Sim(r, f, w, new Params(), 0.05);
+      const frame = () => new Promise((res) => setTimeout(res, 0));
+      let done = 0;
+      while (done < 1500) { done += sim.runTicks(20); await frame(); }
+      // biome is the last pass of a tick and 1500 is not a stats-window end → fields are as the kernel saw them
+      const rf = async (n: string) => new Float32Array(await f.read(r, n));
+      const [surfY, water, ice, avg, veg] = [await rf('surfY'), await rf('water'), await rf('ice'), await rf('climAvg'), await rf('veg')];
+      const biome = new Uint32Array(await f.read(r, 'biome'));
+      const sea = sim.biome.uniforms.seaLevel.value;
+      const names = Object.fromEntries(Object.entries(BM.Biome).map(([k, v]) => [v, k]));
+      const cnt: Record<string, number> = {};
+      let land = 0, mismatch = 0, badVeg = 0;
+      const deep = (x: number, z: number) => water[(x & (NX - 1)) + (z & (NZ - 1)) * NX]! > BM.BIOME.OCEAN_MIN;
+      for (let i = 0; i < NCOL; i++) {
+        const x = i & (NX - 1), z = i >> 8;
+        const coastal = deep(x + 1, z) || deep(x - 1, z) || deep(x, z + 1) || deep(x, z - 1);
+        const c = BM.classifyBiomeVeg(avg[2 * i]!, avg[2 * i + 1]!, surfY[i]! - sea, water[i]!, ice[i]!, coastal);
+        if (c.biome !== biome[i]) mismatch++;
+        const b = biome[i]!;
+        if (b === BM.Biome.OCEAN || b === BM.Biome.ICE) continue;
+        land++;
+        cnt[names[b]!] = (cnt[names[b]!] ?? 0) + 1;
+        if (!(veg[i]! >= 0 && veg[i]! <= 1)) badVeg++; // veg lags its target (relaxation), so only its range is checked
+      }
+      const share: Record<string, number> = {};
+      for (const [k, v] of Object.entries(cnt)) share[k] = v / land;
+      return { land, share, mismatch, badVeg, distinct: Object.values(share).filter((s) => s >= 0.02).length };
+    });
+    await page.close();
+    console.log('generated world biome shares', JSON.stringify(g));
+  });
+
+  test('GPU biome ids match classifyBiomeVeg on the real fields', () => {
+    expect(g.mismatch).toBeLessThan(0.002 * 65536); // threshold-edge float differences only
+    expect(g.badVeg).toBe(0);
+  });
+
+  // User-facing variety: rain-shadow interiors must grade through semi-arid belts
+  // (steppe / shrubland / cold desert) instead of jumping from forest to desert.
+  test('meaningful biome mix with semi-arid transition belts', () => {
+    expect(g.land).toBeGreaterThan(10_000);
+    expect(g.distinct).toBeGreaterThanOrEqual(8);
+    const semi = (g.share.STEPPE ?? 0) + (g.share.SHRUBLAND ?? 0) + (g.share.COLD_DESERT ?? 0);
+    expect(semi).toBeGreaterThan(0.08);
+    expect(g.share.STEPPE ?? 0).toBeGreaterThan(0.02);
+    expect(g.share.SHRUBLAND ?? 0).toBeGreaterThan(0.02);
+    expect(g.share.DESERT ?? 0).toBeLessThan(0.3);
+  });
+});
