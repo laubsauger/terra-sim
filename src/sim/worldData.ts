@@ -10,6 +10,8 @@ export interface Plate {
   accum: [number, number]; // sub-cell offset carried between ticks, cells
   continental: boolean;  // majority continental crust (display/stats only; per-column type lives in voxels)
   age: number;           // My since creation
+  /** Persistent direction of travel (rad). Velocity follows it; it only random-walks slowly. */
+  heading?: number;
 }
 
 export interface WorldData {

@@ -410,7 +410,7 @@ export class Tectonics {
     const par = f.parity('plateId') as 0 | 1;
     renderer.compute(this.waterGather[par]);
     renderer.compute(this.decide[par]);
-    this.runIdU.value = this.runId >>> 0;
+    this.runIdU.value = tick >>> 0; // seed by sim tick (saved), not runId (not saved): V2/V13
     renderer.compute(this.quakeK);
     this.voxel.run(renderer);
     renderer.compute(this.waterBack);

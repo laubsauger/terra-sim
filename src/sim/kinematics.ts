@@ -17,7 +17,7 @@ export const LOCK_CONTACT = 8;
 /** Time for a fully engaged collision to match plate velocities. */
 export const LOCK_MY = 4;
 export const RELAX_MY = 10; // velocity relaxes toward target over this time
-export const HEADING_SIGMA = 0.15; // rad / sqrt(My)
+export const HEADING_SIGMA = 0.04; // rad / sqrt(My): plates keep a direction for ~100s of My
 
 export interface Bias { heading?: number; strength: number } // per plate, from controller
 
@@ -41,7 +41,8 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
     const jam = Math.min(1, (contact?.[p.id]?.reduce((s, v) => s + v, 0) ?? 0) / side);
     let speed = BASE_SPEED * (1 + SLAB_GAIN * slab) * (p.continental ? CONT_DRAG : 1) / (1 + COLLISION_BRAKE * jam);
     speed = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
-    let heading = Math.atan2(p.vel[1], p.vel[0]);
+    // persistent heading: never re-derived from a (possibly tiny, locked or collided) velocity
+    let heading = p.heading ?? Math.atan2(p.vel[1], p.vel[0]);
     // Box-Muller from PCG32 keeps the walk deterministic (V2)
     const u1 = Math.max(1e-12, rng.nextFloat()), u2 = rng.nextFloat();
     heading += Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2) * HEADING_SIGMA * Math.sqrt(windowMy);
@@ -50,6 +51,7 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
       const d = Math.atan2(Math.sin(b.heading - heading), Math.cos(b.heading - heading));
       heading += d * Math.min(1, b.strength * windowMy);
     }
+    p.heading = heading;
     const tx = Math.cos(heading) * speed, tz = Math.sin(heading) * speed;
     p.vel[0] += (tx - p.vel[0]) * a;
     p.vel[1] += (tz - p.vel[1]) * a;
@@ -82,4 +84,21 @@ export function removeNetMotion(plates: Plate[], stats: TectonicsStats, runs: nu
   if (aw <= 0) return;
   ax /= aw; az /= aw;
   for (const p of plates) if (p.alive) { p.vel[0] -= ax; p.vel[1] -= az; }
+}
+
+/**
+ * At world start: remove the common drift once (area ∝ nothing yet, so plain mean) and lock each plate's
+ * heading, so plates move apart and into each other on consistent courses instead of drifting together.
+ */
+export function initPlateMotion(plates: Plate[]): void {
+  const alive = plates.filter((p) => p.alive);
+  if (!alive.length) return;
+  const mx = alive.reduce((s, p) => s + p.vel[0], 0) / alive.length;
+  const mz = alive.reduce((s, p) => s + p.vel[1], 0) / alive.length;
+  for (const p of alive) {
+    if (p.heading !== undefined) continue; // loaded save
+    p.vel[0] -= mx; p.vel[1] -= mz;
+    if (Math.hypot(p.vel[0], p.vel[1]) < MIN_SPEED) { const a = (p.id * 2.39996) % (2 * Math.PI); p.vel = [Math.cos(a) * BASE_SPEED, Math.sin(a) * BASE_SPEED]; }
+    p.heading = Math.atan2(p.vel[1], p.vel[0]);
+  }
 }

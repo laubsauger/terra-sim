@@ -5,7 +5,7 @@ import type { Params } from '../core/params';
 import { PCG32 } from '../core/rng';
 import { createDerivePass } from './derive';
 import { Tectonics } from './tectonics';
-import { updateKinematics, removeNetMotion } from './kinematics';
+import { updateKinematics, initPlateMotion } from './kinematics';
 import { Lifecycle } from './lifecycle';
 import { createHydroPass, type HydroPass } from './hydro';
 import { createErosionPass, type ErosionPass } from './erosion';
@@ -16,6 +16,7 @@ import { CTR_QUAKE } from './fields';
 import { WilsonController } from './wilson';
 import { Diagenesis } from './diagenesis';
 import { OceanLevel } from './oceanLevel';
+import { GlacialErosion } from './glacial';
 import { GodTools } from './godTools';
 import { MantlePass } from './mantle';
 import { MagmaPass } from './magma';
@@ -54,6 +55,7 @@ export class Sim {
   private worldStats: THREE.ComputeNode;
   private diagenesis: Diagenesis;
   private ocean: OceanLevel;
+  private glacial: GlacialErosion;
   readonly god: GodTools;
   readonly mantle: MantlePass;
   readonly magma: MagmaPass;
@@ -83,6 +85,7 @@ export class Sim {
     private params: Params, readonly dtGeo: number) {
     this.derive = createDerivePass(fields);
     this.tectonics = new Tectonics(fields, world.plates);
+    initPlateMotion(this.tectonics.plates);
     this.lifecycle = new Lifecycle(fields);
     this.hydro = createHydroPass(fields, params);
     this.erosion = createErosionPass(fields, params);
@@ -91,6 +94,7 @@ export class Sim {
     this.worldStats = createWorldStats(fields);
     this.diagenesis = new Diagenesis(fields);
     this.ocean = new OceanLevel(fields);
+    this.glacial = new GlacialErosion(fields);
     this.god = new GodTools(fields);
     this.mantle = new MantlePass(fields, params, world);
     this.magma = new MagmaPass(fields, params);
@@ -162,6 +166,7 @@ export class Sim {
     if (t % EROSION_EVERY === 0) {
       this.erosion.uniforms.tick.value = t;
       this.erosion.step(r);
+      this.glacial.step(r, t, (this.params.get('erosionRate') as number) * EROSION_EVERY);
       this.derive.run(r);
     }
     // 9 diagenesis / metamorphism / aging (mass-neutral material changes)
@@ -184,7 +189,7 @@ export class Sim {
       this.wilson.update(plates, life, my);
       const tstats = Tectonics.parseStats(buf);
       updateKinematics(plates, tstats, this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
-      removeNetMotion(plates, tstats, this.prevRuns); // relative motion only; a shared drift just scrolls the world
+
       this.stats = parseWorldStats(buf);
       const q = new Int32Array(buf).subarray(CTR_QUAKE);
       const site = (key: number, n: number) => (n > 0 ? { x: key & 0xff, z: (key >> 8) & 0xff, events: n } : null);
@@ -315,7 +320,8 @@ export class Sim {
   loadState(s: SimState): void {
     this.checkState(s);
     const plates = this.tectonics.plates;
-    s.plates.forEach((p, i) => { Object.assign(plates[i]!, { ...p, vel: [...p.vel], accum: [...p.accum] }); });
+    // heading is set explicitly: an absent (dead-plate) heading must clear the target's, not keep it
+    s.plates.forEach((p, i) => { Object.assign(plates[i]!, { ...p, vel: [...p.vel], accum: [...p.accum], heading: p.heading }); });
     this.tick = s.tick;
     this.rng = PCG32.fromState(s.rng);
     this.lifecycle.loadState(s.lifecycle);

@@ -72,7 +72,7 @@ if (ERODIBILITY.length !== MAT_COUNT) throw new Error('erosion: MAT_ERODIBILITY 
 const isCrust = (m: U) => m.notEqual(uint(Mat.AIR)).and(m.notEqual(uint(Mat.PERIDOTITE))).and(m.notEqual(uint(Mat.MAGMA)));
 
 /** Integer hash → [0,1) dither (deterministic per column, tick, salt). */
-function tDither(a: U, tick: U, salt: number): THREE.Node<'float'> {
+export function tDither(a: U, tick: U, salt: number): THREE.Node<'float'> {
   const h = a.mul(uint(747796405)).add(tick.mul(uint(2891336453))).add(uint(salt * 0x9e3779b9 >>> 0)).toVar();
   h.assign(h.bitXor(h.shiftRight(uint(16))).mul(uint(0x7feb352d)));
   h.assign(h.bitXor(h.shiftRight(uint(15))).mul(uint(0x846ca68b)));
@@ -81,11 +81,11 @@ function tDither(a: U, tick: U, salt: number): THREE.Node<'float'> {
 }
 
 /** float ≥ 0 → uint(floor(v + dither)), capped. */
-const quantize = (v: THREE.Node<'float'>, dither: THREE.Node<'float'>, cap: number) =>
+export const quantize = (v: THREE.Node<'float'>, dither: THREE.Node<'float'>, cap: number) =>
   uMin(uint(floor(max(v, 0).add(dither))), uint(cap));
 
 /** Scan down for the top solid voxel. Returns y (-1 if column empty) and its packed value. */
-function scanTop(vox: Vox, x: I, z: I) {
+export function scanTop(vox: Vox, x: I, z: I) {
   const topY = int(-1).toVar();
   const topV = uint(0).toVar();
   Loop({ start: int(NY - 1), end: int(0), condition: '>=' }, ({ i }) => {
@@ -96,7 +96,7 @@ function scanTop(vox: Vox, x: I, z: I) {
 }
 
 /** Remove up to n (≤ 510) fill units from the column's crust top, never below y = 1. Returns units removed. */
-function removeTop(vox: Vox, x: I, z: I, topY: I, n: U): U {
+export function removeTop(vox: Vox, x: I, z: I, topY: I, n: U): U {
   const rem = n.toVar();
   const y = topY.toVar();
   Loop({ start: int(0), end: int(3), condition: '<' }, () => {

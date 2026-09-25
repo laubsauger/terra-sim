@@ -218,12 +218,16 @@ export class Lifecycle {
       q.alive = true; q.age = 0; q.continental = p.continental; q.accum = [0, 0];
       q.vel = [p.vel[0] + op.nx * RIFT_SPEED, p.vel[1] + op.nz * RIFT_SPEED];
       p.vel = [p.vel[0] - op.nx * RIFT_SPEED, p.vel[1] - op.nz * RIFT_SPEED];
+      // rift halves set off on their new courses
+      q.heading = Math.atan2(q.vel[1], q.vel[0]);
+      p.heading = Math.atan2(p.vel[1], p.vel[0]);
       this.opKind.value = OP_SPLIT; this.opPlate.value = op.plate; this.opInto.value = op.into;
       this.splitN.value.set(op.nx, op.nz); this.splitC.value.set(op.cx, op.cz);
       this.lastSplitMy = geoMy;
     } else if (op.kind === 'merge') {
       const a = plates[op.from]!, b = plates[op.into]!;
       b.vel = [(a.vel[0] + b.vel[0]) / 2, (a.vel[1] + b.vel[1]) / 2];
+      b.heading = Math.atan2(b.vel[1], b.vel[0]);
       b.continental = a.continental || b.continental;
       a.alive = false;
       this.remapValues[op.from]!.x = op.into;
