@@ -169,4 +169,5 @@ B13|2026-09-25|tectonic water carry re-roughened ocean faster than local pipe mo
 B14|2026-09-25|overlapping columns pooled all candidates' water onto winner → continents overriding sea threw up water mounds|V26
 B15|2026-09-26|margin crust flow let each new margin column become a sender → continents pancaked to ~24 layers, floating at sea level (world flattened just under water)|V28
 B16|2026-09-26|collision lock averaged colliding plates' velocity vectors + merges averaged too → plates stalled (0.1-0.4 cells/My), headings swung, plate count collapsed|V25
+B17|2026-09-26|orogeny raised surface by half the stacked layers in one run → mountains popped up instantly|V24
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

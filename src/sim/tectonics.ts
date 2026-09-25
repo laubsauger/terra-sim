@@ -45,6 +45,8 @@ export const MAX_CRUST_LAYERS = 100;
  * sends to the sea; without it continents thin and drown within ~400 My (B8).
  */
 export const ACCRETE_FRAC = 0.9;
+/** Max immediate surface rise from orogeny per tectonics run (layers). */
+export const MAX_UP_PER_RUN = 1;
 /** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
 export const TEC_EVERY = 4;
 
@@ -197,7 +199,9 @@ export class Tectonics {
           k.assign(uMin(uMin(gain.div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
         });
         // near the ceiling the root still grows, just downward only (isostasy settles it later)
-        const up = uMin(rootUp(k), uint(NY - 3).sub(uMin(top, uint(NY - 3)))).toVar();
+        // collided crust enters mostly as root; the surface rises at most MAX_UP_PER_RUN layers per run and
+        // isostasy lifts the rest over time, so ranges grow gradually instead of popping up (user: B17)
+        const up = uMin(uMin(rootUp(k), uint(MAX_UP_PER_RUN)), uint(NY - 3).sub(uMin(top, uint(NY - 3)))).toVar();
         const loserMass = massSum.sub(bestMass);
         // an oceanic loser means a slab went down here (arc volcanism input)
         oceanLost.assign(select(count.sub(uint(1)).greaterThan(contCount.sub(bestCont)), uint(ACT_SUBDUCT), uint(0)));
