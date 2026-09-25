@@ -241,3 +241,32 @@ test('arrow length is proportional to plate speed', async ({ page }) => {
   expect(r.fast / r.slow).toBeGreaterThan(1.6);
   expect(r.max).toBeLessThanOrEqual(0.6); // block is 2 world units wide
 });
+
+// The Overlays panel toggles must act on what is on screen by default: the Tectonics layer alone, without a data
+// overlay (they used to apply only to data overlays, so with just the plate lines on they did nothing).
+test('arrow, legend and declutter toggles act on the Tectonics layer alone', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/?seed=4');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  const state = () => page.evaluate(() => {
+    const t = (window as any).terra;
+    return { arrows: t.overlays.objects.arrows.visible, life: t.life.object.visible, tags: [...document.querySelectorAll('.terra-plate-tag')].some((e: any) => e.style.display !== 'none') };
+  });
+  await page.evaluate(() => { const o = (window as any).terra.overlays; o.select(0); o.tectonics = true; });
+  await page.waitForTimeout(600);
+  const on = await state();
+  expect(on.arrows).toBe(true);
+  expect(on.life, 'declutter is off by default: life stays under the plate lines').toBe(true);
+  await page.evaluate(() => { const o = (window as any).terra.overlays; o.arrowsVisible = false; o.declutter = true; });
+  await page.waitForTimeout(400);
+  const off = await state();
+  expect(off.arrows).toBe(false);
+  expect(off.life).toBe(false);
+  expect(off.tags).toBe(false);
+  await page.evaluate(() => { const o = (window as any).terra.overlays; o.arrowsVisible = true; o.declutter = false; o.legendVisible = false; });
+  await page.waitForTimeout(400);
+  const back = await state();
+  expect(back.arrows).toBe(true);
+  expect(back.life).toBe(true);
+  expect(back.tags, 'legend off hides the plate speed tags').toBe(false);
+});

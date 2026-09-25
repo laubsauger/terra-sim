@@ -153,7 +153,9 @@ export function createOverlays(o: OverlayOptions) {
   });
 
   let current = 0;
-  let uiVisible = true, legendOn = true, arrowsOn = true, declutterOn = true;
+  // toggles act on data overlays AND the Tectonics layer (they used to do nothing with only the layer on);
+  // declutter defaults off so the default-on Tectonics layer keeps life and clouds
+  let uiVisible = true, legendOn = true, arrowsOn = true, declutterOn = false;
   // Tectonics layer: explicit user choice per mode (normal: on by default; ambient: off unless switched on)
   let tecNormal = true, tecAmbient = false;
   const ambient = () => o.ambient?.() ?? false;
@@ -168,16 +170,17 @@ export function createOverlays(o: OverlayOptions) {
   };
   let reset = true, lastGeo = NaN, lastPrep = -1e9, lastPlates = -1e9;
   const def = () => overlayByKey(current);
-  const showArrows = () => tecOn() || (def()?.id === 'plates' && arrowsOn);
+  const showArrows = () => arrowsOn && (tecOn() || def()?.id === 'plates');
+  const showTags = () => showArrows() && legendOn && uiVisible;
   const syncVisibility = () => {
     const d = def();
     sheet.visible = !!d;
     if (faces) faces.visible = d?.id === 'heat';
     legend.setVisible(!!d && legendOn && uiVisible);
-    declutter(!!d && declutterOn);
+    declutter((!!d || tecOn()) && declutterOn);
     pill.setActive(tecOn());
     pill.setVisible(uiVisible);
-    if (!showArrows()) for (const t of tags) if (t.shown) { t.el.style.display = 'none'; t.shown = false; }
+    if (!showTags()) for (const t of tags) if (t.shown) { t.el.style.display = 'none'; t.shown = false; }
   };
 
   function select(n: number): void {
@@ -260,10 +263,10 @@ export function createOverlays(o: OverlayOptions) {
     if (Math.abs(tecFade - (tec ? 1 : 0)) < 1e-3) tecFade = tec ? 1 : 0;
     U.tecOpacity.value = tecFade;
     tecSheet.visible = tecFade > 0 && d?.id !== 'plates'; // the Plates overlay draws the same lines itself
-    fadeClouds(!!d, k);
+    fadeClouds(!!d || tec, k);
     const plates = showArrows() || d?.id === 'plates' || tecFade > 0;
-    arrows.object.visible = showArrows() || tecFade > 0;
-    U.arrowFade.value = d?.id === 'plates' && arrowsOn ? 1 : tecFade;
+    arrows.object.visible = arrowsOn && (showArrows() || tecFade > 0);
+    U.arrowFade.value = !arrowsOn ? 0 : d?.id === 'plates' ? 1 : tecFade;
     if (!d && !plates) return;
 
     U.exposure.value = o.exposure?.() ?? 1;
@@ -300,7 +303,7 @@ export function createOverlays(o: OverlayOptions) {
         legend.setNote(n ? `Arrows: plate motion, longer = faster · ${n} plates, fastest ${(fastest * CM_PER_YR_PER_CELL_MY).toFixed(1)} cm/yr.`
           : 'Arrows: plate motion, longer = faster (after the first stats window).');
       }
-      if (showArrows() && uiVisible) { refreshSurf(now); placeTags(sea); }
+      if (showTags()) { refreshSurf(now); placeTags(sea); }
     }
     if (d && legend.visible && pointer) {
       refreshSurf(now);
