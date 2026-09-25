@@ -19,3 +19,9 @@ test('missing WebGPU shows error screen with reason', async ({ page }) => {
   await expect(page.locator('.terra-error .reason')).toContainText('navigator.gpu');
   await expect(page.locator('canvas')).toHaveCount(0);
 });
+
+// V9 needs visible frame timing to be checkable at all.
+test('perf HUD reports fps', async ({ page }) => {
+  await page.goto('/');
+  await expect(page.locator('.terra-perf')).toContainText('fps', { timeout: 10_000 });
+});

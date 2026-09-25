@@ -96,7 +96,7 @@ T1|x|M0 scaffold Vite+TS strict+three+tweakpane, vitest, Playwright WebGPU harne
 T2|x|M0 renderer bootstrap: WebGPURenderer, orbit cam, WebGPU detect + error screen|V18
 T3|x|M0 PCG32 PRNG w/ serializable state|V2
 T4|x|M0 dual clock: `geoTime` f64, `ambTime` wrapped, pause geo only, speed → ticks/frame w/ budget cap|V11,V12,V17,V22
-T5|.|M0 GPU buffer registry: fixed alloc, named fields, ping-pong, timestamp-query perf HUD|V10,V9
+T5|x|M0 GPU buffer registry: fixed alloc, named fields, ping-pong, timestamp-query perf HUD|V10,V9
 T6|.|M0 param schema + Tweakpane shell + url params + time ctl bar|V20,V22,I.url,I.ui,I.time ctl
 T7|.|M1 voxel pack/unpack TSL helpers + CPU mirror, wrap index helpers|V1,V21
 T8|.|M1 worldgen from seed: torus voronoi plates, cont|ocean crust stacks, strata|V2,V6

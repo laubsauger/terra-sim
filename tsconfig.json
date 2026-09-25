@@ -12,7 +12,9 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "isolatedModules": true,
-    "noEmit": true
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "paths": { "/src/*": ["./src/*"], "/tests/*": ["./tests/*"] }
   },
   "include": ["src", "tests", "vite.config.ts", "playwright.config.ts"]
 }

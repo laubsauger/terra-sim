@@ -7,6 +7,8 @@ export interface Stage {
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
   onFrame(cb: (realDt: number) => void): void;
+  /** CPU ms spent in the previous frame (callbacks + render submit). */
+  readonly cpuMs: number;
   start(): void;
 }
 
@@ -57,9 +59,11 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
 
   const frameCbs: ((dt: number) => void)[] = [];
   let last = performance.now();
+  let cpuMs = 0;
 
   return {
     renderer, scene, camera, controls,
+    get cpuMs() { return cpuMs; },
     onFrame(cb) { frameCbs.push(cb); },
     start() {
       renderer.setAnimationLoop(() => {
@@ -69,6 +73,7 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
         for (const cb of frameCbs) cb(dt);
         controls.update();
         renderer.render(scene, camera);
+        cpuMs = performance.now() - now;
       });
     },
   };

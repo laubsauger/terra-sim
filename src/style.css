@@ -6,3 +6,4 @@ canvas { display: block; }
 .terra-error h1 { margin: 0 0 12px; font-size: 20px; font-weight: 600; }
 .terra-error .reason { color: #f0a36b; font-family: ui-monospace, monospace; font-size: 13px; }
 .terra-error .hint { color: #a9a597; font-size: 14px; line-height: 1.5; }
+.terra-perf { position: fixed; left: 12px; top: 10px; font: 11px ui-monospace, monospace; color: rgba(232,228,218,0.7); pointer-events: none; letter-spacing: 0.02em; }
