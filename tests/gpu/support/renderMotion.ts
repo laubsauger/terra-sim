@@ -46,10 +46,11 @@ async function main() {
   };
   writeWorld();
 
-  let offset = 0, runId = 0;
+  let offset = 0, runId = 0, travel = 0;
   const motion: RenderMotion = {
     get runId() { return runId; },
     plateOffsets(out: Float32Array) { out.fill(0); out[0] = offset; },
+    plateTravel(out: Float64Array) { out.fill(0); out[0] = travel; },
   };
   setRenderMotion(fields, motion);
 
@@ -72,14 +73,18 @@ async function main() {
 
   (window as unknown as { rm: unknown }).rm = {
     ready: true,
-    /** Run `frames` frames at dt with the plate moving `cellsPerSec`; returns rendered peak u per frame. */
-    async run(frames: number, dt: number, cellsPerSec: number, foreignCalls = false) {
+    /**
+     * Run `frames` frames at dt with the plate moving `cellsPerSec`; returns rendered peak u per frame.
+     * stepEvery > 1: the plate advances only every stepEvery frames (the sim runs tectonics every
+     * TEC_EVERY ticks, so at normal speed plates step every few frames).
+     */
+    async run(frames: number, dt: number, cellsPerSec: number, foreignCalls = false, stepEvery = 1) {
       snapRenderColumns(fields); updateRenderColumns(renderer, fields, 1 / 60);
       const peaks: number[] = [], heights: number[] = [], shifts: number[] = [];
       for (let f = 0; f < frames; f++) {
         // in-place uplift (isostasy / orogeny style) every 25 frames: the display must ease into it
         if (f > 0 && f % 25 === 0) { AMP += 12; writeWorld(); }
-        offset += cellsPerSec * dt;
+        if (f % stepEvery === 0) { offset += cellsPerSec * dt * stepEvery; travel += cellsPerSec * dt * stepEvery; }
         if (offset >= 1) {
           // sim step: shift plate 0's rows one cell +x (destination d takes source d−1), offset −1
           cx += 1; offset -= 1; runId++;
@@ -106,6 +111,7 @@ async function main() {
       const out: number[] = [];
       for (const par of [0, 1, 0, 1]) {
         fields.setParity('plateId', par);
+        snapRenderColumns(fields); // settled display: only the parity may differ between samples (not a gliding plate)
         updateRenderColumns(renderer, fields, 1 / 60);
         out.push((await readPeak()).u);
       }

@@ -45,6 +45,16 @@ export const MAX_CRUST_LAYERS = 100;
  * sends to the sea; without it continents thin and drown within ~400 My (B8).
  */
 export const ACCRETE_FRAC = 0.9;
+/** Rift fill thickness as a fraction of the neighbouring continental crust (B18). */
+export const RIFT_THIN = 0.6;
+/**
+ * Rift fill only while the stretched crust stays at least this thick (layers); thinner gaps open real ocean.
+ * Without the floor every gap next to thin rift crust stayed continental and continents spread over the
+ * whole world (cont 0.40 → 1.00 in 300 My), at the reservoir's expense.
+ */
+export const RIFT_MIN_THICK = 15;
+/** Stretched crust is never thicker than normal continental crust (layers): orogens next to a rift do not copy. */
+export const RIFT_MAX_THICK = 30;
 /** Max immediate surface rise from orogeny per tectonics run (layers). */
 export const MAX_UP_PER_RUN = 1;
 /** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
@@ -87,6 +97,7 @@ export class Tectonics {
    * so colliding crust delaminates back instead (mass constraint, not a param nudge: V3, V5, B10).
    */
   readonly stackGate = uniform(1);
+  private readonly travel = new Float64Array(MAX_PLATES * 2);
   private isoOn = uniform(0);
   private lastRunTick = 0;
   /** Increments on every GPU tectonics run: tecAct (src column per dst) is valid for the latest run id. */
@@ -322,6 +333,9 @@ export class Tectonics {
     const GAB = packVoxel(Mat.GABBRO, 255, 0, 0);
     const BAS = packVoxel(Mat.BASALT, 255, 0, 0);
     const GNEISS = packVoxel(Mat.GNEISS, 255, 0, FLAG_CONTINENTAL);
+    const GRAN = packVoxel(Mat.GRANITE, 255, 0, FLAG_CONTINENTAL);
+    const SED = packVoxel(Mat.SEDIMENT, 255, 0, FLAG_CONTINENTAL);
+    const ctr = this.fields.cur<'int'>('counters');
     return Fn(() => {
       const i = instanceIndex;
       If(i.greaterThanEqual(uint(NVOX)), () => { Return(); });
@@ -330,9 +344,34 @@ export class Tectonics {
       const a = act.element(c).toVar();
       const out = uint(0).toVar();
       If(a.bitAnd(uint(ACT_NEW)).notEqual(uint(0)), () => {
-        out.assign(select(y.lessThan(int(RIDGE_BASE)), uint(PERI),
-          select(y.lessThan(int(RIDGE_BASE + RIDGE_GABBRO)), uint(GAB),
-            select(y.lessThan(int(RIDGE_BASE + RIDGE_GABBRO + RIDGE_BASALT)), uint(BAS), uint(0)))));
+        // Rifting inside a continent stretches continental crust instead of opening an ocean slit: a gap
+        // with ≥ 2 continental neighbours fills with RIFT_THIN × their mean thickness (≥ ridge thickness).
+        // Repeated gap fills thin geometrically across a widening rift → tapered margins, and only after
+        // several cells does it become ocean crust. One-cell ridge slits in continents flickered on the cut
+        // faces and nicked continents (B18). Extra mass over the decide kernel's RIDGE_MASS: reservoir.
+        const { x: cx, z: cz } = tColXZ(c);
+        const sum = uint(0).toVar();
+        const nC = uint(0).toVar();
+        for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+          const n = colInfo.element(tColIdx(cx.add(dx), cz.add(dz))).toVar();
+          If(n.x.shiftRight(uint(16)).bitAnd(uint(COL_CONTINENTAL)).equal(uint(1)), () => { sum.addAssign(n.y); nC.addAssign(1); });
+        }
+        const meanT = float(sum).div(float(nC).max(1)).div(255).mul(RIFT_THIN).min(RIFT_MAX_THICK).toVar();
+        // extra mass comes from the reservoir: no rift fill while it is in debt (same gate as stacking)
+        const rift = nC.greaterThanEqual(uint(2)).and(meanT.greaterThanEqual(RIFT_MIN_THICK)).and(this.stackGate.greaterThan(0.5));
+        const T = int(select(rift, meanT.max(RIDGE_GABBRO + RIDGE_BASALT), float(RIDGE_GABBRO + RIDGE_BASALT))).toVar();
+        If(rift, () => {
+          const top = int(float(Y_COMP).add(float(T).mul((1 - RHO_CONT / RHO_MANTLE) * ISO_GAIN)).round());
+          const base = top.sub(T);
+          out.assign(select(y.lessThan(base), uint(PERI),
+            select(y.lessThan(base.add(T.div(3))), uint(GNEISS),
+              select(y.lessThan(top.sub(1)), uint(GRAN), select(y.lessThan(top), uint(SED), uint(0))))));
+          If(y.equal(int(0)), () => { atomicAdd(ctr.element(CTR_RESERVOIR), T.mul(255).sub(int(RIDGE_MASS)).negate()); });
+        }).Else(() => {
+          out.assign(select(y.lessThan(int(RIDGE_BASE)), uint(PERI),
+            select(y.lessThan(int(RIDGE_BASE + RIDGE_GABBRO)), uint(GAB),
+              select(y.lessThan(int(RIDGE_BASE + RIDGE_GABBRO + RIDGE_BASALT)), uint(BAS), uint(0)))));
+        });
       }).Else(() => {
         const s = a.bitAnd(uint(0xffff));
         const k = int(a.shiftRight(uint(K_SHIFT)).bitAnd(uint(63)));
@@ -379,6 +418,8 @@ export class Tectonics {
       if (p.alive) {
         p.accum[0] += p.vel[0] * dtGeo * speedMul;
         p.accum[1] += p.vel[1] * dtGeo * speedMul;
+        this.travel[p.id * 2]! += p.vel[0] * dtGeo * speedMul;
+        this.travel[p.id * 2 + 1]! += p.vel[1] * dtGeo * speedMul;
         // whole cells only; the gather kernel handles any integer shift
         sx = Math.trunc(p.accum[0]); p.accum[0] -= sx;
         sz = Math.trunc(p.accum[1]); p.accum[1] -= sz;
@@ -431,6 +472,13 @@ export class Tectonics {
   plateOffsets(out: Float32Array): void {
     for (let i = 0; i < MAX_PLATES; i++) { const p = this.plates[i]!; out[i * 2] = p.alive ? p.accum[0] : 0; out[i * 2 + 1] = p.alive ? p.accum[1] : 0; }
   }
+
+  /**
+   * Render continuity: unwrapped distance (cells, X,Z) each plate has moved since this Tectonics was built.
+   * Plates only move on tectonics runs (every TEC_EVERY ticks), so the display eases this in real time and
+   * draws at accum + (eased − travel): smooth motion even when a run lands every few frames.
+   */
+  plateTravel(out: Float64Array): void { out.set(this.travel); }
 
   /** Lower-crust flow. Needs fresh colInfo: call after the post-tectonics derive, then derive again. */
   flow(renderer: THREE.WebGPURenderer): void { this.crustFlow.run(renderer); }

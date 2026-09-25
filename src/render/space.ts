@@ -100,6 +100,8 @@ export interface RenderMotion {
   readonly runId: number;
   /** (x, z) sub-cell offset per plate, cells in −1..1, MAX_PLATES pairs. */
   plateOffsets(out: Float32Array): void;
+  /** Unwrapped distance moved per plate (cells, MAX_PLATES pairs); eased for display. */
+  plateTravel?(out: Float64Array): void;
 }
 
 type V4 = THREE.Node<'vec4'>;
@@ -112,6 +114,11 @@ interface Display {
   remapOn: THREE.UniformNode<'uint', number>;
   offsets: THREE.Vector2[];
   offsetArr: Float32Array;
+  travel: Float64Array;   // sim plate travel (cells)
+  travelEased: Float64Array; // shown plate travel, glides over the sim step interval
+  travelPrev: Float64Array;
+  travelFrom: Float64Array; // shown travel when the latest step arrived
+  clock: number; lastStep: number; stepGap: number; // real seconds
   src: RenderMotion | null;
   lastRun: number;
   snap: boolean;
@@ -254,6 +261,8 @@ function display(fields: GpuFields): Display {
 
   d = {
     cols, heat, bioG, bioV, volc, motion, alpha, remapOn, offsets, offsetArr: new Float32Array(MAX_PLATES_R * 2),
+    travel: new Float64Array(MAX_PLATES_R * 2), travelEased: new Float64Array(MAX_PLATES_R * 2),
+    travelPrev: new Float64Array(MAX_PLATES_R * 2), travelFrom: new Float64Array(MAX_PLATES_R * 2), clock: 0, lastStep: 0, stepGap: 1 / 60,
     kernels: [remap(cols, heat, sCols, sHeat), remap(bioG, bioV, sBioG, sBioV), remapVolc, kCols, kHeat, kBio, kVolc, kMotion],
     src: null, lastRun: -1, snap: true, initialised: false,
   };
@@ -289,11 +298,36 @@ export function updateRenderColumns(renderer: THREE.WebGPURenderer, fields: GpuF
   const run = d.src ? d.src.runId : -1;
   d.remapOn.value = d.src && run !== d.lastRun ? 1 : 0;
   d.lastRun = run;
-  d.alpha.value = d.snap || dt === undefined ? 1 : 1 - Math.exp(-Math.max(dt, 0) / DISPLAY_TAU);
+  const alpha = d.snap || dt === undefined ? 1 : 1 - Math.exp(-Math.max(dt, 0) / DISPLAY_TAU);
+  d.alpha.value = alpha;
   d.snap = false;
   if (d.src) {
     d.src.plateOffsets(d.offsetArr);
-    for (let k = 0; k < d.offsets.length; k++) d.offsets[k]!.set(d.offsetArr[k * 2]!, d.offsetArr[k * 2 + 1]!);
+    // Plates advance in steps (one per tectonics run, often only every few frames). The display glides
+    // linearly from where it is to the new travel over the measured time between steps (constant speed,
+    // lag ≈ one step, ≤ ~0.5 cell, so plate boundaries do not tear) and draws at accum + (shown − travel):
+    // a whole-cell shift still cancels exactly against the remap. At high speed the sim runs in bursts (one
+    // stats window, then a readback wait); the glide spreads those too. > 6 cells behind (load, teleport) → jump.
+    const tr = d.travel, te = d.travelEased;
+    d.src.plateTravel?.(tr);
+    const now = (d.clock += Math.max(dt ?? 0, 0));
+    let moved = false;
+    for (let k = 0; k < tr.length; k++) if (tr[k] !== d.travelPrev[k]) { moved = true; break; }
+    if (moved) {
+      d.stepGap += (Math.min(now - d.lastStep, 0.5) - d.stepGap) * 0.3;
+      d.lastStep = now - Math.max(dt ?? 0, 0); // the step landed during this frame: glide from the frame start
+      d.travelPrev.set(tr);
+      d.travelFrom.set(te);
+    }
+    // glide 20 % longer than the gap: still moving when the next step lands (no stop frame), lag stays bounded
+    const gap = Math.min(0.6, Math.max(1 / 60, d.stepGap * 1.2));
+    const u = alpha === 1 ? 1 : Math.min(1, (now - d.lastStep) / gap);
+    for (let k = 0; k < tr.length; k++) {
+      te[k] = Math.abs(tr[k]! - d.travelFrom[k]!) > 6 ? tr[k]! : d.travelFrom[k]! + (tr[k]! - d.travelFrom[k]!) * u;
+    }
+    for (let k = 0; k < d.offsets.length; k++) {
+      d.offsets[k]!.set(d.offsetArr[k * 2]! + te[k * 2]! - tr[k * 2]!, d.offsetArr[k * 2 + 1]! + te[k * 2 + 1]! - tr[k * 2 + 1]!);
+    }
   }
   for (const k of d.kernels) renderer.compute(k);
 }
@@ -301,6 +335,11 @@ export function updateRenderColumns(renderer: THREE.WebGPURenderer, fields: GpuF
 /** Refresh every field set any render material samples (stage.ts calls this each frame with its dt). */
 export function updateAllRenderColumns(renderer: THREE.WebGPURenderer, dt?: number): void {
   for (const f of activeFields) updateRenderColumns(renderer, f, dt);
+}
+
+/** Displayed (eased) plate offsets in cells, [x0, z0, x1, z1, …], for tests and tools. */
+export function displayPlateOffsets(fields: GpuFields): number[] {
+  return display(fields).offsets.flatMap((v) => [v.x, v.y]);
 }
 
 /** Display buffers, for tests and tools (read-only use). */

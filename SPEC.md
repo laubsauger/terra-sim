@@ -96,6 +96,8 @@ V27: standing water deeper than ~2 voxels ⊥ erosion capacity; sediment settles
 V28: thermal talus ≥ 2.5 layers/cell subaerial, ×2 submarine; stretched margins taper via lower-crust flow into oceanic neighbours.
 V29: reservoir debt ⊥ grows unbounded: accretion takes only slab excess over ridge mass; collided crust stacking fades to 0 over 1 layer/col of debt (window snapshot, deterministic).
 V30: ∀ column surfY ≥ deepest initial crust base & y=0 always PERIDOTITE (no holes through the world).
+V31: every GPU test fails on WGSL / pipeline validation errors: a kernel that does not compile must never pass as a sim that merely does less.
+V32: displayed plate motion moves every frame at ≈ plate speed; sim steps (every TEC_EVERY ticks, bursts at stats-window stalls) glide over the measured step interval.
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
 ## §T TASKS
@@ -170,4 +172,7 @@ B14|2026-09-25|overlapping columns pooled all candidates' water onto winner → 
 B15|2026-09-26|margin crust flow let each new margin column become a sender → continents pancaked to ~24 layers, floating at sea level (world flattened just under water)|V28
 B16|2026-09-26|collision lock averaged colliding plates' velocity vectors + merges averaged too → plates stalled (0.1-0.4 cells/My), headings swung, plate count collapsed|V25
 B17|2026-09-26|orogeny raised surface by half the stacked layers in one run → mountains popped up instantly|V24
+B18|2026-09-27|diverging continental plates opened one-cell ocean ridge slits inside continents → vertical flicker streaks on cut faces; rift fill (RIFT_THIN × neighbours, ≥ RIFT_MIN_THICK, ≤ RIFT_MAX_THICK, reservoir-gated) stretches crust instead|V29
+B19|2026-09-27|TSL dropped a float cast inside uMax/select (f32 / u32) → tectonics voxel kernel invalid WGSL, never ran; plates, crust and land decayed (cont 0.39 → 0 in 50 My), all tests green|V31
+B20|2026-09-27|plate display offset followed sim steps instantly; at normal speed a 0.1-0.3 cell step every few frames read as jerking plates|V32
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

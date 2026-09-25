@@ -162,6 +162,22 @@ test('rendered mountain moves continuously across whole-cell plate shifts', asyn
   expect(problems).toEqual([]);
 });
 
+// Plates step only on tectonics runs (every 4 ticks), i.e. every few frames at normal speed; the user saw
+// plates jerk on every run. The display must spread each step over the frames until the next one.
+test('plates stepping every few frames still glide smoothly on screen', async ({ page }) => {
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  // 4 cells/s, one 0.33-cell step every 5 frames: an unsmoothed display jumps 0.33 then holds 4 frames
+  const { peaks } = await page.evaluate(() => (window as any).rm.run(90, 1 / 60, 4, false, 5));
+  const steps = peaks.slice(21).map((p: number, i: number) => p - peaks[20 + i]); // after the easing settles
+  const mean = steps.reduce((a: number, b: number) => a + b, 0) / steps.length;
+  expect(mean, 'average speed ≈ 4/60 cell per frame').toBeGreaterThan(0.05);
+  for (const s of steps) {
+    expect(s, `steps ${steps.map((v: number) => v.toFixed(3))}`).toBeLessThan(0.16);
+    expect(s, `steps ${steps.map((v: number) => v.toFixed(3))}`).toBeGreaterThan(0.01); // never holds still
+  }
+});
+
 // Regression (faces alternated between two cross-sections every few frames): plate offsets hovering
 // around ±0.5 cell perpendicular to a face must not switch the face to another column / the far side.
 test('cut face stays stable while plate offsets hover around half a cell', async ({ page }) => {

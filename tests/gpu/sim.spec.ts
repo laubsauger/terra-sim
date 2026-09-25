@@ -1,6 +1,14 @@
 import { test, expect } from '@playwright/test';
 
-test.beforeEach(async ({ page }) => { await page.goto('/tests/gpu/support/blank.html'); });
+// B19: an invalid WGSL kernel only logs an error and the pass silently stops running; every sim test
+// here must fail on GPU validation errors instead of passing on a half-dead sim.
+let gpuErrors: string[] = [];
+test.beforeEach(async ({ page }) => {
+  gpuErrors = [];
+  page.on('console', (m) => { if (m.type() === 'error' && /webgpu|wgsl|shader|pipeline|validation/i.test(m.text())) gpuErrors.push(m.text().slice(0, 300)); });
+  await page.goto('/tests/gpu/support/blank.html');
+});
+test.afterEach(() => { expect(gpuErrors, 'GPU validation errors').toEqual([]); });
 
 // V2 + V12: the world after N ticks must not depend on how ticks were split across frames
 // or on when async readbacks happened to land.

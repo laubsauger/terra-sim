@@ -23,7 +23,9 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
     uploadWorld(f, w);
     const sim = new Sim(r, f, w, new Params(), 0.05);
     const frame = () => new Promise((res) => setTimeout(res, 0));
-    const samples: { my: number; land: number; ocean: number; relief: number; plates: number; finite: boolean; phase: string; islands: number }[] = [];
+    const samples: { my: number; land: number; ocean: number; relief: number; plates: number; finite: boolean; phase: string; islands: number; water: number; res: number }[] = [];
+    const waterTotal = async () => { let t = 0; for (const n of ['water', 'vapor', 'ice']) for (const v of new Float32Array(await f.read(r, n))) t += v; return t; };
+    const W0 = await waterTotal();
     let minPlates = 99, maxPlates = 0;
     const sample = async () => {
       const s = new Float32Array(await f.read(r, 'surfY'));
@@ -41,7 +43,9 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
       }
       heights.sort((a, b) => a - b);
       const p99 = heights.length ? heights[Math.floor(heights.length * 0.99)]! : sea;
-      samples.push({ my: sim.geoMy, land: land / s.length, ocean: ocean / s.length, relief: p99 - sea, plates: sim.alivePlates(), finite, phase: sim.wilson.state.phase, islands });
+      const res = new Int32Array(await f.read(r, 'counters'))[0]! / 255 / s.length; // mantle reservoir, layers per column
+      samples.push({ my: sim.geoMy, land: land / s.length, ocean: ocean / s.length, relief: p99 - sea, plates: sim.alivePlates(), finite, phase: sim.wilson.state.phase, islands,
+        water: Math.abs((await waterTotal()) - W0) / W0, res });
     };
     const t0 = performance.now();
     let next = 0;
@@ -62,6 +66,14 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
   console.log(`soak ${SOAK_MY} My in ${res.seconds.toFixed(0)} s, eruptions=${res.eruptions}, cycles=${res.cycles}, plates ${res.minPlates}-${res.maxPlates}, unhandled events=${res.unhandled}`);
   for (const s of res.samples.filter((_, i) => i % 10 === 0)) console.log(JSON.stringify(s));
 
+  // The collapse the user saw (land 27% → 7%, water −11%, reservoir 7 layers/col) starts in the first
+  // 100 My, so balance holds from the first samples, not only after a long spin-up.
+  const early = res.samples.filter((s) => s.my > 20);
+  for (const s of early) {
+    expect(s.water, `water drift at ${s.my.toFixed(0)} My`).toBeLessThan(1e-3); // V4
+    expect(Math.abs(s.res), `reservoir at ${s.my.toFixed(0)} My`).toBeLessThan(3); // crust is not parked in the mantle (V3)
+    expect(s.land, `land at ${s.my.toFixed(0)} My`).toBeGreaterThanOrEqual(0.12);
+  }
   const late = res.samples.filter((s) => s.my > 200); // allow spin-up
   for (const s of late) {
     expect(s.finite).toBe(true);                               // V7

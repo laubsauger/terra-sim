@@ -228,3 +228,16 @@ test('plate colours are stable per plate and split children inherit a related co
   expect(res.dChildParent).toBeGreaterThan(6);    // tellable apart …
   expect(res.dChildParent).toBeLessThan(res.dChildOld); // … but closer to the parent than the slot's unrelated default
 });
+
+// Users compare plate speeds by arrow length: a plate 3× faster must look clearly longer, not nearly equal
+// (√ scaling showed 0.9 and 3.0 cm/yr as 0.52 vs 0.72), and the fastest arrow must not dwarf the block.
+test('arrow length is proportional to plate speed', async ({ page }) => {
+  await page.goto('/tests/gpu/support/blank.html');
+  const r = await page.evaluate(async () => {
+    const { arrowLength, MIN_LEN, MAX_LEN } = await import('/src/overlay/arrows.ts');
+    return { slow: arrowLength(0.47), fast: arrowLength(1.5), max: arrowLength(99), min: MIN_LEN, top: MAX_LEN };
+  });
+  expect((r.fast - r.min) / (r.slow - r.min)).toBeCloseTo(1.5 / 0.47, 1);
+  expect(r.fast / r.slow).toBeGreaterThan(1.6);
+  expect(r.max).toBeLessThanOrEqual(0.6); // block is 2 world units wide
+});

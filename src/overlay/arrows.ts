@@ -17,16 +17,16 @@ type V3 = THREE.Node<'vec3'>;
 
 /** Arrow width (world units); length runs from MIN_LEN (still) to MAX_LEN at SPEED_FULL. */
 export const ARROW_W = 0.105;
-export const MIN_LEN = 0.26;
-export const MAX_LEN = 0.85;
+export const MIN_LEN = 0.15; // head plus a stub of shaft
+export const MAX_LEN = 0.6;
 /** cells/My at which an arrow reaches MAX_LEN (kinematics MAX_SPEED). */
 export const SPEED_FULL = 2.4;
 /** Height above the highest ground under the arrow (world units). */
 const LIFT = 0.1;
 const HEAD = 0.95, RIGID = 0.2; // local units (× ARROW_W): head length, unstretched shaft next to the head
 
-/** √ length scaling: slow plates stay distinguishable, fast ones do not dwarf the block. */
-export const arrowLength = (speed: number) => MIN_LEN + (MAX_LEN - MIN_LEN) * Math.sqrt(Math.min(1, speed / SPEED_FULL));
+/** Linear length scaling: relative plate speeds read directly off the arrows (√ scaling made them all look alike). */
+export const arrowLength = (speed: number) => MIN_LEN + (MAX_LEN - MIN_LEN) * Math.min(1, Math.max(0, speed) / SPEED_FULL);
 
 function arrowGeometry(): THREE.BufferGeometry {
   const s = new THREE.Shape();
