@@ -48,13 +48,15 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
       if (sim.geoMy >= next) { await sample(); next += 50; }
       await frame();
     }
+    const magma = await sim.magma.readStats(r);
     return {
+      eruptions: magma.eruptions,
       samples, minPlates, maxPlates, cycles: sim.wilson.state.cycles, unhandled: sim.unhandledEvents,
       events: sim.events.log.length, seconds: (performance.now() - t0) / 1000,
     };
   }, { SOAK_MY, seed: Number(process.env.SOAK_SEED ?? 3) });
 
-  console.log(`soak ${SOAK_MY} My in ${res.seconds.toFixed(0)} s, cycles=${res.cycles}, plates ${res.minPlates}-${res.maxPlates}, unhandled events=${res.unhandled}`);
+  console.log(`soak ${SOAK_MY} My in ${res.seconds.toFixed(0)} s, eruptions=${res.eruptions}, cycles=${res.cycles}, plates ${res.minPlates}-${res.maxPlates}, unhandled events=${res.unhandled}`);
   for (const s of res.samples.filter((_, i) => i % 10 === 0)) console.log(JSON.stringify(s));
 
   const late = res.samples.filter((s) => s.my > 200); // allow spin-up
@@ -69,4 +71,5 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
   expect(res.maxPlates).toBeLessThanOrEqual(12);
   expect(res.cycles).toBeGreaterThanOrEqual(1);                // at least one full Wilson cycle
   expect(res.unhandled).toBe(0);                               // every event kind has a handler
+  expect(res.eruptions).toBeGreaterThanOrEqual(SOAK_MY / 50);  // ≥1 eruption per 50 My
 });

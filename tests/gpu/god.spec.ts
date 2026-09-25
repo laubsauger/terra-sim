@@ -19,7 +19,15 @@ test('uplift, subsidence and meteor keep crust + reservoir exact and shape the l
     uploadWorld(f, w);
     const P = new Params(); P.set('erosionRate', 0); P.set('thermalErosion', 0); P.set('eventRate', 0);
     const sim = new Sim(r, f, w, P, 0.05);
-    const total = async () => { const ci = new Uint32Array(await f.read(r, 'colInfo')); let m = 0; for (let i = 1; i < ci.length; i += 2) m += ci[i]!; return m + new Int32Array(await f.read(r, 'counters'))[0]!; };
+    // M_total (V3): crust + reservoir + chamber magma + pending melt + lava
+    const total = async () => {
+      const ci = new Uint32Array(await f.read(r, 'colInfo'));
+      const mc = new Uint32Array(await f.read(r, 'magCol'));
+      const lv = new Uint32Array(await f.read(r, 'lava'));
+      let m = 0;
+      for (let i = 1; i < ci.length; i += 2) m += ci[i]! + mc[i - 1]! + mc[i]! + lv[i - 1]!;
+      return m + new Int32Array(await f.read(r, 'counters'))[0]!;
+    };
     const surf = async () => new Float32Array(await f.read(r, 'surfY'));
     const frame = () => new Promise((res) => setTimeout(res, 0));
     const run = async (n: number) => { let d = 0; while (d < n) { d += sim.runTicks(8); await frame(); } };

@@ -15,6 +15,12 @@ import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats
 import { WilsonController } from './wilson';
 import { Diagenesis } from './diagenesis';
 import { GodTools } from './godTools';
+import { MantlePass } from './mantle';
+import { MagmaPass } from './magma';
+import { LavaPass } from './lava';
+import { LAVA } from './magmaModel';
+import { PLUME, type Plume } from './mantleModel';
+import { colIdx } from './layout';
 import { EventScheduler, iceAgeForcing, type GeoEvent, type EventKind } from './events';
 import type { WorldData } from './worldData';
 // save/load (T50)
@@ -44,6 +50,9 @@ export class Sim {
   private worldStats: THREE.ComputeNode;
   private diagenesis: Diagenesis;
   readonly god: GodTools;
+  readonly mantle: MantlePass;
+  readonly magma: MagmaPass;
+  readonly lava: LavaPass;
   /** Plate a god-tool split asked for; consumed at the next window end ahead of the Wilson rift. */
   private godSplit: number | undefined;
   stats: WorldStats | null = null;
@@ -75,9 +84,16 @@ export class Sim {
     this.worldStats = createWorldStats(fields);
     this.diagenesis = new Diagenesis(fields);
     this.god = new GodTools(fields);
+    this.mantle = new MantlePass(fields, params, world);
+    this.magma = new MagmaPass(fields, params);
+    this.lava = new LavaPass(fields);
     this.kGeoBase = this.erosion.uniforms.kGeo.value;
     this.erosion.uniforms.kGeo.value = this.kGeoBase * EROSION_EVERY;
     this.rng = new PCG32(world.seed, 0x7ec70);
+    // magma scans worldgen chambers, then mantle/crust temperatures start from fresh surfY
+    this.magma.init(renderer);
+    this.derive.run(renderer);
+    this.mantle.init(renderer);
     this.events = new EventScheduler(world.seed);
     this.handlers.set('iceAge', (e) => this.iceAges.push({ start: e.my, durationMy: e.durationMy ?? 20, magnitude: e.magnitude }));
     // god tools + random meteors share handlers (V16); voxel edits need a derive afterwards
@@ -85,6 +101,15 @@ export class Sim {
     this.handlers.set('meteor', (e) => { this.god.meteor(renderer, e.x, e.z, e.radius ?? 4 + 8 * e.magnitude, 1); this.derive.run(renderer); });
     this.handlers.set('storm', (e) => { this.god.rainStorm(renderer, e.x, e.z, e.radius ?? 20, e.magnitude); });
     this.handlers.set('split', (e) => { this.godSplit = e.magnitude; });
+    // volcanism events: lava drawn from the reservoir (V16); new plumes fixed in the mantle frame
+    this.handlers.set('volcano', (e) => { this.lava.inject(renderer, colIdx(e.x, e.z), Math.round(255 * 6 * e.magnitude), LAVA.tBasalt); });
+    this.handlers.set('floodBasalt', (e) => {
+      for (let i = 0; i < 9; i++) this.lava.inject(renderer, colIdx(e.x + (i % 3) * 3 - 3, e.z + Math.floor(i / 3) * 3 - 3), Math.round(255 * 5 * e.magnitude), LAVA.tBasalt);
+    });
+    this.handlers.set('hotspot', (e) => {
+      const p: Plume = { x: e.x, z: e.z, r: PLUME.radius[0] + (PLUME.radius[1] - PLUME.radius[0]) * Math.min(1, e.magnitude / 1.5), age: 0, life: PLUME.life[0] };
+      this.mantle.plumes.plumes.push(p);
+    });
     this.derive.run(renderer);
   }
 
@@ -115,7 +140,13 @@ export class Sim {
       this.derive.run(r);
       this.tectonics.flow(r);
       this.derive.run(r);
+      this.magma.afterTectonics(r);
     }
+    // 2 mantle + crust heat, 5 magma, 6 lava; they edit vox in place → derive every tick
+    this.mantle.step(r, t, this.dtGeo);
+    this.magma.step(r, t, this.dtGeo);
+    this.lava.step(r, t, this.dtGeo);
+    this.derive.run(r);
     // 7 climate (evap/precip/ice into water), 8 hydrology + erosion (erosion needs fresh surfY)
     this.climate.step(r);
     this.hydro.step(r, HYDRO_SUBSTEPS);
@@ -225,6 +256,7 @@ export class Sim {
       prevRuns: this.prevRuns,
       tecLastRunTick: tec.lastRunTick,
       godSplit: this.godSplit ?? null,
+      plumes: this.mantle.plumes.getState(),
       pendingCounters: this.pendingResult ? [...new Int32Array(this.pendingResult)] : null,
       lastCounters: this.lastCounters ? [...this.lastCounters] : null,
       uniforms: {
@@ -247,6 +279,7 @@ export class Sim {
     if (!Array.isArray(o.iceAges)) bad('iceAges');
     for (const k of ['pendingCounters', 'lastCounters']) if (o[k] !== null && !Array.isArray(o[k])) bad(k);
     if (o.godSplit !== null && typeof o.godSplit !== 'number') bad('godSplit');
+    if (typeof o.plumes !== 'object' || o.plumes === null) bad('plumes');
     if (typeof (this.tectonics as unknown as { lastRunTick: unknown }).lastRunTick !== 'number') {
       throw new Error('Sim state: Tectonics.lastRunTick not found (renamed?); update Sim.getState/loadState');
     }
@@ -268,6 +301,7 @@ export class Sim {
     this.prevRuns = s.prevRuns;
     (this.tectonics as unknown as { lastRunTick: number }).lastRunTick = s.tecLastRunTick;
     this.godSplit = s.godSplit ?? undefined;
+    this.mantle.plumes.setState(s.plumes);
     // a stale in-flight read (pre-load) is dropped: its then() checks this.pending identity
     this.pending = null;
     this.pendingResult = s.pendingCounters ? Int32Array.from(s.pendingCounters).buffer : null;
@@ -296,6 +330,8 @@ export interface SimState {
   tecLastRunTick: number;
   /** God-tool split request waiting for the next window end. */
   godSplit: number | null;
+  /** Mantle plumes + their rng (mantleModel PlumeSet). */
+  plumes: { plumes: Plume[]; rng: RngState };
   /** Counters snapshot issued at the last window end, applied at the next one. null before the first window. */
   pendingCounters: number[] | null;
   lastCounters: number[] | null;

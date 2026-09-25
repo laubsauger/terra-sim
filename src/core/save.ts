@@ -40,7 +40,7 @@ const PREFIX_BYTES = 24;
  * for fields that feed the hash). Candidates from the magma work, to add once verified: magColTmp,
  * arcTmp, lavaOut.
  */
-export const SAVE_EXCLUDE: ReadonlySet<string> = new Set(['waterTmp', 'tecAct', 'sedRatio', 'talusOut', 'climScratch']);
+export const SAVE_EXCLUDE: ReadonlySet<string> = new Set(['waterTmp', 'tecAct', 'sedRatio', 'talusOut', 'climScratch', 'probe']); // magma temps (magColTmp, arcTmp, lavaOut, slabIn) may carry across ticks: saved
 
 const STRIDE: Record<FieldType, number> = { float: 4, uint: 4, int: 4, vec2: 8, vec4: 16, uvec2: 8, uvec4: 16, ivec2: 8 };
 

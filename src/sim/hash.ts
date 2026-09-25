@@ -7,7 +7,7 @@ export function fnv1a(bytes: Uint8Array, h = 0x811c9dc5): number {
   return h >>> 0;
 }
 
-export const HASH_FIELDS = ['vox', 'plateId', 'crustAge', 'water', 'sedSusp', 'vapor', 'ice', 'veg', 'counters'] as const;
+export const HASH_FIELDS = ['vox', 'plateId', 'crustAge', 'water', 'sedSusp', 'vapor', 'ice', 'veg', 'magCol', 'arc', 'lava', 'mantle', 'crustTemp', 'magmaCtr', 'counters'] as const;
 
 export async function hashFields(renderer: THREE.WebGPURenderer, fields: GpuFields, names: readonly string[] = HASH_FIELDS): Promise<string> {
   let h = 0x811c9dc5;

@@ -1,0 +1,307 @@
+import { test, expect } from '@playwright/test';
+
+test.beforeEach(async ({ page }) => { await page.goto('/tests/gpu/support/blank.html'); });
+
+// V3: magma and lava are budget members. Every fill unit melted out of the reservoir, emplaced in a chamber,
+// erupted, flowed, frozen, crystallized — or destroyed with a subducted column and credited back — must add
+// up exactly, or crust mass drifts over millions of ticks. The scenario exercises all paths: a plume under an
+// ocean plate that is subducting under a continent (chambers ride into the trench), arc volcanism, ridge lava.
+test('V3: crust + reservoir + magma + lava exactly conserved through melt, eruptions, flow, subduction; V7 finite', async ({ page }) => {
+  test.setTimeout(180_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const r = await makeRenderer();
+    const w = twoPlateWorld([3, 0], [0, 0]);
+    w.mantleReservoir = 50_000_000;
+    const rig = await makeMagmaRig(r, w, { mantle: { plumes: [{ x: 80, z: 128, r: 9, age: 20, life: 1e9 }], evolve: false } });
+    const b0 = await rig.budget();
+    const totals: number[] = [];
+    const mismatches: number[] = [];
+    for (let k = 0; k < 4; k++) {
+      rig.step(200);
+      const b = await rig.budget();
+      totals.push(b.total);
+      mismatches.push(b.cacheMismatch);
+    }
+    const st = await rig.stats();
+    const b1 = await rig.budget();
+    let finite = true;
+    for (const n of ['mantle', 'heatFlow', 'crustTemp', 'arc', 'surfY']) {
+      const a = await rig.readF(n);
+      for (let i = 0; i < a.length; i++) if (!Number.isFinite(a[i]!)) { finite = false; break; }
+    }
+    return { t0: b0.total, totals, mismatches, chambers: b1.chambers, pending: b1.pending, lava: b1.lava, st, finite };
+  });
+  for (const t of res.totals) expect(t).toBe(res.t0);
+  // magCol.x (what eruptions and the tectonics fix-up trust) must equal the MAGMA voxels, column by column
+  for (const m of res.mismatches) expect(m).toBe(0);
+  expect(res.finite).toBe(true);
+  expect(res.st.eruptions).toBeGreaterThan(100);
+  expect(res.st.returned).toBeGreaterThan(0);   // chambers carried into the trench were credited back
+  expect(res.st.solidified).toBeGreaterThan(0);
+  expect(res.st.frozen).toBeGreaterThan(0);
+  expect(res.chambers + res.pending).toBeGreaterThan(0);
+});
+
+// A plume fixed in the mantle frame under a moving plate must leave a line of volcanic edifices carried
+// downstream with the plate, youngest over the plume and oldest farthest away (Hawaii–Emperor). If chambers
+// or rock did not ride with the plate, or melt did not follow the mantle frame, there would be one blob.
+test('hotspot under a moving plate leaves a chain, oldest farthest; hotspot rock stays oceanic', async ({ page }) => {
+  test.setTimeout(180_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    // both plates drift east at 2 cells/My: rigid translation, no convergence, no ridges
+    const w = twoPlateWorld([2, 0], [2, 0]);
+    w.mantleReservoir = 50_000_000;
+    const PX = 100;
+    const rig = await makeMagmaRig(r, w, { mantle: { plumes: [{ x: PX, z: 128, r: 9, age: 20, life: 1e9 }], evolve: false } });
+    const profile = async () => {
+      const s = await rig.readF('surfY');
+      const on = new Array(256).fill(0), off = new Array(256).fill(0);
+      for (let x = 0; x < 256; x++) for (let z = 0; z < 256; z++) {
+        const e = s[L.colIdx(x, z)]! - 61; // ocean floor was flat at 61
+        if (Math.abs(z - 128) <= 10) on[x] = Math.max(on[x], e); else if (Math.abs(z - 128) > 40) off[x] = Math.max(off[x], e);
+      }
+      return { on, off };
+    };
+    const farEnd = (on: number[]) => { let x = PX; while (x < 250 && Math.max(on[x + 1]!, on[x + 2]!, on[x + 3]!) >= 1) x++; return x; };
+    rig.step(300); // 15 My → plate moved ~30 cells
+    const p1 = await profile();
+    rig.step(300); // 30 My → ~60 cells
+    const p2 = await profile();
+    // material check along the chain: everything above the old floor is oceanic (no continental flag)
+    const vox = await rig.readU('vox');
+    let volcanic = 0, flagged = 0;
+    for (let x = PX; x < PX + 50; x++) for (let z = 118; z <= 138; z++) for (let y = 61; y < L.NY; y++) {
+      const v = vox[L.voxIdx(x, y, z)]!;
+      if (L.voxMat(v) === L.Mat.AIR) continue;
+      volcanic++;
+      if (L.voxFlags(v) & L.FLAG_CONTINENTAL) flagged++;
+    }
+    const s = p2.on.slice(PX + 4, PX + 50);
+    return {
+      end1: farEnd(p1.on), end2: farEnd(p2.on),
+      chainFrac: s.filter((e: number) => e >= 1).length / s.length,
+      peak: Math.max(...p2.on.slice(PX, PX + 60)),
+      upstream: Math.max(...p2.on.slice(62, PX - 12)),
+      offAxis: Math.max(...p2.off.slice(62, 186)),
+      volcanic, flagged,
+    };
+  });
+  console.log('chain', JSON.stringify(res));
+  // chain extends downstream by the plate displacement between snapshots (30 cells): oldest part moved farthest
+  expect(res.end2 - res.end1).toBeGreaterThan(22);
+  expect(res.end2 - res.end1).toBeLessThan(38);
+  expect(res.end2).toBeGreaterThan(140);
+  expect(res.chainFrac).toBeGreaterThan(0.7);
+  expect(res.peak).toBeGreaterThan(3);
+  expect(res.upstream).toBeLessThan(1);  // nothing upstream of the plume
+  expect(res.offAxis).toBeLessThan(1);   // a line, not a sheet
+  expect(res.volcanic).toBeGreaterThan(500);
+  expect(res.flagged).toBe(0);           // hotspot basalt/gabbro stays oceanic
+});
+
+// Arc magmas form where the slab reaches melting depth: a few cells inland on the overriding plate. Arc
+// andesite carries FLAG_CONTINENTAL because arcs are how continents regrow from the mantle reservoir (V3
+// long-term balance). The subducting ocean must get no melt at all.
+test('arc volcanism on the overriding continent 3-8 cells inland, none on the subducting ocean', async ({ page }) => {
+  test.setTimeout(180_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const w = twoPlateWorld([3, 0], [0, 0]); // trench at x = 128 (continent wins)
+    w.mantleReservoir = 50_000_000;
+    const rig = await makeMagmaRig(r, w, { mantle: { plumes: [], evolve: false } });
+    rig.step(600);
+    const vox = await rig.readU('vox');
+    const magCol = await rig.readU('magCol');
+    const arcRock = new Array(256).fill(0);
+    let andesite = 0, andesiteFlagged = 0, oceanMagma = 0, oceanPending = 0;
+    for (let y = 0; y < L.NY; y++) for (let z = 0; z < 256; z++) for (let x = 0; x < 256; x++) {
+      const v = vox[L.voxIdx(x, y, z)]!;
+      const m = L.voxMat(v);
+      if (m === L.Mat.ANDESITE) { andesite++; if (L.voxFlags(v) & L.FLAG_CONTINENTAL) andesiteFlagged++; }
+      if (m === L.Mat.ANDESITE || m === L.Mat.MAGMA) arcRock[x]++;
+      if (m === L.Mat.MAGMA && x >= 20 && x < 128) oceanMagma++;
+    }
+    for (let z = 0; z < 256; z++) for (let x = 20; x < 128; x++) oceanPending += magCol[L.colIdx(x, z) * 2 + 1]!;
+    const total = arcRock.slice(128, 256).reduce((a: number, b: number) => a + b, 0);
+    const near = arcRock.slice(130, 139).reduce((a: number, b: number) => a + b, 0);
+    const far = arcRock.slice(150, 256).reduce((a: number, b: number) => a + b, 0);
+    let peakX = 128; for (let x = 128; x < 256; x++) if (arcRock[x] > arcRock[peakX]) peakX = x;
+    return { total, near, far, peakX, andesite, andesiteFlagged, oceanMagma, oceanPending, profile: arcRock.slice(126, 142) };
+  });
+  console.log('arc', JSON.stringify(res));
+  expect(res.total).toBeGreaterThan(2000);
+  expect(res.peakX).toBeGreaterThanOrEqual(131);
+  expect(res.peakX).toBeLessThanOrEqual(137);
+  expect(res.near / res.total).toBeGreaterThan(0.8);
+  expect(res.far / res.total).toBeLessThan(0.05);
+  expect(res.oceanMagma).toBe(0);
+  expect(res.oceanPending).toBe(0);
+  expect(res.andesite).toBeGreaterThan(0);
+  expect(res.andesiteFlagged).toBe(res.andesite);
+});
+
+// Lava is how volcanic edifices get their shape: it must run downhill, stop as it cools, and turn into rock
+// that raises the surface near the vent — exactly converting lava mass into crust mass (V3).
+test('lava flows downhill, cools, solidifies into rock; surface rises near vent; lava → 0; exact mass', async ({ page }) => {
+  test.setTimeout(120_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { makeMagmaRig, hillWorld } = await import('/src/sim/magmaRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const M = await import('/src/sim/magmaModel.ts');
+    const r = await makeRenderer();
+    const rig = await makeMagmaRig(r, hillWorld(), { mantle: { plumes: [], evolve: false } });
+    const only = { tectonics: false, mantle: false, magma: false };
+    const VX = 100, VZ = 128; // west flank of a hill centred at x = 128: downhill is −x
+    const s0 = await rig.readF('surfY');
+    const b0 = (await rig.budget()).total;
+    // eruption-sized pulses (one layer each), like a vent erupting every tick
+    for (let k = 0; k < 40; k++) { rig.lava.inject(r, L.colIdx(VX, VZ), 255); rig.step(1, only); }
+    const b1 = (await rig.budget()).total;
+    const lv = await rig.readU('lava');
+    let m = 0, mx = 0, west = 0, east = 0, tMax = 0;
+    for (let z = 0; z < 256; z++) for (let x = 0; x < 256; x++) {
+      const c = L.colIdx(x, z), a = lv[c * 2]!;
+      if (!a) continue;
+      m += a; mx += a * x;
+      if (x < VX) west += a; else if (x > VX) east += a;
+      tMax = Math.max(tMax, M.lavaTempC(lv[c * 2 + 1]!));
+    }
+    const early = { centroid: mx / Math.max(m, 1), west, east, tMax, mass: m };
+    const mid = (await rig.budget()).total;
+    rig.step(600, only);
+    const bEnd = await rig.budget();
+    const s1 = await rig.readF('surfY');
+    let near = 0, farDelta = 0, rise = 0, rx = 0;
+    for (let z = 0; z < 256; z++) for (let x = 0; x < 256; x++) {
+      const c = L.colIdx(x, z), d = s1[c]! - s0[c]!;
+      rise += d; rx += d * x;
+      const dx = x - VX, dz = z - VZ;
+      if (dx * dx + dz * dz <= 9) near = Math.max(near, d);
+      if (dx * dx + dz * dz > 60 * 60) farDelta = Math.max(farDelta, Math.abs(d));
+    }
+    return { b0, b1, mid, end: bEnd.total, lavaEnd: bEnd.lava, early, near, farDelta, rise, rockCentroid: rx / rise };
+  });
+  console.log('lava', JSON.stringify(res));
+  expect(res.b1).toBe(res.b0);       // inject draws from the reservoir
+  expect(res.mid).toBe(res.b0);
+  expect(res.end).toBe(res.b0);
+  expect(res.early.mass).toBeGreaterThan(0);
+  expect(res.early.centroid).toBeLessThan(100 - 1);   // live lava moved downhill
+  expect(res.early.west).toBeGreaterThan(res.early.east * 1.5);
+  expect(res.rockCentroid).toBeLessThan(100 - 1);     // and so did the rock it left
+  expect(res.early.tMax).toBeLessThan(1200);          // cooling
+  expect(res.lavaEnd).toBe(0);                        // everything froze
+  expect(res.near).toBeGreaterThan(0.5);              // rock built up at the vent
+  expect(res.farDelta).toBe(0);
+  expect(res.rise).toBeGreaterThan(40 * 0.95);        // ≈ 40 layers of rock: Σ surface rise over all columns
+  expect(res.rise).toBeLessThan(40 * 1.05);
+});
+
+// V2: identical inputs → identical state (integer atomics only, dither from (column, tick) hashes).
+test('V2: magma/lava/mantle deterministic across runs', async ({ page }) => {
+  test.setTimeout(180_000);
+  const h = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const { hashFields } = await import('/src/sim/hash.ts');
+    const r = await makeRenderer();
+    const run = async () => {
+      const w = twoPlateWorld([3, 1], [-0.5, 0]);
+      w.mantleReservoir = 50_000_000;
+      const rig = await makeMagmaRig(r, w, { mantle: { plumes: [{ x: 70, z: 60, r: 9, age: 20, life: 1e9 }] } });
+      rig.step(240);
+      return hashFields(r, rig.f, ['vox', 'lava', 'magCol', 'arc', 'mantle', 'crustTemp', 'heatFlow', 'counters', 'magmaCtr']);
+    };
+    return [await run(), await run()];
+  });
+  expect(h[1]).toBe(h[0]);
+});
+
+// Budget: all magma/lava/mantle kernels well under ~1.5 ms per tick on average (V9 sim ≤ 5 ms/frame).
+test('perf: magma + lava + mantle average cost per tick', async ({ page }) => {
+  test.setTimeout(180_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const r = await makeRenderer();
+    const w = twoPlateWorld([3, 0], [0, 0]);
+    w.mantleReservoir = 50_000_000;
+    const rig = await makeMagmaRig(r, w, { mantle: { plumes: [{ x: 80, z: 128, r: 9, age: 20, life: 1e9 }], evolve: false } });
+    rig.step(200); // warm up: pipelines compiled, chambers active
+    await rig.readU('magmaCtr');
+    const time = async (only: Parameters<typeof rig.step>[1]) => {
+      const t0 = performance.now();
+      rig.step(400, only);
+      await rig.readU('magmaCtr');
+      return (performance.now() - t0) / 400;
+    };
+    const base = await time({ tectonics: false, mantle: false, magma: false, lava: false }); // derive only
+    const full = await time({ tectonics: false });
+    return { base, full, mine: full - base };
+  });
+  console.log(`magma+lava+mantle ≈ ${res.mine.toFixed(3)} ms/tick (wall, incl. dispatch overhead); derive-only ${res.base.toFixed(3)} ms/tick`);
+  expect(res.mine).toBeLessThan(3); // loose wall-clock bound (headless, includes CPU dispatch cost)
+});
+
+// Long-run balance report on a generated world (BALANCE=1): reservoir inflow from tectonics (subduction +
+// delamination − ridges) vs outflow through volcanism. Informational; prints rates per My.
+test('balance report (BALANCE=1)', async ({ page }) => {
+  test.skip(!process.env.BALANCE);
+  test.setTimeout(600_000);
+  const rows = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { generateWorld } = await import('/src/sim/worldgen.ts');
+    const { makeMagmaRig } = await import('/src/sim/magmaRig.ts');
+    const r = await makeRenderer();
+    const out: string[] = [];
+    for (const seed of [1]) {
+      const rig = await makeMagmaRig(r, generateWorld(seed), { isoEvery: 4 });
+      const b0 = await rig.budget();
+      let prev = { res: b0.reservoir, st: await rig.stats() };
+      for (let k = 1; k <= 5; k++) {
+        rig.step(1000); // 50 My
+        const b = await rig.budget();
+        const st = await rig.stats();
+        const my = 50;
+        const arc = await rig.readF('arc');
+        const ctrM = new Int32Array(await rig.f.read(r, 'magmaCtr'));
+        let sw = 0, nw = 0, sz = 0, nTrench = 0, arcRate = 0, nArc = 0;
+        const MM = await import('/src/sim/magmaModel.ts');
+        for (let c = 0; c < 65536; c++) {
+          sw += arc[c * 4 + 3]!; if (arc[c * 4 + 3]! > 0.05) nw++;
+          sz += arc[c * 4 + 2]!; if (arc[c * 4]! === 0) nTrench++;
+          const wgt = MM.arcWindow(arc[c * 4]!); if (wgt > 0 && arc[c * 4 + 1]! > 0) { nArc++; arcRate += Math.min(arc[c * 4 + 1]!, 32) * wgt; }
+        }
+        out.push(`  Σz=${sz.toFixed(0)} (≈ events/My × τ) trenchCols=${nTrench} arcCols=${nArc} arcWeight=${arcRate.toFixed(0)} E_EMA=${ctrM[10]! / 256} K=${ctrM[12]! / 1024}`);
+        const ctrs = new Int32Array(await rig.f.read(r, 'counters'));
+        let created = 0; for (let p = 0; p < 16; p++) created += ctrs[16 + p * 4 + 2]!;
+        // pending histogram: where is stuck melt?
+        const info = await rig.readU('colInfo');
+        let pendCols = 0, pendFull = 0, pendThin = 0;
+        for (let c = 0; c < 65536; c++) { const p = b.magCol[c * 2 + 1]!; if (p >= 255) { pendCols++; if (p >= 1000) pendFull++; const base = info[c * 2]! & 255, top = (info[c * 2]! >> 8) & 255; if (top - base < 4) pendThin++; } }
+        out.push(`  Σw=${sw.toFixed(0)} nW=${nw} ridgeColsCreated(cum)=${created} pendCols≥255=${pendCols} atCap=${pendFull} thin=${pendThin}`);
+        const drawn = (st.drawn - prev.st.drawn) / my, returned = (st.returned - prev.st.returned) / my;
+        const tecNet = (b.reservoir - prev.res) / my + drawn - returned; // tectonics-only reservoir change
+        out.push(`seed ${seed} t=${k * 50}My res=${(b.reservoir / 255).toFixed(0)}vox tecNet=${(tecNet / 255).toFixed(0)} vox/My volcanicDraw=${(drawn / 255).toFixed(0)} vox/My returned=${(returned / 255).toFixed(0)} vox/My eruptions/My=${((st.eruptions - prev.st.eruptions) / my).toFixed(0)} frozen=${((st.frozen - prev.st.frozen) / my / 255).toFixed(0)} solid=${((st.solidified - prev.st.solidified) / my / 255).toFixed(0)} pending=${(b.pending / 255).toFixed(0)}vox chambers=${(b.chambers / 255).toFixed(0)}vox lava=${(b.lava / 255).toFixed(1)}vox drift=${b.total - b0.total}`);
+        prev = { res: b.reservoir, st };
+      }
+    }
+    return out;
+  });
+  console.log(rows.join('\n'));
+});

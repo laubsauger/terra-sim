@@ -114,11 +114,11 @@ T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
 T16|x|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
 T17|x|M2 isostasy column adjust|-
 T18|x|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
-T19|.|M2 crust mass budget: subduction → `mantleReservoir` → ridges|volcanism|V3,V2
-T20|.|M3 mantle field: diffuse/advect, plumes, slab sinks, side render glow|V19
-T21|.|M3 crust temp field half-res, geotherm|-
-T22|.|M3 melt gen (ridge, arc, hotspot), ascent, chambers|V3
-T23|.|M3 eruption + 2D lava flow + cool/solidify into voxels|V3
+T19|x|M2 crust mass budget: subduction → `mantleReservoir` → ridges|volcanism|V3,V2
+T20|x|M3 mantle field: diffuse/advect, plumes, slab sinks, side render glow|V19
+T21|x|M3 crust temp field half-res, geotherm|-
+T22|x|M3 melt gen (ridge, arc, hotspot), ascent, chambers|V3
+T23|x|M3 eruption + 2D lava flow + cool/solidify into voxels|V3
 T24|x|M4 shallow water pipe model, torus wrap, quasi-steady substeps|V1,V4
 T25|x|M4 hydraulic erosion/deposit (`kGeo`) + thermal erosion|V3
 T26|x|M4 sediment layering into voxels, diagenesis, metamorphism|V21

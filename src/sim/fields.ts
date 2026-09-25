@@ -4,6 +4,8 @@ import { NCOL, NVOX } from './layout';
 import { MAX_PLATES } from './worldData';
 import { registerHydroFields } from './hydro';
 import { registerClimateFields } from './climate';
+import { registerMantleFields } from './mantle';
+import { registerMagmaFields } from './magma';
 import type { WorldData } from './worldData';
 
 export function registerSimFields(f: GpuFields): void {
@@ -23,6 +25,8 @@ export function registerSimFields(f: GpuFields): void {
   f.add('counters', 'int', CTR_SIZE, { atomic: true });
   registerHydroFields(f);
   registerClimateFields(f);
+  registerMantleFields(f);
+  registerMagmaFields(f);
   f.add('probe', 'uint', PROBE_SIZE); // inspect probe gather target (probe.ts), scratch
 }
 
