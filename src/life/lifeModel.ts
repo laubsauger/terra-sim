@@ -308,6 +308,9 @@ export const CREATURES = {
   CRITTER_SLOPE: 1.6,
   /** Fish water depth band (voxels). */
   FISH_DEPTH_MIN: 1, FISH_DEPTH_MAX: 6,
+  /** Fish swim at least this far (voxels) below the water level, and dither out between FADE_A0..A1. */
+  FISH_SURFACE_MIN: 0.6,
+  FISH_FADE_A0: 2.8, FISH_FADE_A1: 4,
   /** Real seconds between column-map readbacks. */
   MAP_S: 2,
 } as const;

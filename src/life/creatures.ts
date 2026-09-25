@@ -4,8 +4,10 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, float, vec3, uniform, uniformArray, attribute, positionGeometry, normalGeometry, normalLocal, varying,
-  sin, cos, select, mix, max, pow, positionWorld, uint, smoothstep,
+  sin, cos, select, mix, max, pow, positionWorld, uint, smoothstep, exp, dot, color, fract, screenCoordinate,
 } from 'three/tsl';
+import { WATER_SHALLOW, WATER_SCATTER } from '../render/water';
+import { causticsAt } from '../render/terrain';
 import { BLOCK_SIZE } from '../sim/layout';
 import { Biome } from '../sim/biomeModel';
 import { voxelToWorldY, AMB_PERIOD } from '../render/space';
@@ -70,7 +72,7 @@ interface Fish { x: number; z: number; vx: number; vz: number; school: number; a
 export interface CreatureSnapshot {
   birds: { x: number; y: number; z: number }[];
   critters: { x: number; z: number }[];
-  fish: { x: number; z: number; y: number }[];
+  fish: { x: number; z: number; y: number; depth: number }[];
 }
 
 // Critter looks: 0 white sheep, 1 black sheep, 2 goat, 3 deer.  [body, head, legs, belly]
@@ -202,25 +204,45 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
     group.add(mesh);
   }
 
-  // fish: instA (x, y, z, yaw), instB (swim phase, seed, size, variant)
-  const fishM = instanced(fishGeometry(), maxFish, ['instA', 'instB']);
+  // fish: instA (x, y, z, yaw), instB (swim phase, seed, size, variant), instC (depth below the water surface, voxels)
+  // Fish are opaque, so they are in the opaque pass the water sheet refracts (water.ts samples the
+  // viewport colour + depth); the sheet's own absorption over a fish is only the thin layer above it,
+  // so the fish material also absorbs by its depth: toward the water body colour, desaturated,
+  // lower contrast, and dithered out between FISH_FADE_A0 and FISH_FADE_A1 voxels.
+  const fishM = instanced(fishGeometry(), maxFish, ['instA', 'instB', 'instC']);
   {
     const A = attribute('instA', 'vec4') as unknown as V4, B = attribute('instB', 'vec4') as unknown as V4;
+    const Cf = attribute('instC', 'vec4') as unknown as V4;
     const cols = uniformArray(FISH_COLORS.map(lin), 'color');
     const bend = sin(B.x.sub(lp.x.mul(4))).mul(0.16).mul(lp.x);
-    const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.3, metalness: 0.35, side: THREE.DoubleSide });
+    // low metalness: underwater there is no sky to mirror; the glints below carry the shimmer
+    const mat = new THREE.MeshStandardNodeMaterial({ roughness: 0.55, metalness: 0.1, side: THREE.DoubleSide });
     mat.positionNode = Fn(() => {
       const p = positionGeometry.toVar();
       p.x.addAssign(bend);
-      normalLocal.assign(rotY(normalGeometry as V3, cos(A.w), sin(A.w)));
+      // underwater light is diffuse: bend normals toward up so facets do not flash (lower contrast)
+      normalLocal.assign(mix(rotY(normalGeometry as V3, cos(A.w), sin(A.w)), vec3(0, 1, 0), 0.6).normalize());
       return rotY(p.mul(B.z) as V3, cos(A.w), sin(A.w)).add(A.xyz);
     })();
     const base = varying(cols.element(uint(B.w)) as unknown as V3, 'vFishC');
     const seed = varying(B.y, 'vFishS');
-    mat.colorNode = base.mul(mix(float(1.1), float(0.75), lp.y));
+    const depth = varying(Cf.x, 'vFishD');
+    // absorption toward the water body colour (water.ts palette), stronger with depth
+    const absorb = float(1).sub(exp(depth.add(0.4).mul(-0.75))).toVar('fishAbs');
+    const waterBody = mix(color(WATER_SHALLOW), color(WATER_SCATTER), smoothstep(0.5, 4, depth));
+    const shaded = base.mul(mix(float(1.1), float(0.75), lp.y));
+    const grey = vec3(dot(shaded, vec3(0.2126, 0.7152, 0.0722)));
+    const muted = mix(shaded, grey, absorb.mul(0.6));                      // less saturation
+    const flat = mix(muted, vec3(dot(muted, vec3(0.333))), absorb.mul(0.3)); // less contrast
+    mat.colorNode = mix(flat, waterBody.mul(0.55), absorb.mul(0.85)).mul(float(1).sub(absorb.mul(0.35)));
     // shimmer: brief glints as each fish turns its flank; whole cycles per AMB_PERIOD (seamless wrap)
     const glint = pow(max(sin(uTime.mul((TAU * 5400) / AMB_PERIOD).add(seed.mul(40)).add(positionWorld.x.mul(90))), float(0)), float(14));
-    mat.emissiveNode = base.mul(glint.mul(1.6).add(0.08));
+    const caustic = causticsAt(positionWorld as V3, depth);
+    mat.emissiveNode = base.mul(glint.mul(1.2).add(0.04)).add(caustic.mul(0.16)).mul(float(1).sub(absorb).pow(1.5));
+    // dithered fade-out with depth (opaque: no sorting against the water sheet)
+    const sc = screenCoordinate;
+    const ign = fract(fract(sc.x.mul(0.06711056).add(sc.y.mul(0.00583715))).mul(52.9829189));
+    mat.maskNode = ign.greaterThan(smoothstep(C.FISH_FADE_A0, C.FISH_FADE_A1, depth));
     const mesh = new THREE.Mesh(fishM.g, mat);
     mesh.name = 'life-fish';
     mesh.frustumCulled = false;
@@ -290,7 +312,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
       if (!p) continue;
       const n = Math.round(between(C.FISH_MIN, C.FISH_MAX));
       for (let i = 0; i < n; i++) {
-        fish.push({ x: s.cx, z: s.cz, vx: 0, vz: 0, school: si, ang: rand() * TAU, rad: between(0.008, 0.035), frac: between(0.3, 0.65), phase: rand() * TAU, seed: rand() });
+        fish.push({ x: s.cx, z: s.cz, vx: 0, vz: 0, school: si, ang: rand() * TAU, rad: between(0.008, 0.035), frac: rand() * rand(), phase: rand() * TAU, seed: rand() });
       }
     }
   }
@@ -432,10 +454,15 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
     }
   }
 
+  /** Depth of a fish below the local water level (voxels): ≥ FISH_SURFACE_MIN, above the bed, fading past FISH_FADE_A1. */
+  const fishDepth = (m: ColumnMap, f: Fish) => {
+    const w = m.water[columnAt(f.x, f.z)]!;
+    const deepest = Math.max(C.FISH_SURFACE_MIN, w - 0.35);
+    return Math.min(deepest, C.FISH_SURFACE_MIN + f.frac * (Math.min(deepest, C.FISH_FADE_A1 + 0.5) - C.FISH_SURFACE_MIN));
+  };
   const fishY = (m: ColumnMap, f: Fish) => {
     const c = columnAt(f.x, f.z);
-    const s = m.surfY[c]!, w = m.water[c]!;
-    return voxelToWorldY(Math.min(s + w - 0.4, Math.max(s + 0.35, s + w * f.frac)));
+    return voxelToWorldY(m.surfY[c]! + m.water[c]! - fishDepth(m, f));
   };
 
   // ---- upload ----
@@ -465,16 +492,17 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
       crit.g.instanceCount = n;
     }
     {
-      const [A, B] = fishM.attrs as [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute];
+      const [A, B, Cf] = fishM.attrs as [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute];
       let n = 0;
       for (const f of fish) {
         const s = schools[f.school]!;
         if (!s.active) continue;
         A.setXYZW(n, f.x, fishY(m, f), f.z, Math.atan2(f.vx, f.vz) + Math.sin(f.phase * 0.5) * 0.15);
         B.setXYZW(n, f.phase, f.seed, 0.019 * (0.8 + 0.4 * f.seed), s.variant);
+        Cf.setXYZW(n, fishDepth(m, f), 0, 0, 0);
         n++;
       }
-      A.needsUpdate = B.needsUpdate = true;
+      A.needsUpdate = B.needsUpdate = Cf.needsUpdate = true;
       fishM.g.instanceCount = n;
     }
   }
@@ -511,7 +539,7 @@ export function createCreatures(opts: { highQuality?: boolean; seed?: number } =
       return {
         birds: birds.map((b) => ({ x: b.x, y: b.y, z: b.z })),
         critters: critters.filter((c) => c.active).map((c) => ({ x: c.x, z: c.z })),
-        fish: m ? fish.filter((f) => schools[f.school]!.active).map((f) => ({ x: f.x, z: f.z, y: fishY(m, f) })) : [],
+        fish: m ? fish.filter((f) => schools[f.school]!.active).map((f) => ({ x: f.x, z: f.z, y: fishY(m, f), depth: fishDepth(m, f) })) : [],
       };
     },
     dispose() {

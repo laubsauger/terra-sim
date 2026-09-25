@@ -154,7 +154,7 @@ async function main() {
     const m = await readMap();
     life.creatures.setMap(m);
     const v = { birdOut: 0, birdLow: 0, birdHigh: 0, critterWet: 0, critterBiome: 0, fishOut: 0, fishAbove: 0, examples: [] as string[] };
-    let minClear = Infinity, maxAbs = 0;
+    let minClear = Infinity, maxAbs = 0, maxFishDepth = 0;
     const start = life.creatures.snapshot();
     const path = { bird: 0, critter: 0, fish: 0 };
     let prev = start;
@@ -178,7 +178,10 @@ async function main() {
       for (const f of s.fish) {
         if (!fishValid(m, f.x, f.z)) v.fishOut++;
         const col = columnAt(f.x, f.z);
-        if (f.y >= voxelToWorldY(m.surfY[col]! + m.water[col]!) || f.y <= voxelToWorldY(m.surfY[col]!)) v.fishAbove++;
+        // at least FISH_SURFACE_MIN below the water level, above the bed
+        if (f.y > voxelToWorldY(m.surfY[col]! + m.water[col]! - CREATURES.FISH_SURFACE_MIN) + 1e-6 || f.y <= voxelToWorldY(m.surfY[col]!)) v.fishAbove++;
+        if (f.depth < CREATURES.FISH_SURFACE_MIN - 1e-6) v.fishAbove++;
+        maxFishDepth = Math.max(maxFishDepth, f.depth);
       }
       const d = (a: { x: number; z: number }[], b: { x: number; z: number }[]) => a.reduce((acc, p, j) => acc + Math.hypot(p.x - b[j]!.x, p.z - b[j]!.z), 0);
       if (prev.birds.length === s.birds.length) path.bird += d(s.birds, prev.birds);
@@ -187,7 +190,7 @@ async function main() {
       prev = s;
       if (i % 600 === 599) await new Promise((r) => setTimeout(r, 0));
     }
-    return { counts: life.creatures.counts, violations: v, minClear, maxAbs, path };
+    return { counts: life.creatures.counts, violations: v, minClear, maxAbs, path, maxFishDepth };
   }
 
   const setCam = (pos: number[], target: number[], fov = 30) => {
@@ -214,7 +217,7 @@ async function main() {
       }
       return best ? worldAt(best.x, best.z) : null;
     }
-    if (what === 'fish') return snap.fish[0] ? [snap.fish[0].x, snap.fish[0].y, snap.fish[0].z] : null;
+    if (what === 'fish' || what === 'fishlow') return snap.fish[0] ? [snap.fish[0].x, snap.fish[0].y, snap.fish[0].z] : null;
     if (what === 'bird') return snap.birds[0] ? [snap.birds[0].x, snap.birds[0].y, snap.birds[0].z] : null;
     if (what === 'treeline') {
       // a forest column just below the treeline, with high ground and lowland forest around
@@ -264,8 +267,19 @@ async function main() {
       else {
         const p = await spot(name);
         if (!p) return false;
-        const off = name === 'fish' ? [0.22, 0.3, 0.22] : name === 'bird' ? [0.35, 0.12, 0.4] : name === 'critter' ? [0.26, 0.15, 0.3] : name === 'treeline' ? [0.9, 0.35, 1.0] : [0.55, 0.35, 0.6];
-        setCam([p[0]! + off[0]! * dist, p[1]! + off[1]! * dist, p[2]! + off[2]! * dist], p);
+        const off = name === 'fish' ? [0.22, 0.3, 0.22] : name === 'fishlow' ? [0.3, 0.07, 0.3] : name === 'bird' ? [0.35, 0.12, 0.4] : name === 'critter' ? [0.26, 0.15, 0.3] : name === 'treeline' ? [0.9, 0.35, 1.0] : [0.55, 0.35, 0.6];
+        let o = off;
+        if (name === 'fishlow') {
+          // grazing view across open water: turn the offset until the camera hovers over the sea
+          const m = await readMap();
+          for (let k = 0; k < 16; k++) {
+            const a = (k / 16) * Math.PI * 2, r = Math.hypot(off[0]!, off[2]!);
+            const c = [Math.cos(a) * r, off[1]!, Math.sin(a) * r];
+            const cx = p[0]! + c[0]!, cz = p[2]! + c[2]!;
+            if (Math.abs(cx) < HALF && Math.abs(cz) < HALF && m.water[columnAt(cx, cz)]! > 1 && m.water[columnAt((cx + p[0]!) / 2, (cz + p[2]!) / 2)]! > 1) { o = c; break; }
+          }
+        }
+        setCam([p[0]! + o[0]! * dist, p[1]! + o[1]! * dist, p[2]! + o[2]! * dist], p);
       }
       return true;
     },

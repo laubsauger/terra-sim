@@ -196,7 +196,7 @@ test('life screenshots with the full look (natural biomes)', async ({ page }) =>
   await page.evaluate(async () => { const lt = (window as any).lt; await lt.frames(2); await lt.life.whenReady(); lt.refresh(true); await lt.frames(20); });
   const info = await page.evaluate(() => (window as any).lt.drawInfo());
   console.log('draw info (look + life)', JSON.stringify(info));
-  for (const v of ['hero', 'tree', 'pine', 'acacia', 'cactus', 'cypress', 'shrub', 'treeline', 'critter', 'fish', 'bird', 'top']) {
+  for (const v of ['hero', 'tree', 'pine', 'acacia', 'cactus', 'cypress', 'shrub', 'treeline', 'critter', 'fish', 'fishlow', 'bird', 'top']) {
     const ok = await page.evaluate(async (n) => { const lt = (window as any).lt; const r = await lt.view(n); if (r) await lt.frames(12); return r; }, v);
     if (ok) await page.screenshot({ path: `${OUT}/${v}.png` });
   }
