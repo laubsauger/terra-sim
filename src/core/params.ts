@@ -43,7 +43,7 @@ export const PARAM_DEFS: readonly ParamDef[] = [
   { key: 'eventRate', group: 'Events', label: 'event rate', default: 1, min: 0, max: 5, step: 0.01, unit: '×', persist: true },
   { key: 'meteorRate', group: 'Events', label: 'meteor rate', default: 1, min: 0, max: 5, step: 0.01, unit: '×', persist: true },
   // Render
-  { key: 'verticalExaggeration', group: 'Render', label: 'vertical exag.', default: 1.5, min: 1, max: 8, step: 0.1, unit: '×', persist: true },
+  { key: 'verticalExaggeration', group: 'Render', label: 'vertical exag.', default: 1.0, min: 0.3, max: 4, step: 0.05, unit: '×', persist: true },
   { key: 'ambientMode', group: 'Render', label: 'ambient mode', default: false, persist: false, url: 'ambient' },
   { key: 'highQuality', group: 'Render', label: 'high quality', default: true, persist: false, url: 'quality', urlEnum: ['low', 'high'] },
 ];

@@ -49,6 +49,9 @@ export const MAX_OCEAN_AGE = 180;
  * volcanism (V16, T19) a buffer to draw from before subduction starts refilling it.
  */
 export const MANTLE_RESERVOIR_FRAC = 0.05;
+/** Offshore reach of the continental-margin wedge (cells) and its thinnest crust (layers). */
+export const WEDGE_CELLS = 12;
+export const WEDGE_MIN = 11;
 
 /** Crust mass in full-voxel equivalents: Σ fill/255 over non-AIR, non-PERIDOTITE voxels. */
 export function crustMass(vox: Uint32Array): number {
@@ -289,8 +292,20 @@ export function generateWorld(seed: number, opts: WorldgenOptions = {}): WorldDa
       const crustN = nCrust.fbm(u, v, 6, 6, 3, 0.5);
       let S: number; // float surface height, voxel-y units
       let B: number; // crust base
-      if (cont) {
-        const r = smooth01(dc / 20); // coast → interior over ~20 cells
+      // Passive-margin wedge: continental crust continues offshore under shelf and slope, thinning to
+      // WEDGE_MIN layers over WEDGE_CELLS, so cut faces show a tapered contact instead of a vertical wall.
+      const wedge = !cont && dc < WEDGE_CELLS;
+      let oceanS = 0;
+      if (!cont) {
+        const q = smooth01((dc - 5) / 28);
+        const shelf = COAST_Y - 0.2 - 2.3 * smooth01(dc / 6);
+        const bd0 = bdCells[c]!;
+        const age0 = Math.min(MAX_OCEAN_AGE, bd0 / INIT_HALF_SPREAD);
+        const abyss0 = Y_OCEAN_FLOOR + 5 - 1.0 * Math.sqrt(age0) + 2 * bump(bd0 / 6) + 1.5 * nOcean.fbm(u, v, 12, 12, 4, 0.55);
+        oceanS = shelf + (abyss0 - shelf) * q + hillsN * 1.5 * (1 - q);
+      }
+      if (cont || wedge) {
+        const r = cont ? smooth01(dc / 20) : 0; // coast → interior over ~20 cells
         const rm = smooth01(dc / 8); // mountains may sit close to coasts (Andes-style)
         // mountains: convergent plate boundaries + a few noise belts
         const bd = bdCells[c]!;
@@ -298,16 +313,18 @@ export function generateWorld(seed: number, opts: WorldgenOptions = {}): WorldDa
         const bn = nBelt.noise(u * 3, v * 3, 3, 3);
         const beltNoise = bump(bn / 0.16) * smooth01(nBelt.noise(u * 2 + 0.5, v * 2 + 0.5, 2, 2) * 4);
         const belt = beltPlate > beltNoise * 0.7 ? beltPlate : beltNoise * 0.7;
-        const mtn = belt > 0.01 ? belt * rm * (5 + 17 * nMtn.ridged(u, v, 12, 12, 5, 0.5)) : 0;
-        S = COAST_Y + (Y_CONT_SURFACE - COAST_Y) * r + hillsN * (1.5 + 2.5 * r) + mtn;
+        const mtn = cont && belt > 0.01 ? belt * rm * (5 + 17 * nMtn.ridged(u, v, 12, 12, 5, 0.5)) : 0;
+        S = cont ? COAST_Y + (Y_CONT_SURFACE - COAST_Y) * r + hillsN * (1.5 + 2.5 * r) + mtn : oceanS;
         const tFull = 38 + 3.5 * crustN + 0.45 * mtn; // ~34..44, mountain roots deeper
-        const T = 26 + (tFull - 26) * r; // thinned passive margin
+        const w = cont ? 0 : smooth01(dc / WEDGE_CELLS);
+        const T = cont ? 26 + (tFull - 26) * r : 26 + (WEDGE_MIN - 26) * w; // thinned passive margin
         B = S - T;
         const cratonN = nCrust.fbm(u + 0.41, v + 0.83, 3, 3, 3, 0.5);
         const baseAge = 500 + 2500 * smooth01(0.5 + 0.9 * cratonN); // 500..3000 My
         crustAge[c] = baseAge;
         const loose = clamp((81 - S) * 0.5, 0, 2.5) * (1 - smooth01(mtn / 3)) + 1.5 * (1 - r);
-        const cover = Math.max(0, 12 + 3 * crustN - 0.7 * mtn) + 3 * (1 - r);
+        // offshore the sedimentary cover thins with the wedge so the granite body tapers too
+        const cover = (Math.max(0, 12 + 3 * crustN - 0.7 * mtn) + 3 * (1 - r)) * (cont ? 1 : 1 - 0.6 * w);
         const plutonN = nFold.noise(u * 10 + 0.5, v * 10 + 0.5, 10, 10);
         const coverTop = S - loose;
         const graniteTop = coverTop - cover + 1.5 * plutonN;
@@ -318,7 +335,8 @@ export function generateWorld(seed: number, opts: WorldgenOptions = {}): WorldDa
         t3[c] = Math.round(graniteTop);
         t4[c] = Math.round(coverTop);
         midMat[c] = Mat.GRANITE;
-        colFlags[c] = FLAG_CONTINENTAL;
+        // inner wedge stays continental (buoyant); outer wedge is transitional crust that behaves oceanic
+        colFlags[c] = cont || w < 0.25 ? FLAG_CONTINENTAL : 0;
         cBase[c] = ageToCode(baseAge);
         cCov0[c] = ageToCode(Math.min(540, 0.4 * baseAge));
         cCov1[c] = ageToCode(10);

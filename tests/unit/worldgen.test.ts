@@ -139,7 +139,8 @@ describe('worldgen land/ocean', () => {
         }
       }
       expect(cn / NCOL).toBeGreaterThan(0.25);
-      expect(cn / NCOL).toBeLessThan(0.45);
+      // continents 30-40% + a few cells of continental margin wedge (Earth: ~41% continental crust incl. shelves)
+      expect(cn / NCOL).toBeLessThan(0.5);
       expect(cs / cn - os / on, `seed ${s}`).toBeGreaterThan(10);
       // youngest vs oldest quartile of abyssal floor
       abyss.sort((a, b) => a[0] - b[0]);
