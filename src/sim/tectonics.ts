@@ -10,10 +10,10 @@
 // Isostasy rides along: the winning column shifts ±1 layer toward buoyancy equilibrium.
 // A voxel kernel then rebuilds every column from its action. All mass moves in integer fill units (V3).
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, vec2 } from 'three/tsl';
+import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, vec2, sin } from 'three/tsl';
 import { PingPongKernel, type GpuFields } from '../core/gpu';
-import { NCOL, NVOX, NY, Mat, MAT_DENSITY, FLAG_CONTINENTAL, packVoxel } from './layout';
-import { tColIdx, tColXZ, uMin } from './tslLayout';
+import { NCOL, NVOX, NX, NY, Mat, MAT_DENSITY, FLAG_CONTINENTAL, packVoxel } from './layout';
+import { tColIdx, tColXZ, uMin, iMax, tMat, tFill } from './tslLayout';
 import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
 import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE } from './fields';
@@ -277,15 +277,34 @@ export class Tectonics {
         const s = a.bitAnd(uint(0xffff));
         const k = int(a.shiftRight(uint(K_SHIFT)).bitAnd(uint(63)));
         const v = int(a.shiftRight(uint(V_SHIFT)).bitAnd(uint(3))).sub(1);
-        const base = int(colInfo.element(s).x.bitAnd(uint(0xff)));
+        const info = colInfo.element(s).x;
+        const base = int(info.bitAnd(uint(0xff)));
+        const top = int(info.shiftRight(uint(8)).bitAnd(uint(0xff)));
         const up = int(a.shiftRight(uint(UP_SHIFT)).bitAnd(uint(63)));
-        const sy = y.sub(v).sub(up);
-        const rootTop = base.add(v).add(up); // old base lands here
-        const root = k.greaterThan(int(0)).and(y.greaterThanEqual(rootTop.sub(k))).and(y.lessThan(rootTop));
-        If(root, () => { out.assign(uint(GNEISS)); })
-          .ElseIf(sy.lessThan(int(0)), () => { out.assign(uint(PERI)); })
-          .ElseIf(sy.greaterThanEqual(int(NY)), () => { out.assign(uint(0)); })
-          .Else(() => { out.assign(src.element(s.add(uint(sy).mul(uint(NCOL))))); });
+        // Thrust stacking: the k collided layers enter mid-crust at a height that wanders along the orogen,
+        // duplicating the strata just below it; crust below sinks by k - up, crust above rises by up.
+        // Repeated collisions at shifting heights read as folded, repeated strata on the cut faces.
+        const cx = float(c.bitAnd(uint(NX - 1))), cz = float(c.shiftRight(uint(Math.log2(NX))));
+        const f = sin(cx.mul(0.21).add(cz.mul(0.13))).mul(0.18).add(sin(cx.mul(0.057).sub(cz.mul(0.083)).add(1.3)).mul(0.12)).add(0.42);
+        const span = iMax(top.sub(base), int(0));
+        const hIns = base.add(int(float(span).mul(f))).toVar(); // source y where the thrust sheet enters
+        const dl = v.add(up).sub(k), du = v.add(up);
+        const out0 = uint(0).toVar();
+        If(y.lessThan(hIns.add(dl)), () => {
+          const sy = y.sub(dl);
+          out0.assign(select(sy.lessThan(int(0)), uint(PERI), src.element(s.add(uint(iMax(sy, int(0))).mul(uint(NCOL))))));
+        }).ElseIf(y.lessThan(hIns.add(du)), () => {
+          // duplicated sheet: copy of the k layers under hIns; anything not a full plain crust voxel → GNEISS
+          const cy = iMax(base, hIns.sub(k).add(y.sub(hIns).sub(dl)));
+          const cv = src.element(s.add(uint(cy).mul(uint(NCOL)))).toVar();
+          const m = tMat(cv);
+          const plain = tFill(cv).equal(uint(255)).and(m.notEqual(uint(Mat.MAGMA))).and(m.notEqual(uint(Mat.PERIDOTITE))).and(m.notEqual(uint(Mat.AIR)));
+          out0.assign(select(plain, cv, uint(GNEISS)));
+        }).Else(() => {
+          const sy = y.sub(du);
+          out0.assign(select(sy.greaterThanEqual(int(NY)), uint(0), src.element(s.add(uint(sy).mul(uint(NCOL))))));
+        });
+        out.assign(out0);
       });
       dst.element(i).assign(out);
     })().compute(NVOX);
