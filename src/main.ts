@@ -87,7 +87,7 @@ async function main() {
   const budget = new TickBudget(5);
   let ticksSinceSample = 0;
   const hud = createPerfHud(stage.renderer, () => fields.bytes(), (ms) => { budget.observe(ms, ticksSinceSample); ticksSinceSample = 0; });
-  const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields);
+  const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields, stage.scene);
   const probe = createProbeUI(stage.renderer, stage.camera, fields, god.isInspect);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   const overlays = createOverlays(fields, stage.scene);
@@ -112,6 +112,7 @@ async function main() {
 
   stage.onFrame((dt) => {
     panel.fps.begin();
+    sim.flushEvents(); // god tools act immediately, even while paused
     const ticks = clock.frame(dt, budget.cap);
     const ran = sim.runTicks(ticks);
     ticksSinceSample += ran;
@@ -124,6 +125,7 @@ async function main() {
     savePanel.update();
     timebar.update();
     probe.update(dt);
+    god.update(dt);
     statsPane.update();
     ambientCam.notice(sim.events.log, () => sim.stats?.seaLevel ?? 76);
     ambientCam.update(dt);

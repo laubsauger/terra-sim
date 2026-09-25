@@ -85,6 +85,8 @@ export class Tectonics {
   readonly stackGate = uniform(1);
   private isoOn = uniform(0);
   private lastRunTick = 0;
+  /** Increments on every GPU tectonics run: tecAct (src column per dst) is valid for the latest run id. */
+  runId = 0;
   private crustFlow: CrustFlow;
 
   constructor(private fields: GpuFields, plates: Plate[]) {
@@ -376,6 +378,7 @@ export class Tectonics {
     this.isoOn.value = iso ? 1 : 0;
     const f = this.fields;
     if (f.parity('plateId') !== f.parity('crustAge')) throw new Error('Tectonics: plateId/crustAge parity diverged');
+    this.runId++;
     const par = f.parity('plateId') as 0 | 1;
     renderer.compute(this.waterGather[par]);
     renderer.compute(this.decide[par]);
@@ -384,6 +387,15 @@ export class Tectonics {
     f.swap('plateId');
     f.swap('crustAge');
     return true;
+  }
+
+  /**
+   * Render continuity: fractional sub-cell offset of each plate (cells, −1..1 on X,Z). Content of a column on
+   * plate p truly sits at grid + offset(p); when the sim shifts p by a whole cell the offset drops by that cell
+   * in the same step, so rendering at grid + offset moves continuously.
+   */
+  plateOffsets(out: Float32Array): void {
+    for (let i = 0; i < MAX_PLATES; i++) { const p = this.plates[i]!; out[i * 2] = p.alive ? p.accum[0] : 0; out[i * 2 + 1] = p.alive ? p.accum[1] : 0; }
   }
 
   /** Lower-crust flow. Needs fresh colInfo: call after the post-tectonics derive, then derive again. */

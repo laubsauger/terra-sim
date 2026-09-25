@@ -56,3 +56,25 @@ test('uplift, subsidence and meteor keep crust + reservoir exact and shape the l
   expect(res.craterRim).toBeGreaterThan(0.5);
   expect(res.unhandled).toBe(0);
 });
+
+// User report: god tools seemed to do nothing. They must act immediately, even with the geo clock paused.
+test('god tools apply immediately in the live app while paused', async ({ page }) => {
+  await page.goto('/?seed=3&speed=1');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 60_000 });
+  const res = await page.evaluate(async () => {
+    const t = (window as any).terra;
+    t.clock.paused = true;
+    await new Promise((r) => setTimeout(r, 300));
+    const read = async () => new Float32Array(await t.fields.read(t.stage.renderer, 'surfY'));
+    const s0 = await read();
+    // pick a land column
+    let c = 0; for (let i = 0; i < s0.length; i++) if (s0[i]! > s0[c]!) c = i;
+    const x = c % 256, z = c >> 8;
+    t.sim.events.enqueue({ kind: 'uplift', my: t.sim.geoMy, x, z, radius: 8, magnitude: 10 });
+    await new Promise((r) => setTimeout(r, 400)); // a few frames
+    const s1 = await read();
+    return { d: s1[c]! - s0[c]!, ticked: t.clock.paused };
+  });
+  expect(res.ticked).toBe(true);
+  expect(res.d).toBeGreaterThan(8);
+});

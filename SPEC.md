@@ -147,7 +147,7 @@ T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect dr
 T45|x|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
 T46|x|M7 procedural ambient audio from sim stats|V14,V15
 T47|~|M8 debug overlays|I.overlays
-T48|~|M8 god tools via event path|V16,I.god tools
+T48|x|M8 god tools via event path|V16,I.god tools
 T49|x|M8 ambient mode: hide UI, cinematic auto cam, POI follow (eruptions, impacts)|I.keys
 T50|x|M8 save/load: `.terra` format, gzip, IDB autosave ring, file export/import|V13,V21,I.file,I.idb
 T51|~|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19

@@ -5,7 +5,7 @@
 //   storm:               condense vapor over an area into rain (water budget internal move)
 // Kernels are per column, in place on the current vox buffer (no neighbour reads → race-free).
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, float, int, uint, uniform, instanceIndex, Return, sqrt, max, atomicAdd } from 'three/tsl';
+import { Fn, If, Loop, float, int, uint, uniform, instanceIndex, Return, sqrt, max, atomicAdd, select } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { NCOL, NX, NZ, NY, Mat, FLAG_CONTINENTAL, packVoxel } from './layout';
 import { tColXZ, tVoxIdx, tMat, tFill, tPack, tAge, tFlags, uMin, iMin, iMax } from './tslLayout';
@@ -37,32 +37,41 @@ export class GodTools {
     const colInfo = this.fields.cur<'uvec2'>('colInfo');
     const ctr = this.fields.cur<'int'>('counters');
     const GNEISS = packVoxel(Mat.GNEISS, 255, 0, FLAG_CONTINENTAL);
-    const PERI = packVoxel(Mat.PERIDOTITE, 255, 0, 0);
     return Fn(() => {
       const c = instanceIndex;
       If(c.greaterThanEqual(uint(NCOL)), () => { Return(); });
       const { x, z } = tColXZ(c);
       const layers = int(this.falloff(x, z).mul(this.strength).round()).toVar(); // + uplift, − subsidence
       If(layers.equal(int(0)), () => { Return(); });
-      const base = int(colInfo.element(c).x.bitAnd(uint(0xff)));
+      const info = colInfo.element(c).x;
+      const base = int(info.bitAnd(uint(0xff)));
+      const top = int(info.shiftRight(uint(8)).bitAnd(uint(0xff)));
+      If(base.greaterThanEqual(int(NY)), () => { Return(); }); // no crust
       If(layers.greaterThan(int(0)), () => {
-        const n = iMin(layers, base.sub(1)).toVar(); // root grows down, stays above y=0
-        Loop({ start: int(1), end: n.add(1), condition: '<' }, ({ i }) => { vox.element(tVoxIdx(x, base.sub(i), z)).assign(uint(GNEISS)); });
+        // immediate uplift: everything from the crust base up rises n layers, new root fills in below
+        // (in place, top-down, so reads below the write head are still original). Isostasy settles it later.
+        const n = iMin(layers, iMax(int(0), int(NY - 3).sub(top))).toVar();
+        Loop({ start: int(NY - 1), end: base.add(n), condition: '>=' }, ({ i }) => {
+          vox.element(tVoxIdx(x, i, z)).assign(vox.element(tVoxIdx(x, i.sub(n), z)));
+        });
+        Loop({ start: base, end: base.add(n), condition: '<' }, ({ i }) => { vox.element(tVoxIdx(x, i, z)).assign(uint(GNEISS)); });
         atomicAdd(ctr.element(CTR_RESERVOIR), n.mul(-255));
       }).Else(() => {
-        // remove only full, plain crust layers from the base, keeping ≥ 4 layers of crust
+        // immediate subsidence: remove up to n plain full crust layers at the base (keeping ≥ 4 layers),
+        // everything above drops by that many layers (in place, bottom-up)
         const thick = int(colInfo.element(c).y.div(uint(255)));
         const want = iMin(layers.negate(), iMax(int(0), thick.sub(4))).toVar();
-        const done = int(0).toVar();
+        const n = int(0).toVar();
         Loop({ start: int(0), end: want, condition: '<' }, ({ i }) => {
           const v = vox.element(tVoxIdx(x, base.add(i), z));
           const m = tMat(v);
-          If(done.equal(i).and(tFill(v).equal(uint(255))).and(m.notEqual(uint(Mat.MAGMA))).and(m.notEqual(uint(Mat.AIR))).and(m.notEqual(uint(Mat.PERIDOTITE))), () => {
-            vox.element(tVoxIdx(x, base.add(i), z)).assign(uint(PERI));
-            done.addAssign(1);
-          });
+          If(n.equal(i).and(tFill(v).equal(uint(255))).and(m.notEqual(uint(Mat.MAGMA))).and(m.notEqual(uint(Mat.AIR))).and(m.notEqual(uint(Mat.PERIDOTITE))), () => { n.addAssign(1); });
         });
-        atomicAdd(ctr.element(CTR_RESERVOIR), done.mul(255));
+        Loop({ start: base, end: int(NY), condition: '<' }, ({ i }) => {
+          const sy = i.add(n);
+          vox.element(tVoxIdx(x, i, z)).assign(select(sy.lessThan(int(NY)), vox.element(tVoxIdx(x, iMin(sy, int(NY - 1)), z)), uint(0)));
+        });
+        atomicAdd(ctr.element(CTR_RESERVOIR), n.mul(255));
       });
     })().compute(NCOL);
   }

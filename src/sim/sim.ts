@@ -215,6 +215,14 @@ export class Sim {
     this.climate.setIceAge(iceAgeForcing(this.iceAges, my));
   }
 
+  /**
+   * Apply queued god-tool events now (called every frame, so tools work while paused or at slow speeds).
+   * Random events are rolled and drained at window ends, so the queue only ever holds user events here.
+   */
+  flushEvents(): void {
+    if (this.events.queue.length) this.dispatch(this.events.drain());
+  }
+
   private dispatch(events: GeoEvent[]): void {
     for (const e of events) {
       const h = this.handlers.get(e.kind);
