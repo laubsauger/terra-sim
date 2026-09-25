@@ -129,7 +129,7 @@ T30|x|M5 snow/ice accumulation, glaciers|V4
 T31|x|M5 biome classify + veg; veg lowers erodibility|-
 T32|x|M6 Wilson cycle controller (disperse→drift→assemble→super→rift)|V5,V8
 T33|x|M6 seeded event scheduler: hotspot, meteor, ice age, flood basalt|V2,V16
-T34|.|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
+T34|x|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
 T35|.|M6 NaN guard + autosave rollback|V7
 T36|~|M6 soak harness (headless, max speed) asserting bounds|V8
 T37|.|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers|V17

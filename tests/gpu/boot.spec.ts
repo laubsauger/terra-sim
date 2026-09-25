@@ -5,7 +5,7 @@ test('app boots on WebGPU and renders a canvas without page errors', async ({ pa
   page.on('pageerror', (e) => errors.push(e.message));
   await page.goto('/');
   await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 20_000 });
-  await expect(page.locator('canvas')).toHaveCount(1);
+  await expect(page.locator('#app > canvas')).toHaveCount(1);
   expect(errors).toEqual([]);
 });
 

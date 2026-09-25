@@ -16,6 +16,7 @@ import { createWater } from './render/water';
 import { createLighting } from './render/lighting';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
+import { createStatsPane } from './ui/statsPane';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -69,6 +70,7 @@ async function main() {
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
   const hud = createPerfHud(stage.renderer, () => fields.bytes());
   const probe = createProbeUI(stage.renderer, stage.camera, fields);
+  const statsPane = createStatsPane(panel.folders.Stats, sim);
 
   let uiVisible = !(params.get('ambientMode') as boolean);
   const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); };
@@ -87,6 +89,7 @@ async function main() {
     if (ran < ticks) clock.unrun(ticks - ran);
     timebar.update();
     probe.update(dt);
+    statsPane.update();
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
