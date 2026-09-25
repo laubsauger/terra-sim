@@ -11,7 +11,7 @@ export default defineConfig({
     launchOptions: { args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--use-angle=metal'] },
   },
   webServer: {
-    command: 'npx vite --port 5199 --strictPort',
+    command: 'TERRA_NO_HMR=1 npx vite --port 5199 --strictPort',
     url: 'http://localhost:5199',
     reuseExistingServer: true,
   },

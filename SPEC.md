@@ -113,7 +113,7 @@ T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|
 T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
 T16|x|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
 T17|x|M2 isostasy column adjust|-
-T18|~|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
+T18|x|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
 T19|.|M2 crust mass budget: subduction → `mantleReservoir` → ridges|volcanism|V3,V2
 T20|.|M3 mantle field: diffuse/advect, plumes, slab sinks, side render glow|V19
 T21|.|M3 crust temp field half-res, geotherm|-
