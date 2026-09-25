@@ -74,7 +74,7 @@ test('hydro GPU substeps match CPU reference', async ({ page }) => {
   expect(res.water).toBeLessThan(1e-3);
   expect(res.flux).toBeLessThan(1e-3);
   expect(res.vel).toBeLessThan(1e-2);
-  expect(res.sed).toBeLessThan(1e-2);
+  expect(res.sed).toBeLessThan(0.05); // sed up to 36: ~1e-3 relative (sedSpeed amplifies f32/f64 differences)
 });
 
 // Quasi-steady flow must settle: a closed basin ends as a flat lake (rivers, sea level and shore render
@@ -92,7 +92,9 @@ test('water poured off-centre in a closed bowl settles to a flat lake', async ({
     for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) if ((x - 105) ** 2 + (z - 128) ** 2 < 144) water[R.idx(x, z)] = 20;
     const rig = await R.makeHydroRig(r, R.voxFromHeights(height), water);
     const before = R.sum64(water);
-    for (let i = 0; i < 40; i++) rig.hydro.step(r, 100);
+    // damped regime (D = kFlow/friction = 0.3): levelling a 100-cell bowl is diffusive, std ≈ 0.4 @ 2000,
+    // 0.02 @ 4000, 0.0015 @ 6000 substeps. 6000 substeps = 3000 ticks at HYDRO_SUBSTEPS = 2.
+    for (let i = 0; i < 60; i++) rig.hydro.step(r, 100);
     const w = await rig.readF('water');
     const s = await rig.readF('surfY');
     let n = 0, sum = 0, sum2 = 0, outside = 0;
@@ -108,6 +110,72 @@ test('water poured off-centre in a closed bowl settles to a flat lake', async ({
   expect(res.std).toBeLessThan(0.01);
   expect(res.outside).toBeLessThan(1e-3);
   expect(res.rel).toBeLessThan(1e-5);
+});
+
+// Live-app failure (low friction): the deep ocean rang with neighbour level jumps of 5-6 voxels, re-excited by
+// every tectonic column shift (water pools at overlaps, gaps go dry). Quasi-steady water must kill such
+// grid-scale level noise within a tick or two of substeps and must not keep oscillating afterwards.
+test('deep ocean: random ±3-voxel level perturbations flatten within 40 substeps, no persistent oscillation', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const r = await makeRenderer();
+    let seed = 7;
+    const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) / 4294967296);
+    const floor = (x: number, z: number) => 53 + 7 * Math.sin(x * 0.07 + 1) * Math.cos(z * 0.05); // depth 16..30
+    const water = new Float32Array(R.NCOL);
+    for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) water[R.idx(x, z)] = 76 - floor(x, z) + (rnd() * 2 - 1) * 3;
+    const rig = await R.makeHydroRig(r, R.voxFromHeights(floor), water);
+    const rough = async () => {
+      const w = await rig.readF('water'), s = await rig.readF('surfY');
+      let t = 0;
+      for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) {
+        const h = s[R.idx(x, z)]! + w[R.idx(x, z)]!;
+        t += Math.abs(h - s[R.idx(x + 1, z)]! - w[R.idx(x + 1, z)]!) + Math.abs(h - s[R.idx(x, z + 1)]! - w[R.idx(x, z + 1)]!);
+      }
+      return t / (2 * R.NCOL);
+    };
+    const r0 = await rough();
+    const trace: number[] = [];
+    for (let i = 0; i < 80; i++) { rig.hydro.step(r, 1); trace.push(await rough()); }
+    return { r0, trace, total0: R.sum64(water), total1: R.sum64(await rig.readF('water')) };
+  });
+  console.log(`ocean roughness ${res.r0.toFixed(3)} → ${[0, 4, 9, 19, 39, 79].map((i) => `${i + 1}:${res.trace[i]!.toExponential(1)}`).join(' ')}`);
+  expect(res.r0).toBeGreaterThan(1.5);
+  expect(res.trace[39]!).toBeLessThan(0.05); // 40 substeps (20 geo ticks at HYDRO_SUBSTEPS = 2)
+  // no ringing: roughness never grows again, substep by substep, and is still falling at 80
+  let rises = 0;
+  for (let i = 1; i < 80; i++) if (res.trace[i]! > res.trace[i - 1]! * 1.001 + 1e-6) rises++;
+  expect(rises).toBe(0);
+  expect(res.trace[79]!).toBeLessThan(0.8 * res.trace[39]!);
+  expect(Math.abs(res.total1 - res.total0) / res.total0).toBeLessThan(1e-7);
+});
+
+// V4 on deep water: realistic inflows (land runoff ~1e-4 voxel/substep) are far below the f32 ulp of a
+// 16-30-voxel ocean column (~2e-6 × a few). Unquantised adds round those deltas the same way every substep
+// → systematic creation/loss of water (fast-math also folds compensation tricks). Fluxes are floored to
+// FLUX_Q so every add is exact: total water must be conserved to float-sum precision, not just ~1e-5.
+test('deep ocean fed by thin runoff conserves water exactly (no rounding bias)', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const r = await makeRenderer();
+    // z < 128: ocean floor 46..60 (depth 16..30); z >= 128: land at 77..79 gently draining into it
+    const height = (x: number, z: number) => z < 128 ? 53 + 7 * Math.sin(x * 0.05) * Math.sin(z * Math.PI / 128) : 77 + 2 * Math.sin((z - 128) * Math.PI / 128) + 0.3 * Math.sin(x * 0.2);
+    const water = new Float32Array(R.NCOL);
+    for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) {
+      const h = height(x, z);
+      water[R.idx(x, z)] = z < 128 ? 76.001 + 0.01 * Math.sin(x * 0.03) - h : 0.003 + 0.001 * Math.sin(x * 0.7 + z);
+    }
+    const rig = await R.makeHydroRig(r, R.voxFromHeights(height), water);
+    const w0 = R.sum64(await rig.readF('water'));
+    const drift: number[] = [];
+    for (let i = 0; i < 4; i++) { rig.hydro.step(r, 1000); drift.push(R.sum64(await rig.readF('water')) - w0); }
+    return { w0, drift };
+  });
+  console.log(`deep-ocean drift after 1k..4k substeps: ${res.drift.map((d) => d.toExponential(2)).join(' ')} (total ${res.w0.toFixed(0)})`);
+  // exact adds: only the f64 sum of f32 values remains; allow 1e-10 relative
+  for (const d of res.drift) expect(Math.abs(d) / res.w0).toBeLessThan(1e-10);
 });
 
 // V1: the world is a torus. Water at x=0 must reach x=NX-1 exactly as it reaches x=1 (same for z);

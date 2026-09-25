@@ -54,8 +54,18 @@ export async function makeHydroRig(renderer: THREE.WebGPURenderer, vox: Uint32Ar
   const readU = async (name: string) => new Uint32Array(await f.read(renderer, name));
   return {
     f, params, derive, hydro, erosion, readF, readU,
-    /** one geo tick of pass 8 as the orchestrator runs it */
+    /** one geo tick of pass 8 (hydro + erosion every tick) */
     tick(substeps?: number) { hydro.step(renderer, substeps); erosion.step(renderer); derive.run(renderer); },
+    /** n geo ticks at sim.ts cadence: `substeps` hydro substeps per tick, erosion every `every` ticks with kGeo × every */
+    simTicks(n: number, substeps = 2, every = 2) {
+      const k0 = erosion.uniforms.kGeo.value;
+      erosion.uniforms.kGeo.value = k0 * every;
+      for (let t = 1; t <= n; t++) {
+        hydro.step(renderer, substeps);
+        if (t % every === 0) { erosion.step(renderer); derive.run(renderer); }
+      }
+      erosion.uniforms.kGeo.value = k0;
+    },
     async mass() { return crustMassCpu(await readU('vox')) + sum64(await readF('sedSusp')); },
   };
 }

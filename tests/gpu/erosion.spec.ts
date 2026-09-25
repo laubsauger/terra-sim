@@ -35,36 +35,63 @@ test('hydraulic + thermal erosion conserve crust + suspended mass', async ({ pag
   expect(Math.abs(res.m1 - res.m0)).toBeLessThan(0.5);
 });
 
-// §C pass 8: rivers must carve valleys. Flow concentrates in a shallow trough on a rained-on slope;
-// capacity grows with depth·speed, so the trough must deepen faster than the sheet-flow flanks.
-test('rain on a slope carves a channel along the flow path', async ({ page }) => {
-  const res = await page.evaluate(async () => {
+// Rained-on slope with two shallow troughs (x = 64, x = 192), run at sim.ts cadence (2 substeps/tick,
+// erosion every 2nd tick with kGeo × 2) under realistic precipitation (3.5e-4 voxel/tick).
+// Returns mean surface drop along each trough and on the flank between them.
+async function slopeRun(page: import('@playwright/test').Page, o: { ticks: number; vegRight: number; erosionRate: number }) {
+  return page.evaluate(async (o) => {
     const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
     const R = await import('/src/sim/hydroRig.ts');
     const L = await import('/src/sim/layout.ts');
     const r = await makeRenderer();
     // z 20→180: ramp 110 → 78 (slope 0.2); z 180..255: ocean floor 60; z 0..20: wall back up (torus)
     const profile = (z: number) => z < 20 ? 60 + 50 * (z / 20) : z < 180 ? 110 - 0.2 * (z - 20) : z < 190 ? 78 - 1.8 * (z - 180) : 60;
-    const height = (x: number, z: number) => profile(z) - 1.5 * Math.max(0, 1 - Math.abs(x - 128) / 20);
+    const trough = (x: number, cx: number) => 1.5 * Math.max(0, 1 - Math.abs(x - cx) / 20);
+    const height = (x: number, z: number) => profile(z) - trough(x, 64) - trough(x, 192);
     const vox = R.voxFromHeights(height, () => L.Mat.SANDSTONE);
     const water = new Float32Array(R.NCOL);
     for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) water[R.idx(x, z)] = Math.max(0, 76 - height(x, z));
     const rig = await R.makeHydroRig(r, vox, water);
-    rig.params.set('erosionRate', 4);
+    const veg = rig.f.cpuArray('veg') as Float32Array;
+    for (let z = 0; z < R.NZ; z++) for (let x = 128; x < R.NX; x++) veg[R.idx(x, z)] = o.vegRight;
+    rig.f.markDirty('veg');
+    rig.params.set('erosionRate', o.erosionRate);
     rig.params.set('thermalErosion', 0); // isolate hydraulic incision
-    rig.hydro.uniforms.rain.value = 0.002;
+    rig.hydro.uniforms.rain.value = 3.5e-4 / 2;
     const s0 = await rig.readF('surfY');
-    for (let t = 0; t < 200; t++) rig.tick(8);
+    rig.simTicks(o.ticks, 2, 2);
     const s1 = await rig.readF('surfY');
+    // mean drop over a band (the incised channel may wander off the trough axis)
     const drop = (x0: number, x1: number) => {
       let d = 0, n = 0;
       for (let z = 60; z < 160; z++) for (let x = x0; x <= x1; x++) { d += s0[R.idx(x, z)]! - s1[R.idx(x, z)]!; n++; }
       return d / n;
     };
-    return { path: drop(126, 130), off: (drop(60, 80) + drop(176, 196)) / 2 };
-  });
-  expect(res.path).toBeGreaterThan(0.2);          // at least ~50 fill units cut along the trough
-  expect(res.path).toBeGreaterThan(2 * res.off);  // incision localised on the flow path
+    return { left: drop(56, 72), right: drop(184, 200), flank: drop(118, 138) };
+  }, o);
+}
+
+// §C pass 8: rivers must carve valleys. Flow concentrates in the troughs; saturated sediment flux grows
+// like q^1.5, so the troughs must deepen much faster than the sheet-flow flank — at a geologic pace
+// (≈0.5-1 voxel per 10 My at max erosionRate), however damped the pipe model is.
+test('rain on a slope carves a channel along the flow path', async ({ page }) => {
+  const res = await slopeRun(page, { ticks: 200, vegRight: 0, erosionRate: 4 });
+  console.log(`channel cut over 200 ticks (10 My): troughs ${res.left.toFixed(3)} / ${res.right.toFixed(3)}, flank ${res.flank.toFixed(3)} voxel`);
+  expect(res.left).toBeGreaterThan(0.4);           // ~0.6 voxel per 10 My mean over a 17-cell band
+  expect(res.left).toBeLessThan(3);                // not a runaway
+  expect(res.left).toBeGreaterThan(3 * res.flank); // incision localised on the flow path
+  expect(res.right).toBeGreaterThan(0.5 * res.left); // both troughs incise (channel growth is an instability, not bit-equal)
+});
+
+// T31 coupling: vegetation shields soil (erodibility × (1 - 0.7·veg)); a forested catchment must incise
+// clearly less than an identical bare one under the same rain. Default erosionRate: detachment-limited
+// regime, where erodibility matters (at max rate both saturate to transport-limited incision).
+test('vegetated slopes erode less than bare ones', async ({ page }) => {
+  const res = await slopeRun(page, { ticks: 400, vegRight: 1, erosionRate: 1 });
+  console.log(`veg: bare trough ${res.left.toFixed(3)}, vegetated trough ${res.right.toFixed(3)} voxel`);
+  expect(res.left).toBeGreaterThan(0.2);
+  expect(res.right).toBeLessThan(0.6 * res.left);
+  expect(res.right).toBeGreaterThan(0); // still erodes, just slower
 });
 
 // Thermal erosion is talus relaxation: slopes above the talus angle slump until they are at talus;

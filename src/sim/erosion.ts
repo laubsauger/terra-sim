@@ -20,13 +20,22 @@
 //
 // kGeo: hydro substeps model minutes of flow, one geo tick is dtGeo = 0.05 My. kGeo is the fraction of the
 // capacity deficit (C - sedSusp) picked up per geo tick: exchange = kGeo · erosionRate · erodibility · (C - s).
-// Capacity C = Kc · |v| · slope · min(depth, dMax)^1.5 (fill units per column). The depth exponent > 1 stands in
-// for Manning's v ∝ d^(2/3): pipe-model speeds saturate near 1 cell/substep, and with C ∝ depth the carried
-// concentration would be the same in a trough and on its flanks → no channelisation. With d^1.5 deeper
-// (converging) flow can hold more per unit water, so flow paths incise faster than sheet-flow flanks.
-// Default kGeo = 0.25 with Kc = 64: a steep (slope 1 voxel/cell) 1-voxel-deep (|v| 0.5 cell/substep) channel in
-// basalt (erodibility 0.4) cuts ≈ 3 fill units/tick ≈ 1 voxel per ~4 My, loose sediment ≈ 5× faster, capped at
-// maxExchange = 64 units/tick. This keeps valleys deepening on the same My scale as orogeny uplift.
+// Capacity C = Kc · √q · slope · min(depth, dMax) (fill units per column), q = |ΔW| = discharge per unit
+// width (water volume per substep per cell, Mei's ΔW from the pipe fluxes). q is fixed by rain × catchment in
+// steady state, so C does not depend on how fast the damped pipe model moves water (the substep velocity
+// q/depth does). Carried concentration C/depth ∝ √q · S, so the saturated sediment flux ∝ q^1.5 · S grows
+// faster than discharge: converging flow paths incise, sheet-flow flanks don't (channelisation).
+// Vegetation: vegF = 1 - VEG_ERODIBILITY_K · veg multiplies both the detachment fraction (with MAT_ERODIBILITY
+// of the top mat) and the capacity (roots bind soil, cover slows overland flow). Capacity matters because
+// channels are mostly transport-limited here: scaling only the detachment fraction left forested troughs
+// cutting 93% as fast as bare ones.
+// The exchange fraction min(1, kGeo·erosionRate·erodibility) never overshoots capacity. With the damped pipe
+// model, incision is transport-limited (load must be carried off), hence the large Kc and hydro's sedSpeed.
+// Calibration (erosion.spec channel test, sim cadence: 2 substeps/tick, erosion every 2nd tick with kGeo × 2,
+// realistic rain 3.5e-4 voxel/tick): a trough draining a ~40×140-cell sandstone slope (S 0.2) cuts ≈ 0.6
+// voxel per 10 My (mean over a 17-cell band) at erosionRate 4, ≈ 0.5 per 10 My at the default 1 (detachment
+// saturates at high rates: transport-limited), sheet-flow flanks ~6× less; vegetated (veg 1) ≈ 0.4× bare.
+// Steep mountain channels hit maxExchange = 64 fill units per erosion step.
 import type * as THREE from 'three/webgpu';
 import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, floor, instanceIndex, uniform, uniformArray, select, ceil } from 'three/tsl';
 import { ReaderKernel, type GpuFields } from '../core/gpu';
@@ -34,10 +43,11 @@ import type { Params } from '../core/params';
 import { NCOL, NY, Mat, MAT_COUNT, MAT_ERODIBILITY, FLAG_CONTINENTAL } from './layout';
 import { tMat, tFill, tAge, tFlags, tPack, tVoxIdx, tColIdx, tColXZ, uMin, uMax } from './tslLayout';
 import { createDerivePass } from './derive';
+import { VEG_ERODIBILITY_K } from './biomeModel';
 
 export const EROSION_DEFAULTS = {
   kGeo: 0.25,        // capacity-deficit fraction exchanged per geo tick (see header)
-  kCap: 64,          // capacity: fill units per (cell/substep · voxel/cell · voxel^1.5 depth)
+  kCap: 6000,        // capacity: fill units per (√(voxel·cell/substep) · voxel/cell · voxel depth)
   minSlope: 0.05,    // voxel/cell floor so flat rivers still carry some load
   maxSlope: 4,
   dMax: 4,           // depth (voxels) above which capacity stops growing (deep water barely moves anyway)
@@ -147,7 +157,8 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
   const D = EROSION_DEFAULTS;
   const surfY = fields.cur('surfY');
   const water = fields.cur('water');
-  const vel = fields.cur<'vec2'>('waterVel');
+  const flux = fields.cur<'vec4'>('flux');
+  const veg = fields.cur('veg');
   const sed = fields.cur('sedSusp');
   const talusOut = fields.cur<'uint'>('talusOut');
 
@@ -165,7 +176,7 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
   });
   const erodTable = uniformArray(ERODIBILITY, 'float');
 
-  // storage buffers: vox, surfY, water, waterVel, sedSusp = 5 (V23)
+  // storage buffers: vox, surfY, water, flux, sedSusp, veg = 6 (V23)
   const hydraulic = new ReaderKernel<'uint'>(fields, 'vox', (vox) => Fn(() => {
     If(instanceIndex.greaterThanEqual(uint(NCOL)), () => { Return(); });
     const i = instanceIndex;
@@ -173,17 +184,24 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const sY = (dx: number, dz: number) => surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))));
     const grad = vec2(sY(1, 0).sub(sY(-1, 0)), sY(0, 1).sub(sY(0, -1))).mul(0.5);
     const slope = clamp(grad.length(), D.minSlope, D.maxSlope);
-    const speed = min(vel.element(i).length(), 1);
+    // discharge per unit width: Mei's ΔW from own outflows and neighbours' inflows (same as hydro's velocity)
+    const f = flux.element(i).toVar();
+    const inR = flux.element(tColIdx(x.add(int(1)), z)).y;
+    const inL = flux.element(tColIdx(x.sub(int(1)), z)).x;
+    const inU = flux.element(tColIdx(x, z.add(int(1)))).w;
+    const inD = flux.element(tColIdx(x, z.sub(int(1)))).z;
+    const q = vec2(inL.sub(f.y).add(f.x).sub(inR), inD.sub(f.w).add(f.z).sub(inU)).mul(0.5).length();
     const dEff = clamp(water.element(i), 0, D.dMax);
-    const depthF = dEff.mul(dEff.sqrt());
-    const C = kCap.mul(speed).mul(slope).mul(depthF).toVar();
+    const vegF = float(1).sub(clamp(veg.element(i), 0, 1).mul(VEG_ERODIBILITY_K)).toVar();
+    const C = kCap.mul(vegF).mul(q.sqrt()).mul(slope).mul(dEff).toVar();
     const s = sed.element(i).toVar();
     const { topY, topV } = scanTop(vox, x, z);
     const m = tMat(topV);
-    const erod = select(topY.greaterThanEqual(int(0)), erodTable.element(m), float(0));
+    const erod = (select(topY.greaterThanEqual(int(0)), erodTable.element(m), float(0)) as THREE.Node<'float'>).mul(vegF);
     const dither = tDither(i, tick, 1);
     If(C.greaterThan(s), () => {
-      const n = quantize(kGeo.mul(erosionScale).mul(erod).mul(C.sub(s)), dither, D.maxExchange);
+      // fraction of the deficit picked up this step, ≤ 1 (never overshoot capacity)
+      const n = quantize(min(kGeo.mul(erosionScale).mul(erod), 1).mul(C.sub(s)), dither, D.maxExchange);
       If(n.greaterThan(uint(0)), () => {
         const got = removeTop(vox, x, z, topY, n);
         sed.element(i).assign(s.add(float(got)));
