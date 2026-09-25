@@ -38,7 +38,7 @@ test('V3: crust + reservoir + magma + lava exactly conserved through melt, erupt
   // magCol.x (what eruptions and the tectonics fix-up trust) must equal the MAGMA voxels, column by column
   for (const m of res.mismatches) expect(m).toBe(0);
   expect(res.finite).toBe(true);
-  expect(res.st.eruptions).toBeGreaterThan(100);
+  expect(res.st.eruptions).toBeGreaterThan(0); // episodes
   expect(res.st.returned).toBeGreaterThan(0);   // chambers carried into the trench were credited back
   expect(res.st.solidified).toBeGreaterThan(0);
   expect(res.st.frozen).toBeGreaterThan(0);
@@ -135,7 +135,8 @@ test('arc volcanism on the overriding continent 3-8 cells inland, none on the su
     }
     for (let z = 0; z < 256; z++) for (let x = 20; x < 128; x++) oceanPending += magCol[L.colIdx(x, z) * 2 + 1]!;
     const total = arcRock.slice(128, 256).reduce((a: number, b: number) => a + b, 0);
-    const near = arcRock.slice(130, 139).reduce((a: number, b: number) => a + b, 0);
+    // chambers sit 3-8 cells inland; arc lava then flows a few cells further, so rock spreads to ~x 145
+    const near = arcRock.slice(130, 146).reduce((a: number, b: number) => a + b, 0);
     const far = arcRock.slice(150, 256).reduce((a: number, b: number) => a + b, 0);
     let peakX = 128; for (let x = 128; x < 256; x++) if (arcRock[x] > arcRock[peakX]) peakX = x;
     return { total, near, far, peakX, andesite, andesiteFlagged, oceanMagma, oceanPending, profile: arcRock.slice(126, 142) };
@@ -189,7 +190,7 @@ test('lava flows downhill, cools, solidifies into rock; surface rises near vent;
       const c = L.colIdx(x, z), d = s1[c]! - s0[c]!;
       rise += d; rx += d * x;
       const dx = x - VX, dz = z - VZ;
-      if (dx * dx + dz * dz <= 9) near = Math.max(near, d);
+      if (dx * dx + dz * dz <= 36) near = Math.max(near, d);
       if (dx * dx + dz * dz > 60 * 60) farDelta = Math.max(farDelta, Math.abs(d));
     }
     return { b0, b1, mid, end: bEnd.total, lavaEnd: bEnd.lava, early, near, farDelta, rise, rockCentroid: rx / rise };
@@ -204,10 +205,105 @@ test('lava flows downhill, cools, solidifies into rock; surface rises near vent;
   expect(res.rockCentroid).toBeLessThan(100 - 1);     // and so did the rock it left
   expect(res.early.tMax).toBeLessThan(1200);          // cooling
   expect(res.lavaEnd).toBe(0);                        // everything froze
-  expect(res.near).toBeGreaterThan(0.5);              // rock built up at the vent
+  expect(res.near).toBeGreaterThan(0.5);              // rock built up around the vent
   expect(res.farDelta).toBe(0);
   expect(res.rise).toBeGreaterThan(40 * 0.95);        // ≈ 40 layers of rock: Σ surface rise over all columns
   expect(res.rise).toBeLessThan(40 * 1.05);
+});
+
+// A lava flow is a tongue that grows downhill from its source. Routing is deterministic steepest descent with
+// channel memory, so a steadily fed flow's front (lava or fresh rock) must advance monotonically downhill as a
+// narrow tongue, not jump around.
+test('flow front advances monotonically downhill as a coherent tongue', async ({ page }) => {
+  test.setTimeout(120_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { makeMagmaRig, hillWorld } = await import('/src/sim/magmaRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const rig = await makeMagmaRig(r, hillWorld(), { mantle: { plumes: [], evolve: false } });
+    const only = { tectonics: false, mantle: false, magma: false };
+    const VX = 100, VZ = 128; // west flank of a hill centred at x = 128: downhill is −x
+    const s0 = await rig.readF('surfY');
+    const b0 = (await rig.budget()).total;
+    const fronts: number[] = [];
+    let width = 0, length = 0;
+    for (let t = 0; t < 60; t++) {
+      rig.lava.inject(r, L.colIdx(VX, VZ), 128); // steady effusion
+      rig.step(1, only);
+      if (t % 5 === 4) {
+        const lv = await rig.readU('lava');
+        const s = await rig.readF('surfY');
+        let front = 0, zMin = 999, zMax = -1, xMax = -999;
+        for (let z = 0; z < 256; z++) for (let x = 0; x < 256; x++) {
+          const c = L.colIdx(x, z);
+          if (lv[c * 2]! === 0 && s[c]! - s0[c]! < 0.02) continue;
+          front = Math.max(front, VX - x); xMax = Math.max(xMax, x);
+          zMin = Math.min(zMin, z); zMax = Math.max(zMax, z);
+        }
+        fronts.push(front);
+        width = zMax - zMin + 1; length = front + (xMax - VX) + 1;
+      }
+    }
+    return { fronts, width, length, drift: (await rig.budget()).total - b0 };
+  });
+  console.log('front', JSON.stringify(res));
+  for (let k = 1; k < res.fronts.length; k++) expect(res.fronts[k]!).toBeGreaterThanOrEqual(res.fronts[k - 1]!);
+  expect(res.fronts.at(-1)! - res.fronts[0]!).toBeGreaterThanOrEqual(6); // it keeps advancing
+  expect(res.fronts.at(-1)!).toBeGreaterThanOrEqual(12);
+  expect(res.width).toBeLessThan(res.length);                            // a tongue, not a blob
+  expect(res.drift).toBe(0);                                             // V3 (inject draws the reservoir)
+});
+
+// An eruption episode reads as a volcano: build-up, a sustained active phase with a persistent lava lake in the
+// vent (fed every tick, not flickering), waning, then a summit crater below the rim — with exact mass throughout.
+test('eruption episode: build-up → active lake → waning → summit crater; exact V3', async ({ page }) => {
+  test.setTimeout(180_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { makeMagmaRig, hillWorld } = await import('/src/sim/magmaRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const w = hillWorld();
+    const VX = 128, VZ = 128; // summit: surface ≈ 100, top voxel y = 99
+    for (let y = 86; y <= 93; y++) w.vox[L.voxIdx(VX, y, VZ)] = L.packVoxel(L.Mat.MAGMA, 255, 0, 0);
+    const rig = await makeMagmaRig(r, w, { mantle: { plumes: [], evolve: false } });
+    const vent = L.colIdx(VX, VZ);
+    const b0 = (await rig.budget()).total;
+    const s0 = await rig.readF('surfY');
+    const phases: number[] = [];
+    let activeTicks = 0, activeNoLake = 0, maxBuildAct = 0, activeActMin = 1;
+    for (let t = 0; t < 700; t++) {
+      rig.step(1, { tectonics: false });
+      const v = await rig.readF('volcano');
+      const ph = v[vent * 4 + 1]!;
+      if (phases.at(-1) !== ph) phases.push(ph);
+      if (ph === 1) maxBuildAct = Math.max(maxBuildAct, v[vent * 4]!);
+      if (ph === 2) {
+        activeTicks++;
+        activeActMin = Math.min(activeActMin, v[vent * 4]!);
+        if ((await rig.readU('lava'))[vent * 2]! === 0) activeNoLake++;
+      }
+      if (phases.length >= 5 && ph === 0) break;
+    }
+    const s = await rig.readF('surfY');
+    let rimMin = 1e9; for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, -1], [1, -1], [-1, 1]]) rimMin = Math.min(rimMin, s[L.colIdx(VX + dx!, VZ + dz!)]!);
+    let flowRise = 0; for (let c = 0; c < L.NCOL; c++) { const x = c & 255, z = c >> 8; if (Math.max(Math.abs(x - VX), Math.abs(z - VZ)) > 3) flowRise += Math.max(0, s[c]! - s0[c]!); }
+    const b1 = await rig.budget();
+    return { phases, activeTicks, activeNoLake, maxBuildAct, activeActMin, vent: s[vent]!, rimMin, flowRise, drift: b1.total - b0, st: await rig.stats() };
+  });
+  console.log('episode', JSON.stringify(res));
+  expect(res.phases).toEqual([1, 2, 3, 4, 0]);   // lifecycle order, one episode
+  expect(res.phases).toContain(2);
+  expect(res.phases.at(-1)).toBe(0);            // episode completed
+  expect(res.activeTicks).toBeGreaterThan(40);  // several My of sustained activity, not a flicker
+  expect(res.activeNoLake).toBe(0);             // the vent holds a lava lake every active tick
+  expect(res.activeActMin).toBe(1);
+  expect(res.maxBuildAct).toBeLessThan(0.31);
+  expect(res.vent).toBeLessThan(res.rimMin - 0.5); // summit crater below the rim
+  expect(res.flowRise).toBeGreaterThan(0.5);    // lava overflowed the crater rim and built flows down the flanks
+  expect(res.st.eruptions).toBe(1);
+  expect(res.drift).toBe(0);
 });
 
 // V2: identical inputs → identical state (integer atomics only, dither from (column, tick) hashes).

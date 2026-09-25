@@ -79,6 +79,7 @@ export function hillWorld(): WorldData {
     w.plateId[colIdx(x, z)] = 0;
   }
   w.plates[0]!.alive = true;
+  w.crustAge.fill(100); // not fresh ridge crust (no fissure lava)
   w.mantleReservoir = 10_000_000;
   return w;
 }

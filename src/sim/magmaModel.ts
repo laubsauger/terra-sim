@@ -6,7 +6,8 @@
 // All of it is integer fill units (255 = one full voxel). Every transfer is an exact integer move:
 //   reservoir → magCol.y            melt generation (atomicAdd reservoir −n)
 //   magCol.y → MAGMA voxel          chamber growth, 255 at a time (column inflates by one layer)
-//   MAGMA voxel → lava.x            eruption, 255 at a time (column above the chamber drops one layer)
+//   MAGMA voxel → lava.x            effusion at an active vent (emptied chamber voxel: column above drops a layer)
+//   crust ↔ reservoir               summit crater carve (+) and rim spatter (−), exact via the reservoir
 //   MAGMA voxel → pluton voxel      chamber crystallization (magma → crust)
 //   lava.x → crust voxel            solidification (top-up + new BASALT/ANDESITE voxels)
 //   reservoir → lava.x              minor ridge fissure lava
@@ -41,28 +42,52 @@ export const MAGMA = {
   meltAccMax: 255 * 4,   // pending melt cap per column; beyond it melting pauses
   segMin: 32,            // pending ≥ this may segregate early as a partial MAGMA voxel …
   segTau: 3,             // … with mean wait segTau My (full 255 always segregates), so no melt stays in limbo
-  chamberMax: 12,        // MAGMA voxels per column; a full chamber must erupt
+  chamberMax: 12,        // MAGMA voxels per column (incl. drained cavities); beyond it melting there pauses.
+                         // Chambers inflate their column but isostasy counts only crust mass: keep them small.
   depthMin: 2,           // chamber roof depth below surface: clamp(thickness / 3, depthMin, depthMax)
   depthMax: 10,
-  lidPerVoxel: 4,        // overpressure: erupts only with n ≥ 1 + lid / lidPerVoxel chamber voxels
-  eruptRate: 3,          // per My (× volcanism) once overpressured
+  lidPerVoxel: 4,        // overpressure: an episode starts only with n ≥ 1 + lid / lidPerVoxel chamber voxels
   freezeTau: 10,         // My, mean residence of a chamber voxel before crystallizing (P = n·dt/τ per step)
   reservoirMin: 255 * 256, // melting pauses below this reservoir level (snapshot, deterministic)
   silAndesite: 128,      // silica code ≥ this → ANDESITE lava / GRANITE pluton (FLAG_CONTINENTAL)
 } as const;
+
+/**
+ * Eruption episodes (per vent column, state in the 'volcano' field). Vents are local maxima of chamber mass
+ * (pending melt focuses toward them), so a volcano is one coherent vent, not per-column flicker.
+ *   IDLE → (overpressured, repose over) BUILD → ACTIVE (steady effusion into the summit lava lake) → WANING
+ *   → POST (lake freezes, then the summit crater is carved) → IDLE (repose).
+ */
+export const VOLC = {
+  tBuild: 1,           // My of build-up (degassing glow, activity 0 → buildAct)
+  buildAct: 0.3,
+  tActive: [2, 4] as const, // My, active phase length (hash per vent and episode)
+  tWane: 1.5,          // My, effusion and activity ramp down
+  repose: [2, 6] as const,  // My between episodes
+  effuseMin: 600,      // units/My minimum effusion while active; otherwise the chamber drains over the episode
+  minCharge: 4,        // full-voxel equivalents of magma needed to start an episode (few, large volcanoes)
+  ventRadius: 2,       // a vent is the chamber-mass maximum over (2r+1)² columns with no erupting neighbour
+  craterDepth: 1.5,    // layers below the lowest rim neighbour
+  craterMax: 3,        // layers carved at most per carve event
+} as const;
+export const PHASE = { IDLE: 0, BUILD: 1, ACTIVE: 2, WANING: 3, POST: 4 } as const;
 
 export const LAVA = {
   tBasalt: 1200,     // eruption °C, silica 0
   tAndesite: 1000,   // eruption °C, silica 255
   tSolid: 750,       // below: freezes completely
   tAmb: 15,
-  kAir: 0.6,         // 1/My cooling in air for a 1-layer flow (thicker cools slower: / (1 + 0.5·layers))
+  kAir: 0.4,         // 1/My cooling in air for a thin film; thick lava: / (1 + thickK·layers) → hot core, dark margins
+  thickK: 1.0,
   kWater: 25,        // 1/My quench under water
   wetDepth: 0.05,    // water depth (voxel-y) that counts as submerged
-  mobility: 1,       // fraction of head excess moved per substep at full fluidity (× 0.2 per neighbour)
-  yield: 0.08,       // layers of head difference below which lava does not move (Bingham)
-  freezeRate: 0.25,  // 1/My, fraction of hot lava crusting over into rock per My
-  thin: 24,          // units; thinner films freeze at once
+  main: 0.8,         // share of fluid mass sent down the steepest-descent neighbour per substep
+  spread: 0.05,      // share leaking to each lower axis neighbour (viscous spread, levee building)
+  chanBias: 0.3,     // routing bonus (layers/cell) for neighbours with full channel memory
+  memGain: 24,       // channel memory gained per substep with lava present (0..255); decays ~1/128 per substep
+  yield: 0.05,       // layers of head difference below which lava does not move (Bingham)
+  freezeRate: 0.6,   // 1/My, fraction crusting over per My, × (1 − fluidity): hot fed cores barely freeze
+  thin: 6,           // units; thinner films freeze at once
   substeps: 2,       // flow substeps per tick
   maxNewVoxels: 4,   // rock voxels stacked per column per tick
 } as const;
@@ -70,7 +95,7 @@ export const LAVA = {
 /** magmaCtr slots. ERUPTIONS..SOLIDIFIED are cumulative stats; clearStats() zeroes them. */
 export const MCTR = {
   GATHER_OLD: 0, GATHER_NEW: 1, RES_SNAP: 2,
-  ERUPTIONS: 3,  // eruption events (one MAGMA voxel each)
+  ERUPTIONS: 3,  // eruption episodes (vent enters ACTIVE)
   DRAWN: 4,      // units drawn from the reservoir (melt + ridge lava + inject)
   RETURNED: 5,   // units of magma lost to subduction, credited back to the reservoir
   FROZEN: 6,     // units of chamber magma crystallized into plutons
@@ -118,9 +143,12 @@ export function chamberDepth(thickness: number): number {
 }
 
 // ---- lava.y packing: temp °C × 16 in bits 0-15, silica code 0..255 in bits 16-23 ----
-export const encLavaY = (tC: number, sil: number) => (Math.min(65535, Math.max(0, Math.round(tC * 16))) | ((sil & 0xff) << 16)) >>> 0;
+export const encLavaY = (tC: number, sil: number, mem = 0) => (Math.min(65535, Math.max(0, Math.round(tC * 16))) | ((sil & 0xff) << 16) | ((mem & 0xff) << 24)) >>> 0;
 export const lavaTempC = (y: number) => (y & 0xffff) / 16;
 export const lavaSil = (y: number) => (y >>> 16) & 0xff;
+/** Channel memory 0..255 (recent lava passage; routing prefers remembered channels). */
+export const lavaMem = (y: number) => y >>> 24;
+
 
 export interface MagmaBudget { crust: number; reservoir: number; chambers: number; pending: number; lava: number; total: number }
 
