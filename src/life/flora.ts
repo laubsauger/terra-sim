@@ -19,16 +19,16 @@ import {
   smoothstep, clamp, floor, max, min, sin, cos, select, pow,
 } from 'three/tsl';
 import type { GpuFields } from '../core/gpu';
-import { NX, NZ, CELL, BLOCK_SIZE } from '../sim/layout';
+import { NX, NZ, CELL, BLOCK_SIZE, Y_SEA_NOMINAL } from '../sim/layout';
 import { tColIdx } from '../sim/tslLayout';
-import { BIOME_COUNT } from '../sim/biomeModel';
 import { columnSampler, updateRenderColumns, tWorldToCell, tWorldY, AMB_PERIOD } from '../render/space';
 import {
   FLORA, FLORA_RULES, GRID_L, GRID_S, NSLOT, NSLOT_L, JITTER, EDGE_MARGIN, H, KIND_COUNT, KIND_SET, KIND_BASE, KIND_NAMES,
   LIST_SIZE, SPECIES_COUNT, SPECIES_KIND, SPECIES_SIZE, SPECIES_COLOR, SPECIES_TRUNK, PETALS, Kind, Sp,
+  LIFE_BIOMES, TREELINE as T, TREELINE_BIOME,
 } from './lifeModel';
 import {
-  treeGeometry, pineGeometry, cactusGeometry, acaciaGeometry, shrubGeometry, grassGeometry, flowerGeometry,
+  treeGeometry, pineGeometry, cactusGeometry, acaciaGeometry, shrubGeometry, grassGeometry, flowerGeometry, cypressGeometry,
 } from './geometry';
 
 type F = THREE.Node<'float'>;
@@ -70,6 +70,8 @@ export interface Flora {
   /** Advance the grow ramp and wind clock. */
   frame(dt: number, ambTime: number): void;
   setQuality(high: boolean): void;
+  /** Emergent sea level (voxel y), e.g. sim.stats.seaLevel. Picked up at the next refresh. */
+  setSeaLevel(y: number): void;
   /** Test/debug handles: per-slot state (vec4), per-kind lists, indirect args (5 u32 per kind). */
   buffers: { state: THREE.BufferAttribute; lists: THREE.BufferAttribute; args: THREE.IndirectStorageBufferAttribute };
   meshes: THREE.Mesh[];
@@ -87,7 +89,7 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
   const lists = instancedArray(LIST_SIZE, 'uint');
   lists.setName('lifeFloraLists');
 
-  const geos = [treeGeometry(), pineGeometry(), cactusGeometry(), acaciaGeometry(), shrubGeometry(), grassGeometry(), flowerGeometry()];
+  const geos = [treeGeometry(), pineGeometry(), cactusGeometry(), acaciaGeometry(), shrubGeometry(), grassGeometry(), flowerGeometry(), cypressGeometry()];
   const argsArr = new Uint32Array(KIND_COUNT * 5);
   geos.forEach((g, k) => { argsArr[k * 5] = g.index!.count; });
   const argsAttr = new THREE.IndirectStorageBufferAttribute(argsArr, 1);
@@ -101,12 +103,14 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
   const spColor = uniformArray(SPECIES_COLOR.map(lin), 'color');
   const spTrunk = uniformArray(SPECIES_TRUNK.map(lin), 'color');
   const petals = uniformArray(PETALS.map(lin), 'color');
+  const treeBiome = uniformArray([...TREELINE_BIOME], 'float');
 
   const uQuality = uniform(opts.highQuality === false ? FLORA.LOW_QUALITY : 1);
   const uBlendNow = uniform(1); // ramp value at the moment of a refresh (compute)
   const uSnap = uniform(0, 'uint');
   const uBlend = uniform(1);    // ramp value for drawing
   const uTime = uniform(0);     // wrapped ambience clock (wind)
+  const uSeaLevel = uniform(Y_SEA_NOMINAL); // emergent sea level (voxel y) for the altitude zonation
 
   // ---- refresh + compact kernel ----
   const clearArgs = Fn(() => {
@@ -137,15 +141,27 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
     const slope = gx.mul(gx).add(gz.mul(gz)).sqrt();
 
     const b = asU(biome.element(ci));
-    const bi = select(b.lessThan(uint(BIOME_COUNT)), b, uint(0));
+    const bi = select(b.lessThan(uint(LIFE_BIOMES)), b, uint(0)).toVar();
     const rule = (rules.element(bi.mul(uint(2)).add(set)) as unknown as V4).toVar();
     const v = asF(veg.element(ci)).toVar();
-    const occ = tSlotRand(local, set, H.OCC).lessThan(v.mul(rule.x))
+    // altitude zonation (lifeModel TREELINE, mirrors floraDecide)
+    const alt = asF(S.surfAt(cx, cz)).sub(uSeaLevel).toVar();
+    const bare = float(1).sub(smoothstep(T.BARE_A0, T.BARE_A1, alt));
+    const line = asF(treeBiome.element(bi)).mul(smoothstep(T.TREE_A0, T.TREE_A1, alt)).toVar();
+    const isLarge = isSmall.not();
+    const p = select(isLarge, v.mul(rule.x).mul(float(1).sub(line)), v.mul(rule.x.add(line.mul(T.LINE_BOOST)))).mul(bare);
+    const occ = tSlotRand(local, set, H.OCC).lessThan(p)
       .and(tSlotRand(local, set, H.QUALITY).lessThan(uQuality))
       .and(wet.lessThanEqual(FLORA.WET_MAX)).and(slope.lessThanEqual(FLORA.SLOPE_MAX)).and(inside);
-    const pick = select(tSlotRand(local, set, H.SPECIES).lessThan(rule.w), rule.z, rule.y);
+    const pick0 = select(tSlotRand(local, set, H.SPECIES).lessThan(rule.w), rule.z, rule.y).toVar();
+    const broad = pick0.equal(float(Sp.BROADLEAF)).or(pick0.equal(float(Sp.BROADLEAF_RAIN)));
+    const toPine = broad.and(tSlotRand(local, set, H.ALT).lessThan(smoothstep(T.PINE_A0, T.PINE_A1, alt)));
+    const lineSp = select(tSlotRand(local, set, H.ALT2).lessThan(0.45), float(Sp.SHRUB_TUNDRA), float(Sp.GRASS_ALPINE));
+    const toLine = tSlotRand(local, set, H.ALT).lessThan(line.mul(T.LINE_SHARE));
+    const pick = select(isLarge, select(toPine, float(Sp.PINE), pick0), select(toLine, lineSp, pick0));
     const sp = select(occ, uint(pick), uint(0)).toVar();
-    const tScale = select(occ, tSlotRand(local, set, H.SCALE).mul(0.5).add(0.75).mul(v.mul(0.4).add(0.6)), float(0));
+    const stunt = select(isLarge, float(1).sub(line.mul(T.STUNT)), float(1));
+    const tScale = select(occ, tSlotRand(local, set, H.SCALE).mul(0.5).add(0.75).mul(v.mul(0.4).add(0.6)).mul(stunt), float(0));
 
     const st = (state.element(s) as unknown as V4).toVar();
     const oldSp = uint(st.w).toVar();
@@ -261,6 +277,7 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
       uTime.value = ((ambTime % AMB_PERIOD) + AMB_PERIOD) % AMB_PERIOD;
     },
     setQuality(high) { uQuality.value = high ? 1 : FLORA.LOW_QUALITY; },
+    setSeaLevel(y) { if (Number.isFinite(y)) uSeaLevel.value = y; },
     dispose() {
       for (const m of meshes) { m.geometry.dispose(); (m.material as THREE.Material).dispose(); }
       group.removeFromParent();

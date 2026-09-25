@@ -131,6 +131,16 @@ export function acaciaGeometry(): THREE.BufferGeometry {
   ]);
 }
 
+/** Columnar cypress: short trunk, tall narrow flame-shaped crown. */
+export function cypressGeometry(): THREE.BufferGeometry {
+  const c = new THREE.Vector3(0, 0.55, 0);
+  return merge([
+    { g: at(cyl(0.05, 0.035, 0.16, 5), 0, 0.08, 0), attr: flora(0, 0.2) },
+    { g: blob(0.5, 1, 0, 0.5, 0, 0.3, 0.84, 0.3), attr: flora(1, 0.8), puff: { c, k: 0.35 } },
+    { g: blob(0.2, 1, 0, 0.9, 0, 0.55, 0.9, 0.55), attr: flora(1, 1), puff: { c, k: 0.35 } },
+  ]);
+}
+
 export function shrubGeometry(): THREE.BufferGeometry {
   const c = new THREE.Vector3(0, 0.15, 0);
   const b = (g: THREE.BufferGeometry): Part => ({ g, attr: flora(1, 0.6), puff: { c, k: 0.5 } });

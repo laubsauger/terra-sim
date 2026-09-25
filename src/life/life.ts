@@ -19,6 +19,8 @@ export interface Life {
   update(dt: number, ambTime: number): void;
   setEnabled(v: boolean): void;
   setHighQuality(v: boolean): void;
+  /** Emergent sea level (voxel y, sim.stats.seaLevel) for the altitude treeline. Cheap; call per frame. */
+  setSeaLevel(y: number): void;
   /** Ask for a flora refresh soon (sim ticked, load, god tools); rate-limited to one per 0.5 s. */
   invalidate(): void;
   /** Resolves once the first column map is read back and creatures have spawned. */
@@ -87,6 +89,7 @@ export function createLife(fields: GpuFields, renderer: THREE.WebGPURenderer, sc
       creatures.setQuality(v);
       dirty = true;
     },
+    setSeaLevel(y) { flora.setSeaLevel(y); },
     invalidate() { dirty = true; },
     whenReady: () => ready,
     dispose() {

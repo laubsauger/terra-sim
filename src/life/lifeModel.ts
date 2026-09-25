@@ -5,7 +5,14 @@ import { NX, NZ, BLOCK_SIZE, CELL } from '../sim/layout';
 
 // ---- flora ----
 
-/** Plant species. 0 = empty slot. Species picks mesh kind, colour and size. */
+/**
+ * Biome ids life handles beyond the ones biomeModel.ts exports today. Ids are final (climate agent);
+ * switch to Biome.* once they land there. LIFE_BIOMES bounds every per-biome table here.
+ */
+export const LBiome = { ...Biome, STEPPE: 11, SHRUBLAND: 12, COLD_DESERT: 13 } as const;
+export const LIFE_BIOMES = Math.max(BIOME_COUNT, 14);
+
+/** Plant species. 0 = empty slot. Species picks mesh kind, colour and size. Not persisted, so ids may change freely. */
 export const Sp = {
   NONE: 0,
   BROADLEAF: 1,
@@ -17,31 +24,50 @@ export const Sp = {
   GRASS_DRY: 7,
   FLOWER: 8,
   ACACIA: 9,
-  SHRUB_TUNDRA: 10,
+  SHRUB_TUNDRA: 10, // also the low shrub at the treeline
   FERN: 11,
+  GRASS_ALPINE: 12, // alpine meadow / treeline tufts
+  SHRUB_SAGE: 13,   // shrubland: dense rounded olive/sage scrub
+  CYPRESS: 14,      // shrubland: columnar cypress
+  GRASS_STEPPE: 15,
+  SHRUB_STEPPE: 16,
+  HARDY_TREE: 17,   // steppe: occasional small tough tree
+  CUSHION: 18,      // cold desert: sparse cushion shrubs
 } as const;
-export const SPECIES_COUNT = 12;
+export const SPECIES_COUNT = 19;
 
-/** Mesh kinds (one indirect draw each). Kinds 0-3 live on the large slot set, 4-6 on the small one. */
-export const Kind = { TREE: 0, PINE: 1, CACTUS: 2, ACACIA: 3, SHRUB: 4, GRASS: 5, FLOWER: 6 } as const;
-export const KIND_COUNT = 7;
-export const KIND_NAMES = ['tree', 'pine', 'cactus', 'acacia', 'shrub', 'grass', 'flower'] as const;
-export const KIND_SET: readonly number[] = [0, 0, 0, 0, 1, 1, 1];
+/** Mesh kinds (one indirect draw each). KIND_SET: 0 = large slot set, 1 = small. */
+export const Kind = { TREE: 0, PINE: 1, CACTUS: 2, ACACIA: 3, SHRUB: 4, GRASS: 5, FLOWER: 6, CYPRESS: 7 } as const;
+export const KIND_COUNT = 8;
+export const KIND_NAMES = ['tree', 'pine', 'cactus', 'acacia', 'shrub', 'grass', 'flower', 'cypress'] as const;
+export const KIND_SET: readonly number[] = [0, 0, 0, 0, 1, 1, 1, 0];
 
-/** Species → mesh kind. */
-export const SPECIES_KIND: readonly number[] = [
-  -1, Kind.TREE, Kind.TREE, Kind.PINE, Kind.CACTUS, Kind.SHRUB, Kind.GRASS, Kind.GRASS, Kind.FLOWER, Kind.ACACIA, Kind.SHRUB, Kind.GRASS,
+// Per species: mesh kind, world height of the unit-height mesh at scale 1, foliage + trunk colour (sRGB).
+const SPECIES_TABLE: readonly [number, number, number, number][] = [
+  [-1, 0, 0xff00ff, 0xff00ff],
+  [Kind.TREE, 0.062, 0x6cb743, 0x7a5236],     // BROADLEAF
+  [Kind.TREE, 0.078, 0x2e7a3c, 0x5a3d27],     // BROADLEAF_RAIN
+  [Kind.PINE, 0.078, 0x2f6b52, 0x654630],     // PINE
+  [Kind.CACTUS, 0.052, 0x74a95e, 0x5f8f4e],   // CACTUS
+  [Kind.SHRUB, 0.012, 0x8f9a58, 0x7a6243],    // SHRUB_DRY
+  [Kind.GRASS, 0.015, 0x7cc64a, 0x5c9a3a],    // GRASS
+  [Kind.GRASS, 0.017, 0xd5b95c, 0xa08840],    // GRASS_DRY
+  [Kind.FLOWER, 0.015, 0x76b84a, 0x4f9a3c],   // FLOWER
+  [Kind.ACACIA, 0.058, 0x93a848, 0x6e5038],   // ACACIA
+  [Kind.SHRUB, 0.011, 0x8c7046, 0x6f5a3a],    // SHRUB_TUNDRA
+  [Kind.GRASS, 0.018, 0x3f9642, 0x2f7434],    // FERN
+  [Kind.GRASS, 0.012, 0x8fbf5a, 0x6c9a44],    // GRASS_ALPINE
+  [Kind.SHRUB, 0.02, 0x6a8a48, 0x5d5a3c],     // SHRUB_SAGE
+  [Kind.CYPRESS, 0.07, 0x3d6b45, 0x5a4330],   // CYPRESS
+  [Kind.GRASS, 0.014, 0xb8b46e, 0x8e8a4e],    // GRASS_STEPPE
+  [Kind.SHRUB, 0.011, 0x9aa27e, 0x6e6a4c],    // SHRUB_STEPPE
+  [Kind.TREE, 0.04, 0x7d9a4a, 0x6a4a32],      // HARDY_TREE
+  [Kind.SHRUB, 0.008, 0xa3a06c, 0x7a7050],    // CUSHION
 ];
-/** World height of the unit-height mesh at scale 1. */
-export const SPECIES_SIZE: readonly number[] = [0, 0.062, 0.078, 0.078, 0.052, 0.012, 0.015, 0.017, 0.015, 0.058, 0.011, 0.018];
-/** Foliage / main colour (sRGB hex). */
-export const SPECIES_COLOR: readonly number[] = [
-  0xff00ff, 0x6cb743, 0x2e7a3c, 0x2f6b52, 0x74a95e, 0x8f9a58, 0x7cc64a, 0xd5b95c, 0x76b84a, 0x93a848, 0x9a6a48, 0x3f9642,
-];
-/** Trunk / secondary colour (sRGB hex). */
-export const SPECIES_TRUNK: readonly number[] = [
-  0xff00ff, 0x7a5236, 0x5a3d27, 0x654630, 0x5f8f4e, 0x7a6243, 0x5c9a3a, 0xa08840, 0x4f9a3c, 0x6e5038, 0x6f5a3a, 0x2f7434,
-];
+export const SPECIES_KIND: readonly number[] = SPECIES_TABLE.map((r) => r[0]);
+export const SPECIES_SIZE: readonly number[] = SPECIES_TABLE.map((r) => r[1]);
+export const SPECIES_COLOR: readonly number[] = SPECIES_TABLE.map((r) => r[2]);
+export const SPECIES_TRUNK: readonly number[] = SPECIES_TABLE.map((r) => r[3]);
 /** Flower petal colours (sRGB hex), picked per slot by hash. */
 export const PETALS: readonly number[] = [0xff6f91, 0xffd23f, 0xf6f2ff, 0xb28dff, 0xff9a3c];
 
@@ -79,21 +105,56 @@ export const FLORA = {
   SWITCH_MIN: 0.02,
 } as const;
 
+/**
+ * Altitude zonation inside a biome (voxels above the emergent sea level). The climate pass sets
+ * biome + veg (incl. its own temperature treeline → ALPINE); this only shapes the transition:
+ * forest thins and stunts from TREE_A0 to TREE_A1, broadleaf gives way to pine from PINE_A0 to
+ * PINE_A1, low shrubs and tufts fill in where trees fade, and every plant fades out from BARE_A0 to
+ * BARE_A1 (bare rock and snow). All ramps are smoothsteps.
+ */
+export const TREELINE = {
+  TREE_A0: 10, TREE_A1: 22,
+  PINE_A0: 5, PINE_A1: 15,
+  /** Tree scale at the treeline, relative to lowland. */
+  STUNT: 0.45,
+  /** Extra small-slot occupancy per unit veg where trees have faded (forest biomes). */
+  LINE_BOOST: 1.2,
+  /** Share of small slots that turn into treeline shrubs/tufts where trees have faded. */
+  LINE_SHARE: 0.8,
+  BARE_A0: 26, BARE_A1: 34,
+} as const;
+/** Biomes whose trees follow the altitude treeline (1) or not (0). */
+export const TREELINE_BIOME: readonly number[] = Array.from({ length: LIFE_BIOMES }, (_, b) =>
+  b === LBiome.TAIGA || b === LBiome.TEMPERATE_FOREST || b === LBiome.RAINFOREST ? 1 : 0);
+
+export const smoothstep = (e0: number, e1: number, x: number) => {
+  const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+
 /** Per (biome, slot set): probability per unit veg that a slot is occupied, species a/b, P(b). */
 export interface FloraRule { density: number; a: number; b: number; pB: number }
 const R = (density: number, a: number, b = a, pB = 0): FloraRule => ({ density, a, b, pB });
 const NONE = R(0, Sp.NONE);
 
-/** FLORA_RULES[biome] = [large set rule, small set rule]. Nothing on ocean, ice, alpine, beach. */
+/**
+ * FLORA_RULES[biome] = [large set rule, small set rule]. Nothing on ocean, ice, beach; alpine gets
+ * meadow tufts and flowers only (up to the bare zone).
+ */
 export const FLORA_RULES: readonly (readonly [FloraRule, FloraRule])[] = (() => {
-  const t: [FloraRule, FloraRule][] = Array.from({ length: BIOME_COUNT }, () => [NONE, NONE]);
-  t[Biome.TUNDRA] = [NONE, R(1.4, Sp.SHRUB_TUNDRA, Sp.FLOWER, 0.12)];
-  t[Biome.TAIGA] = [R(1.3, Sp.PINE), R(0.35, Sp.SHRUB_TUNDRA, Sp.FERN, 0.4)];
-  t[Biome.TEMPERATE_FOREST] = [R(0.9, Sp.BROADLEAF, Sp.PINE, 0.12), R(0.55, Sp.GRASS, Sp.FLOWER, 0.15)];
-  t[Biome.GRASSLAND] = [R(0.07, Sp.BROADLEAF), R(1.7, Sp.GRASS, Sp.FLOWER, 0.16)];
-  t[Biome.DESERT] = [R(2.6, Sp.CACTUS), R(3.5, Sp.SHRUB_DRY)];
-  t[Biome.SAVANNA] = [R(0.3, Sp.ACACIA), R(2.2, Sp.GRASS_DRY, Sp.SHRUB_DRY, 0.1)];
-  t[Biome.RAINFOREST] = [R(1.05, Sp.BROADLEAF_RAIN), R(0.7, Sp.FERN, Sp.FLOWER, 0.08)];
+  const t: [FloraRule, FloraRule][] = Array.from({ length: LIFE_BIOMES }, () => [NONE, NONE]);
+  const B = LBiome;
+  t[B.TUNDRA] = [NONE, R(1.4, Sp.SHRUB_TUNDRA, Sp.FLOWER, 0.12)];
+  t[B.TAIGA] = [R(1.3, Sp.PINE), R(0.35, Sp.SHRUB_TUNDRA, Sp.FERN, 0.4)];
+  t[B.TEMPERATE_FOREST] = [R(0.9, Sp.BROADLEAF, Sp.PINE, 0.12), R(0.55, Sp.GRASS, Sp.FLOWER, 0.15)];
+  t[B.GRASSLAND] = [R(0.07, Sp.BROADLEAF), R(1.7, Sp.GRASS, Sp.FLOWER, 0.16)];
+  t[B.DESERT] = [R(2.6, Sp.CACTUS), R(3.5, Sp.SHRUB_DRY)];
+  t[B.SAVANNA] = [R(0.3, Sp.ACACIA), R(2.2, Sp.GRASS_DRY, Sp.SHRUB_DRY, 0.1)];
+  t[B.RAINFOREST] = [R(1.05, Sp.BROADLEAF_RAIN), R(0.7, Sp.FERN, Sp.FLOWER, 0.08)];
+  t[B.ALPINE] = [NONE, R(3.0, Sp.GRASS_ALPINE, Sp.FLOWER, 0.22)];
+  t[B.STEPPE] = [R(0.05, Sp.HARDY_TREE), R(1.8, Sp.GRASS_STEPPE, Sp.SHRUB_STEPPE, 0.25)];
+  t[B.SHRUBLAND] = [R(0.12, Sp.CYPRESS), R(2.0, Sp.SHRUB_SAGE, Sp.GRASS_DRY, 0.2)];
+  t[B.COLD_DESERT] = [NONE, R(1.5, Sp.CUSHION)];
   return t;
 })();
 
@@ -108,7 +169,7 @@ export function hashU(x: number): number {
   return (x ^ (x >>> 16)) >>> 0;
 }
 /** Hash channels per slot. */
-export const H = { OCC: 0, SPECIES: 1, SCALE: 2, JX: 3, JZ: 4, YAW: 5, QUALITY: 6, TINT: 7, SQUASH: 8, PETAL: 9 } as const;
+export const H = { OCC: 0, SPECIES: 1, SCALE: 2, JX: 3, JZ: 4, YAW: 5, QUALITY: 6, TINT: 7, SQUASH: 8, PETAL: 9, ALT: 10, ALT2: 11 } as const;
 /** Key of (slot-local index, set, channel): local < 2^16, channel < 16. */
 export const slotKey = (local: number, set: number, ch: number) => (local * 16 + ch + set * 0x1000000) >>> 0;
 export const slotRand = (local: number, set: number, ch: number) => (hashU(slotKey(local, set, ch)) >>> 8) / 16777216;
@@ -196,19 +257,36 @@ export function waterNear(m: ColumnMap, x: number, z: number): number {
  * CPU reference of the flora decision for one slot (what the GPU kernel targets, before the
  * grow/shrink ramp). Returns species (0 = none) and target scale.
  */
-export function floraDecide(m: ColumnMap & { veg: Float32Array }, slot: number, quality = 1): { species: number; scale: number } {
+export function floraDecide(m: ColumnMap & { veg: Float32Array }, slot: number, quality = 1, seaLevel = 76): { species: number; scale: number } {
   const { set, local } = slotInfo(slot);
   const [x, z] = slotXZ(slot);
   const none = { species: 0, scale: 0 };
   if (Math.abs(x) > BLOCK_SIZE / 2 - EDGE_MARGIN[set]! || Math.abs(z) > BLOCK_SIZE / 2 - EDGE_MARGIN[set]!) return none;
   const c = columnAt(x, z);
-  const rule = FLORA_RULES[m.biome[c]!]?.[set] ?? NONE;
+  const b = m.biome[c]! < LIFE_BIOMES ? m.biome[c]! : 0;
+  const rule = FLORA_RULES[b]![set]!;
   const veg = m.veg[c]!;
-  if (slotRand(local, set, H.OCC) >= veg * rule.density) return none;
+  const T = TREELINE;
+  const alt = m.surfY[c]! - seaLevel;
+  const above = smoothstep(T.TREE_A0, T.TREE_A1, alt); // 0 lowland → 1 above the treeline
+  const bare = 1 - smoothstep(T.BARE_A0, T.BARE_A1, alt);
+  const line = TREELINE_BIOME[b]! * above;
+  const p = set === 0
+    ? veg * rule.density * (1 - line) * bare
+    : veg * (rule.density + line * T.LINE_BOOST) * bare;
+  if (slotRand(local, set, H.OCC) >= p) return none;
   if (slotRand(local, set, H.QUALITY) >= quality) return none;
   if (cornerWater(m, x, z) > FLORA.WET_MAX || slopeAt(m, x, z) > FLORA.SLOPE_MAX) return none;
-  const species = slotRand(local, set, H.SPECIES) < rule.pB ? rule.b : rule.a;
-  return { species, scale: (0.75 + 0.5 * slotRand(local, set, H.SCALE)) * (0.6 + 0.4 * veg) };
+  let species = slotRand(local, set, H.SPECIES) < rule.pB ? rule.b : rule.a;
+  let scale = (0.75 + 0.5 * slotRand(local, set, H.SCALE)) * (0.6 + 0.4 * veg);
+  if (set === 0) {
+    const broad = species === Sp.BROADLEAF || species === Sp.BROADLEAF_RAIN;
+    if (broad && slotRand(local, set, H.ALT) < smoothstep(T.PINE_A0, T.PINE_A1, alt)) species = Sp.PINE;
+    scale *= 1 - T.STUNT * line;
+  } else if (slotRand(local, set, H.ALT) < line * T.LINE_SHARE) {
+    species = slotRand(local, set, H.ALT2) < 0.45 ? Sp.SHRUB_TUNDRA : Sp.GRASS_ALPINE;
+  }
+  return { species, scale };
 }
 
 // ---- creatures ----
@@ -234,4 +312,4 @@ export const CREATURES = {
   MAP_S: 2,
 } as const;
 
-export const GRAZING = new Set<number>([Biome.GRASSLAND, Biome.SAVANNA]);
+export const GRAZING = new Set<number>([LBiome.GRASSLAND, LBiome.SAVANNA, LBiome.STEPPE]);
