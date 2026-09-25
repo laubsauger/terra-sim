@@ -15,6 +15,7 @@ import { createSides } from './render/sides';
 import { createWater } from './render/water';
 import { createLighting } from './render/lighting';
 import { setVertEx } from './render/space';
+import { createProbeUI } from './ui/probe';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -67,9 +68,10 @@ async function main() {
   const panel = createPanel(params);
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
   const hud = createPerfHud(stage.renderer, () => fields.bytes());
+  const probe = createProbeUI(stage.renderer, stage.camera, fields);
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); };
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); };
   applyUi();
   bindKeys({
     toggleUI: () => { uiVisible = !uiVisible; applyUi(); },
@@ -84,12 +86,13 @@ async function main() {
     const ran = sim.runTicks(ticks);
     if (ran < ticks) clock.unrun(ticks - ran);
     timebar.update();
+    probe.update(dt);
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world };
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
 

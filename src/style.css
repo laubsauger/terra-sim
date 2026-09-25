@@ -7,3 +7,13 @@ canvas { display: block; }
 .terra-error .reason { color: #f0a36b; font-family: ui-monospace, monospace; font-size: 13px; }
 .terra-error .hint { color: #a9a597; font-size: 14px; line-height: 1.5; }
 .terra-perf { position: fixed; left: 12px; top: 10px; font: 11px ui-monospace, monospace; color: rgba(232,228,218,0.7); pointer-events: none; letter-spacing: 0.02em; }
+.terra-probe { position: fixed; display: flex; gap: 10px; padding: 10px 12px; min-width: 220px; border-radius: 12px;
+  background: rgba(18, 20, 28, 0.78); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.08);
+  box-shadow: 0 8px 30px rgba(0,0,0,0.35); font: 12px system-ui, sans-serif; color: #ece6d8; z-index: 5; }
+.terra-probe .strip { width: 18px; height: 128px; border-radius: 4px; background: rgba(255,255,255,0.03); image-rendering: pixelated; }
+.terra-probe .title { font-weight: 600; margin-bottom: 6px; text-transform: capitalize; }
+.terra-probe .rows div { display: flex; justify-content: space-between; gap: 12px; line-height: 1.55; }
+.terra-probe .rows span { color: #a39d8e; }
+.terra-probe .rows b { font-weight: 500; }
+.terra-probe .spark { margin-top: 6px; display: block; }
+.terra-probe .close { position: absolute; top: 4px; right: 6px; background: none; border: 0; color: #a39d8e; font-size: 16px; cursor: pointer; }

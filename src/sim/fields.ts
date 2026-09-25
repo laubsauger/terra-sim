@@ -23,7 +23,12 @@ export function registerSimFields(f: GpuFields): void {
   f.add('counters', 'int', CTR_SIZE, { atomic: true });
   registerHydroFields(f);
   registerClimateFields(f);
+  f.add('probe', 'uint', PROBE_SIZE); // inspect probe gather target (probe.ts), scratch
 }
+
+/** probe buffer: [0..NY) column voxels, then PROBE_COL.. packed column fields (floats as bits). */
+export const PROBE_COL = 128;
+export const PROBE_SIZE = PROBE_COL + 16;
 
 /** counters[CTR_RESERVOIR] = mantle reservoir, fill units. */
 export const CTR_RESERVOIR = 0;

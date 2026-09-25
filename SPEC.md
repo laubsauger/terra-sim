@@ -107,7 +107,7 @@ T8|x|M1 worldgen from seed: torus voronoi plates, cont|ocean crust stacks, strat
 T9|x|M1 derived pass: `surfY` from `fill`, normals|V1
 T10|x|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wrap|V1
 T11|x|M1 side cut render: faces + bottom read voxel buffer, strata colors|V23
-T12|.|M1 inspect probe: raycast + small readback panel|I.probe
+T12|x|M1 inspect probe: raycast + small readback panel|I.probe
 T13|x|M2 plate table + kinematics (slab pull, ridge push, drag)|V12
 T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|V1,V19
 T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
