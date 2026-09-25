@@ -15,8 +15,8 @@ import { NX, NZ, NCOL, Y_SEA_NOMINAL, colIdx } from './layout';
 
 export const CLIMATE = {
   // temperature
-  T_BASE: 12,        // °C at sea level, mid latitude
-  T_AMP: 20,         // equator +T_AMP, pole -T_AMP around T_BASE
+  T_BASE: 15,        // °C at sea level, mid latitude (12 made ~a third of land snow/tundra)
+  T_AMP: 17,         // equator +T_AMP, pole -T_AMP around T_BASE
   LAPSE: 0.6,        // °C per voxel above sea level (stylized, ≈2.4 °C/km at 250 m/voxel)
   ICE_AGE_DT: 8,     // °C cooling at iceAge = 1, iceAgeStrength = 1
   // wind (cells/tick). Outflow fraction ≤ U0 + 2·V0 + 4·VAPOR_DIFF < 1 keeps vapor ≥ 0.

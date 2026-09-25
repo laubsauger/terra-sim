@@ -23,11 +23,14 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
     uploadWorld(f, w);
     const sim = new Sim(r, f, w, new Params(), 0.05);
     const frame = () => new Promise((res) => setTimeout(res, 0));
-    const samples: { my: number; land: number; ocean: number; relief: number; plates: number; finite: boolean; phase: string }[] = [];
+    const samples: { my: number; land: number; ocean: number; relief: number; plates: number; finite: boolean; phase: string; islands: number }[] = [];
     let minPlates = 99, maxPlates = 0;
     const sample = async () => {
       const s = new Float32Array(await f.read(r, 'surfY'));
       const wa = new Float32Array(await f.read(r, 'water'));
+      const ci = new Uint32Array(await f.read(r, 'colInfo'));
+      let islands = 0; // land on oceanic crust: hotspot chains, island arcs, ridge highs
+      for (let i = 0; i < wa.length; i++) if (wa[i]! < 0.5 && !((ci[i * 2]! >> 16) & 1)) islands++;
       const sea = sim.stats?.seaLevel ?? 76;
       let land = 0, ocean = 0, finite = true;
       const heights: number[] = [];
@@ -38,7 +41,7 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
       }
       heights.sort((a, b) => a - b);
       const p99 = heights.length ? heights[Math.floor(heights.length * 0.99)]! : sea;
-      samples.push({ my: sim.geoMy, land: land / s.length, ocean: ocean / s.length, relief: p99 - sea, plates: sim.alivePlates(), finite, phase: sim.wilson.state.phase });
+      samples.push({ my: sim.geoMy, land: land / s.length, ocean: ocean / s.length, relief: p99 - sea, plates: sim.alivePlates(), finite, phase: sim.wilson.state.phase, islands });
     };
     const t0 = performance.now();
     let next = 0;
@@ -72,4 +75,6 @@ test('5000 My soak keeps the world balanced (V8)', async ({ page }) => {
   expect(res.cycles).toBeGreaterThanOrEqual(1);                // at least one full Wilson cycle
   expect(res.unhandled).toBe(0);                               // every event kind has a handler
   expect(res.eruptions).toBeGreaterThanOrEqual(SOAK_MY / 50);  // ≥1 eruption per 50 My
+  // volcanic islands must keep emerging, not just once from worldgen
+  expect(late.filter((s) => s.islands >= 20).length).toBeGreaterThanOrEqual(late.length * 0.5);
 });
