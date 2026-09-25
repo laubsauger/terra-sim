@@ -10,13 +10,13 @@
 // Isostasy rides along: the winning column shifts ±1 layer toward buoyancy equilibrium.
 // A voxel kernel then rebuilds every column from its action. All mass moves in integer fill units (V3).
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, vec2, sin } from 'three/tsl';
+import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, atomicMax, vec2, sin } from 'three/tsl';
 import { PingPongKernel, type GpuFields } from '../core/gpu';
 import { NCOL, NVOX, NX, NY, Mat, MAT_DENSITY, FLAG_CONTINENTAL, packVoxel } from './layout';
 import { tColIdx, tColXZ, uMin, iMax, tMat, tFill } from './tslLayout';
 import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
-import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE } from './fields';
+import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE, CTR_QUAKE } from './fields';
 import { CrustFlow } from './crustFlow';
 import { OCEAN_POOL } from './oceanLevel';
 
@@ -76,6 +76,8 @@ export class Tectonics {
   private tableValues = Array.from({ length: MAX_PLATES }, () => new THREE.Vector4());
   private table = uniformArray(this.tableValues, 'vec4');
   private clearStats: THREE.ComputeNode;
+  private quakeK: THREE.ComputeNode;
+  private runIdU = uniform(0, 'uint');
   private ageDt = uniform(0);
   /**
    * 0..1 share of collided/accreted crust that may stack onto the winner. Set per window from the
@@ -97,6 +99,7 @@ export class Tectonics {
     this.waterGather = [this.buildWaterGather(pid0, age0), this.buildWaterGather(pid1, age1)];
     this.voxel = new PingPongKernel<'uint'>(fields, 'vox', (src, dst) => this.buildVoxel(src, dst));
     this.crustFlow = new CrustFlow(fields);
+    this.quakeK = this.buildQuakeSites();
     const water = fields.cur('water');
     const sed = fields.cur('sedSusp');
     const waterTmp = fields.cur<'vec2'>('waterTmp');
@@ -283,6 +286,31 @@ export class Tectonics {
     })().compute(NCOL);
   }
 
+  /**
+   * Earthquake sites: each window keeps one deterministic pseudo-random subduction column and one collision
+   * column (max hash key), plus event counts. Read-only for the sim; FX turn them into quakes/tsunamis.
+   */
+  private buildQuakeSites(): THREE.ComputeNode {
+    const act = this.fields.cur<'uint'>('tecAct');
+    const ctr = this.fields.cur<'int'>('counters');
+    const run = this.runIdU;
+    return Fn(() => {
+      const c = instanceIndex;
+      If(c.greaterThanEqual(uint(NCOL)), () => { Return(); });
+      const a = act.element(c).toVar();
+      const h = c.bitXor(run.mul(uint(0x9e3779b9))).mul(uint(747796405)).add(uint(2891336453));
+      const key = int(h.shiftRight(uint(17)).shiftLeft(uint(16)).bitOr(c));
+      If(a.bitAnd(uint(ACT_SUBDUCT)).notEqual(uint(0)), () => {
+        atomicMax(ctr.element(CTR_QUAKE), key);
+        atomicAdd(ctr.element(CTR_QUAKE + 1), int(1));
+      });
+      If(a.shiftRight(uint(K_SHIFT)).bitAnd(uint(63)).greaterThan(uint(0)).and(a.bitAnd(uint(ACT_NEW)).equal(uint(0))), () => {
+        atomicMax(ctr.element(CTR_QUAKE + 2), key);
+        atomicAdd(ctr.element(CTR_QUAKE + 3), int(1));
+      });
+    })().compute(NCOL);
+  }
+
   private buildVoxel(src: THREE.StorageBufferNode<'uint'>, dst: THREE.StorageBufferNode<'uint'>): THREE.ComputeNode {
     const act = this.fields.cur<'uint'>('tecAct');
     const colInfo = this.fields.cur<'uvec2'>('colInfo');
@@ -382,6 +410,8 @@ export class Tectonics {
     const par = f.parity('plateId') as 0 | 1;
     renderer.compute(this.waterGather[par]);
     renderer.compute(this.decide[par]);
+    this.runIdU.value = this.runId >>> 0;
+    renderer.compute(this.quakeK);
     this.voxel.run(renderer);
     renderer.compute(this.waterBack);
     f.swap('plateId');

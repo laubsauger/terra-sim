@@ -45,13 +45,15 @@ export const CTR_RESERVOIR = 0;
  * CTR_CENT + p*4 + {Σcos x, Σsin x, Σcos z, Σsin z} ×256 — torus centroid.
  * CTR_CONTACT + p*16 + q — boundary cells where plate p (continental) touches q (continental).
  * CTR_WORLD + {0 Σ ocean level ×16, 1 ocean cols, 2 land cols, 3 Σ water ×64, 4 Σ vapor+ice ×64} — worldStats.ts.
+ * CTR_QUAKE + {0 subduction site key, 1 subduction events, 2 collision site key, 3 collision events} — tectonics.ts.
  */
 export const CTR_PLATE = 16;
 export const CTR_AREA = CTR_PLATE + MAX_PLATES * 4;
 export const CTR_CENT = CTR_AREA + MAX_PLATES;
 export const CTR_CONTACT = CTR_CENT + MAX_PLATES * 4;
 export const CTR_WORLD = CTR_CONTACT + MAX_PLATES * MAX_PLATES;
-export const CTR_SIZE = CTR_WORLD + 8;
+export const CTR_QUAKE = CTR_WORLD + 8;
+export const CTR_SIZE = CTR_QUAKE + 4;
 
 export function uploadWorld(f: GpuFields, w: WorldData): void {
   for (const name of ['vox', 'plateId', 'crustAge'] as const) {

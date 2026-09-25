@@ -12,6 +12,7 @@ import { createErosionPass, type ErosionPass } from './erosion';
 import { createClimatePass, type ClimatePass } from './climate';
 import { createBiomePass, type BiomePass } from './biome';
 import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats';
+import { CTR_QUAKE } from './fields';
 import { WilsonController } from './wilson';
 import { Diagenesis } from './diagenesis';
 import { OceanLevel } from './oceanLevel';
@@ -60,6 +61,8 @@ export class Sim {
   /** Plate a god-tool split asked for; consumed at the next window end ahead of the Wilson rift. */
   private godSplit: number | undefined;
   stats: WorldStats | null = null;
+  /** Last window's earthquake sites (columns) and activity; FX layers sample quakes from these. */
+  quakeSites: { subduct: { x: number; z: number; events: number } | null; collide: { x: number; z: number; events: number } | null } = { subduct: null, collide: null };
   readonly wilson = new WilsonController();
   readonly events: EventScheduler;
   /** Handlers for event kinds owned by other passes (magma, god tools). Unhandled kinds are counted, loudly. */
@@ -183,6 +186,9 @@ export class Sim {
       updateKinematics(plates, tstats, this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
       removeNetMotion(plates, tstats, this.prevRuns); // relative motion only; a shared drift just scrolls the world
       this.stats = parseWorldStats(buf);
+      const q = new Int32Array(buf).subarray(CTR_QUAKE);
+      const site = (key: number, n: number) => (n > 0 ? { x: key & 0xff, z: (key >> 8) & 0xff, events: n } : null);
+      this.quakeSites = { subduct: site(q[0]!, q[1]!), collide: site(q[2]!, q[3]!) };
       // reservoir snapshot gates crust stacking (see Tectonics.stackGate)
       // full stacking unless the reservoir is in real debt (magma keeps it near 0 in normal operation)
       this.tectonics.stackGate.value = Math.min(1, Math.max(0, 1 + this.lastCounters[0]! / RES_GATE_UNITS));
