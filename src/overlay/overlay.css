@@ -44,3 +44,21 @@
 .terra-plate-tag b { display: inline-grid; place-items: center; min-width: 16px; height: 16px; border-radius: 999px; font: 600 10px system-ui, sans-serif;
   color: #14161d; }
 .terra-plate-tag span { color: #cfc8b8; font-variant-numeric: tabular-nums; }
+
+/* Tectonics layer toggle: glass pill beside the time bar (.tb in src/ui/timebar.ts). */
+.terra-tec-pill {
+  position: fixed; bottom: 18px; height: 46px; box-sizing: border-box; display: flex; align-items: center; gap: 8px;
+  padding: 0 14px 0 13px; border-radius: 999px; cursor: pointer; z-index: 20; white-space: nowrap;
+  background: rgba(14, 16, 22, 0.55); backdrop-filter: blur(14px) saturate(1.4); -webkit-backdrop-filter: blur(14px) saturate(1.4);
+  border: 1px solid rgba(255, 255, 255, 0.09); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  color: rgba(236, 240, 247, 0.62); font: 500 11px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-variant-caps: all-small-caps; letter-spacing: 0.08em; user-select: none;
+  transition: color 160ms ease, background 160ms ease, box-shadow 220ms ease;
+}
+.terra-tec-pill:hover { background: rgba(24, 27, 36, 0.66); color: rgba(236, 240, 247, 0.9); }
+.terra-tec-pill span { font-size: 12.5px; }
+.terra-tec-pill kbd { font: 600 9.5px ui-monospace, monospace; padding: 2px 5px; border-radius: 4px; color: rgba(236, 240, 247, 0.55);
+  background: rgba(255, 255, 255, 0.07); border: 1px solid rgba(255, 255, 255, 0.08); font-variant-caps: normal; }
+.terra-tec-pill svg { color: rgba(236, 240, 247, 0.5); transition: color 160ms ease; }
+.terra-tec-pill.on { color: #fff; box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 1px rgba(92, 207, 224, 0.28); }
+.terra-tec-pill.on svg { color: #6fd6e6; }

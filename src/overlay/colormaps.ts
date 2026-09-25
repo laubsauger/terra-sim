@@ -86,8 +86,8 @@ export const RAMPS = {
   temp: { stops: ['#2c4f8c', '#4f7fbf', '#93b5da', '#d8d3c8', '#eab27f', '#d9704b', '#a8392f'], at: [0, 0.2, 0.38, 0.5, 0.64, 0.82, 1] },
   /** heat: dark aubergine → ember red → amber (dark→light on the dark map: hot glows). */
   heat: { stops: ['#231c38', '#4d2459', '#8c2f5a', '#c44b43', '#e8843a', '#f6c46a', '#eed9a0'] },
-  /** discharge: navy (dry) → teal → pale aqua (big rivers glow). */
-  flow: { stops: ['#172238', '#1c4468', '#1f7196', '#34a4bd', '#7fd3dc', '#c9e9e6'] },
+  /** river lines: small streams mid blue → great rivers pale bright aqua. */
+  flow: { stops: ['#2d6fae', '#3a8fca', '#5db4dc', '#94d3e6', '#b9e0e8'] },
   /** moisture: sand → sage → teal → deep blue. */
   moist: { stops: ['#e8cf96', '#c7c47d', '#8db283', '#4f9a8f', '#2f7896', '#2b4f86'] },
   /** hypsometric: abyss → shelf | lowland green → tan → umber → rock → snow. */
@@ -96,17 +96,17 @@ export const RAMPS = {
     at: [0, 0.2, 0.38, 0.499, 0.501, 0.6, 0.72, 0.84, 0.93, 1],
   },
   /** crust thickness change: thinning slate blue ← grey → thickening umber. */
-  thick: { stops: ['#4f6aa6', '#7e8aa8', '#8a8883', '#b08e69', '#b8703d'] },
+  thick: { stops: ['#56679a', '#737c93', '#7d7b77', '#958066', '#a8714a'] },
 } satisfies Record<string, Ramp>;
 
 /** Plate fill colours by plate id (colour follows the plate, never its rank). */
-export const PLATE_COLORS = ['#5c98d5', '#ac5950', '#359b75', '#8a6cb3', '#b78c3c', '#00839f', '#b96989', '#648b43',
-  '#7990d7', '#a85e37', '#009b8f', '#9c66a3', '#a4953d', '#237dad', '#bf6971', '#43905d'];
+export const PLATE_COLORS = ['#6298cf', '#ad6057', '#439c7a', '#8c71b2', '#b48c46', '#0b87a0', '#b96e8c', '#698d4c',
+  '#7b90d2', '#a96542', '#289d91', '#9d6ba4', '#a29546', '#3481ad', '#be6f75', '#4d9262'];
 
 /** Plate boundary classes (display sRGB). Shared with the activity overlay so red always means "converging". */
 export const BOUNDARY = {
   convergent: '#f0584e',
-  divergent: '#45d3e6',
+  divergent: '#6fcadb',
   transform: '#f5cd4a',
 } as const;
 export const ACTIVITY = {
@@ -114,6 +114,22 @@ export const ACTIVITY = {
   ridge: BOUNDARY.divergent,
   collision: '#f39a3c',
 } as const;
+
+/** Rivers overlay fills: dry land tint, lakes, dimmed open sea. */
+export const RIVER = { land: '#1f232b', lake: '#9fcbe3', sea: '#262a31' } as const;
+
+/**
+ * Colour for a plate split off `parent` (its k-th child): same family, visibly different step:
+ * OKLCH lightness ±0.075 and hue ±24° (alternating per child, wider for later children).
+ */
+export function childColor(parent: string, k: number): string {
+  const [L, a, b] = linToOklab(hexToLinear(parent));
+  const C = Math.hypot(a, b), h = Math.atan2(b, a);
+  const sgn = k % 2 ? -1 : 1, step = 1 + Math.floor(k / 2) * 0.6;
+  const L2 = Math.min(0.72, Math.max(0.5, L + sgn * 0.075 * step));
+  const h2 = h + sgn * (24 * Math.PI / 180) * step;
+  return linearToHex(oklabToLin([L2, C * Math.cos(h2), C * Math.sin(h2)]));
+}
 
 /** Biome colours by Biome id (biomeModel.ts). Names in defs.ts. */
 export const BIOME_COLORS = [

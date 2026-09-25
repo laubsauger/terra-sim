@@ -93,9 +93,11 @@ async function main() {
   const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields, stage.scene);
   const probe = createProbeUI(stage.renderer, stage.camera, fields, god.isInspect);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
-  // overlays (T47): per-frame prep via stage.onFrame; colours pre-compensate the post exposure + tone map
+  // overlays (T47) + Tectonics layer (key T / 'Plates' pill): per-frame prep via stage.onFrame; colours pre-compensate
+  // the post exposure + tone map; life hidden and clouds faded while a data overlay is on
   const overlays = createOverlays({ fields, scene: stage.scene, renderer: stage.renderer, camera: stage.camera, source: simSource(sim),
-    exposure: () => look.post.u.exposure.value, onFrame: (cb) => stage.onFrame(cb) });
+    exposure: () => look.post.u.exposure.value, onFrame: (cb) => stage.onFrame(cb), declutter: [life.object], clouds: atmo,
+    ambient: () => params.get('ambientMode') as boolean });
   createOverlayPanel(panel.folders.Overlays, overlays);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
   const audio = new Ambience();

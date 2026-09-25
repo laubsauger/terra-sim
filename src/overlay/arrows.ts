@@ -16,13 +16,13 @@ type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 
 /** Arrow width (world units); length runs from MIN_LEN (still) to MAX_LEN at SPEED_FULL. */
-export const ARROW_W = 0.085;
-export const MIN_LEN = 0.2;
+export const ARROW_W = 0.105;
+export const MIN_LEN = 0.26;
 export const MAX_LEN = 0.85;
 /** cells/My at which an arrow reaches MAX_LEN (kinematics MAX_SPEED). */
 export const SPEED_FULL = 2.4;
 /** Height above the highest ground under the arrow (world units). */
-const LIFT = 0.09;
+const LIFT = 0.1;
 const HEAD = 0.95, RIGID = 0.2; // local units (× ARROW_W): head length, unstretched shaft next to the head
 
 /** √ length scaling: slow plates stay distinguishable, fast ones do not dwarf the block. */
@@ -69,7 +69,7 @@ export function createArrows(fields: GpuFields, U: SheetUniforms) {
         return max(cs.height(c), cs.level(c).level);
       };
       const y0 = tWorldY(max(max(top(-0.5), top(0)), top(0.5))).add(LIFT).sub(casing ? 0.018 : 0);
-      const vis = b.x;
+      const vis = b.x.mul(U.arrowFade.mul(U.arrowFade).mul(float(3).sub(U.arrowFade.mul(2)))); // smoothstep ease
       return vec3(a.x.add(lx.mul(ch).sub(lz.mul(sh)).mul(vis)), y0.add(ly.mul(vis)), a.y.add(lx.mul(sh).add(lz.mul(ch)).mul(vis)));
     })();
     if (casing) {
@@ -80,8 +80,11 @@ export function createArrows(fields: GpuFields, U: SheetUniforms) {
       const L = vec3(-0.45, 0.8, -0.4).normalize();
       m.colorNode = Fn(() => {
         const d = max(dot(normalize(n), L), 0) as F;
-        const base = vec3(...hexToLinear('#f1e9d6')) as V3;
-        return vec4(untonemap(base.mul(d.mul(0.55).add(0.5)).min(vec3(0.92)) as V3, U.exposure), 1);
+        const base = vec3(...hexToLinear('#e9e0cc')) as V3;
+        // soft two-tone: lit top, darker flanks, faint warm rim so the silhouette reads on bright ground
+        const up = normalize(n).y.max(0);
+        const shade = d.mul(0.4).add(0.42).add(up.mul(0.12));
+        return vec4(untonemap(base.mul(shade).min(vec3(0.8)) as V3, U.exposure), 1);
       })();
     }
     const mesh = new THREE.InstancedMesh(geo, m, MAX_PLATES);
@@ -106,18 +109,20 @@ export function createArrows(fields: GpuFields, U: SheetUniforms) {
     state,
     /** plates + centroids (cells, torus mean) → instance data. dt real seconds (smoothing). */
     update(plates: readonly { id: number; alive: boolean; vel: [number, number] }[], centroids: ([number, number] | undefined)[] | null, dt: number) {
-      const a = 1 - Math.exp(-dt / 0.6);
+      // ease everything (≈1 s): stats land once per window and must never make an arrow jump
+      const a = 1 - Math.exp(-Math.max(0, dt) / 0.9);
       for (let i = 0; i < MAX_PLATES; i++) {
         const p = plates[i], c = centroids?.[i];
         const st = state[i]!;
         if (!p?.alive || !c || !Number.isFinite(c[0]) || !Number.isFinite(c[1])) { st.visible = false; seen[i] = 0; dataB[i]!.x = 0; continue; }
-        if (!seen[i]) { cell[0]![i] = c[0]; cell[1]![i] = c[1]; seen[i] = 1; }
+        const speedNow = Math.hypot(p.vel[0], p.vel[1]);
+        const headNow = speedNow > 1e-6 ? Math.atan2(p.vel[1], p.vel[0]) : st.heading;
+        if (!seen[i]) { cell[0]![i] = c[0]; cell[1]![i] = c[1]; st.speed = speedNow; st.heading = headNow; seen[i] = 1; }
         cell[0]![i] = (cell[0]![i]! + wrapD(c[0] - cell[0]![i]!, NX) * a + NX) % NX;
         cell[1]![i] = (cell[1]![i]! + wrapD(c[1] - cell[1]![i]!, NZ) * a + NZ) % NZ;
-        const speed = Math.hypot(p.vel[0], p.vel[1]);
-        st.speed = speed;
-        st.length = arrowLength(speed);
-        if (speed > 1e-6) st.heading = Math.atan2(p.vel[1], p.vel[0]);
+        st.speed += (speedNow - st.speed) * a;
+        st.heading += Math.atan2(Math.sin(headNow - st.heading), Math.cos(headNow - st.heading)) * a;
+        st.length = arrowLength(st.speed);
         // keep the whole arrow on the block
         const lim = HALF - st.length / 2 - 0.06;
         st.x = Math.max(-lim, Math.min(lim, cellToWorld(cell[0]![i]!)));

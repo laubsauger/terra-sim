@@ -56,10 +56,10 @@ whimsical AAA-look WebGPU vivarium: torus-wrapped planet slice block, voxel crus
 ## §I INTERFACES
 - cmd: `npm run dev` | `build` | `test` (vitest) | `test:gpu` (Playwright) | `soak` (headless max-speed run, asserts §V.8)
 - url: `?seed=<u32>&speed=<x>&ambient=1&load=<slot>&quality=<low|high>`
-- keys: `H` toggle UI, `Space` pause geo clock, `[`/`]` speed ÷2/×2, `I` inspect probe, `1`-`9` overlays, `0` overlay off, `M` mute
+- keys: `H` toggle UI, `T` tectonics layer, `Space` pause geo clock, `[`/`]` speed ÷2/×2, `I` inspect probe, `1`-`9` overlays, `0` overlay off, `M` mute
 - ui: Tweakpane panes: Sim, Tectonics, Climate, Events, Overlays, God, Stats, Save
 - time ctl: always-visible bar (hidden in ambient mode): pause/play geo, log speed slider (0.001 → max My/s), requested vs effective speed, `geoTime` readout
-- overlays: plateId, crustAge, crustTemp, mantle, stress, flux, moisture, biome, precip
+- overlays: 1 plates, 2 crust age, 3 surface temp, 4 mantle heat flow, 5 tectonic activity, 6 rivers & lakes, 7 precip, 8 biomes, 9 elevation; legend card bottom-left w/ hover readout; Tectonics layer (plate lines + velocity arrows, 'Plates' pill / key T) on top of normal render
 - god tools: uplift|subsidence brush, spawn volcano, meteor impact, split plate, rain storm
 - probe: click → mat, fill, age, temp, plateId, elevation, water, biome, local history sparkline
 - file: `*.terra` = header {magic `TERA`, version u16, seed u32, geoTime f64, rngState, params JSON, controller JSON} + gzip(buffers)
@@ -146,7 +146,7 @@ T43|x|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
 T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
 T45|x|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
 T46|x|M7 procedural ambient audio from sim stats|V14,V15
-T47|~|M8 debug overlays|I.overlays
+T47|x|M8 debug overlays|I.overlays
 T48|x|M8 god tools via event path|V16,I.god tools
 T49|x|M8 ambient mode: hide UI, cinematic auto cam, POI follow (eruptions, impacts)|I.keys
 T50|x|M8 save/load: `.terra` format, gzip, IDB autosave ring, file export/import|V13,V21,I.file,I.idb

@@ -1,6 +1,6 @@
 // Overlay catalogue (§I.overlays, keys 1-9): what each overlay shows, how values map to colour, and what the
 // legend says. Pure data + formatting; the GPU side lives in prep.ts (per-column values) and sheet.ts (colour).
-import { RAMPS, BIOME_COLORS, BOUNDARY, ACTIVITY, type Ramp, type Scale } from './colormaps';
+import { RAMPS, BIOME_COLORS, BOUNDARY, ACTIVITY, RIVER, type Ramp, type Scale } from './colormaps';
 
 /** Plate speeds: sim cells/My → cm/yr at the kinematics convention of 20 km cells (kinematics.ts BASE_SPEED). */
 export const CM_PER_YR_PER_CELL_MY = 2;
@@ -39,6 +39,7 @@ const fmtNum = (v: number) => (Math.abs(v) >= 1000 ? `${+(v / 1000).toPrecision(
 const SUP: Record<string, string> = { '-': '⁻', 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹' };
 /** 1e-3 → 10⁻³ (ticks are exact powers of ten). */
 const pow10 = (v: number) => {
+  if (Math.abs(Math.log10(v) - Math.round(Math.log10(v))) > 1e-6) return fmtNum(v);
   const e = Math.round(Math.log10(v));
   return e === 0 ? '1' : `10${[...String(e)].map((ch) => SUP[ch]).join('')}`;
 };
@@ -54,9 +55,9 @@ export const OVERLAYS: OverlayDef[] = [
     key: 1, id: 'plates', title: 'Tectonic plates',
     blurb: 'Each colour is one plate; arrows show which way it drifts and how fast.',
     swatches: [
-      { name: 'convergent: plates collide or one dives under', color: BOUNDARY.convergent, line: true },
-      { name: 'divergent: plates pull apart, new crust forms', color: BOUNDARY.divergent, line: true },
-      { name: 'transform: plates slide past each other', color: BOUNDARY.transform, line: true },
+      { name: 'convergent: plates collide', color: BOUNDARY.convergent, line: true },
+      { name: 'divergent: plates pull apart', color: BOUNDARY.divergent, line: true },
+      { name: 'transform: plates slide past', color: BOUNDARY.transform, line: true },
     ],
     relief: 0.55, smoothS: 0,
   },
@@ -76,7 +77,7 @@ export const OVERLAYS: OverlayDef[] = [
   {
     key: 4, id: 'heat', title: 'Mantle heat flow',
     blurb: 'Heat rising out of the mantle: hot plumes glow, sinking cold slabs go dark. Cut faces show crust temperature.',
-    bar: { ramp: RAMPS.heat, scale: HEAT_SCALE, ticks: [20, 40, 65, 100, 150, 220], unit: 'mW/m²', fmt: fmtNum, contours: [40, 100, 150], bold: 65 },
+    bar: { ramp: RAMPS.heat, scale: HEAT_SCALE, ticks: [20, 40, 65, 100, 150, 220], unit: 'mW/m²', fmt: fmtNum, contours: [40, 100, 150] },
     bar2: { caption: 'cut faces · crust temperature', ramp: RAMPS.heat, scale: { kind: 'linear', v0: 0, v1: 1300 }, ticks: [0, 400, 800, 1300], unit: '°C', fmt: fmtNum },
     relief: 0.45, smoothS: 0.4,
   },
@@ -84,19 +85,23 @@ export const OVERLAYS: OverlayDef[] = [
     key: 5, id: 'activity', title: 'Tectonic activity',
     blurb: 'Where the crust is being made, destroyed or piled up right now; tint shows it thickening or thinning.',
     swatches: [
-      { name: 'subduction: ocean floor sinks into the mantle', color: ACTIVITY.subduction },
+      { name: 'subduction: sea floor sinks', color: ACTIVITY.subduction },
       { name: 'ridge: new ocean crust', color: ACTIVITY.ridge },
-      { name: 'collision: continents crumple into mountains', color: ACTIVITY.collision },
+      { name: 'collision: crust piles up', color: ACTIVITY.collision },
     ],
-    bar2: { caption: 'crust thickness change', ramp: RAMPS.thick, scale: { kind: 'split', lo: -0.5, mid: 0, hi: 0.5 }, ticks: [-0.5, 0, 0.5], unit: 'layers/My',
+    bar2: { caption: 'crust thickness change', ramp: RAMPS.thick, scale: { kind: 'split', lo: -1, mid: 0, hi: 1 }, ticks: [-1, -0.5, 0, 0.5, 1], unit: 'layers/My',
       fmt: (v) => (v > 0 ? `+${v}` : `${v}`) },
     relief: 0.6, smoothS: 0,
   },
   {
-    key: 6, id: 'flow', title: 'Rivers & discharge',
-    blurb: 'How much water flows through each spot; rivers gather downhill into bright trunks. Open sea is left dark.',
-    bar: { ramp: RAMPS.flow, scale: { kind: 'log', v0: 1e-4, v1: 1 }, ticks: [1e-4, 1e-3, 1e-2, 1e-1, 1], unit: 'cells³/step', fmt: pow10, contours: [] },
-    relief: 0.7, smoothS: 0.25, fadeLow: 0.35,
+    key: 6, id: 'flow', title: 'Rivers & lakes',
+    blurb: 'Rivers gather downhill into ever wider, brighter trunks; lakes are pale fills, the sea is dimmed.',
+    bar: { ramp: RAMPS.flow, scale: { kind: 'log', v0: 1e-3, v1: 0.5 }, ticks: [1e-3, 1e-2, 1e-1, 0.5], unit: 'discharge · cells³/step', fmt: pow10, contours: [] },
+    swatches: [
+      { name: 'lake', color: RIVER.lake },
+      { name: 'open sea (dimmed)', color: RIVER.sea },
+    ],
+    relief: 0.8, smoothS: 0.3,
   },
   {
     key: 7, id: 'moist', title: 'Precipitation',
@@ -150,7 +155,7 @@ export function readout(def: OverlayDef, c: ReadoutCtx): string {
       const r = b[1]!;
       return `${tags.length ? tags.join(' + ') : 'quiet'} · ${r >= 0 ? '+' : ''}${r.toFixed(2)} layers/My`;
     }
-    case 'flow': return a[2]! > 0.5 ? 'open sea' : `${a[1]! < 1e-5 ? '0' : a[1]!.toPrecision(2)} cells³/step`;
+    case 'flow': return a[2]! > 0.5 ? 'open sea' : a[3]! > 0.5 ? 'lake' : `${b[0]! < 1e-5 ? 'dry' : `${b[0]!.toPrecision(2)} cells³/step`}`;
     case 'moist': return `${a[1]!.toFixed(2)} × tropical rain`;
     case 'biome': return BIOME_NAMES[Math.round(a[0]!)] ?? `biome ${a[0]}`;
     case 'elev': { const e = a[1]!; return `${e >= 0 ? '+' : ''}${e.toFixed(1)} layers ${e >= 0 ? 'above' : 'below'} sea level`; }
