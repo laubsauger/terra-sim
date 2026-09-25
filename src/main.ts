@@ -16,6 +16,7 @@ import { createSavePanel, showToast } from './ui/savePanel';
 import { createLook } from './render/look';
 import { createLife } from './life/life';
 import { createAtmosphere } from './atmo/atmosphere';
+import { createSlice } from './slice/slice';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
@@ -78,6 +79,7 @@ async function main() {
 
   const look = createLook(stage, fields, { highQuality: params.get('highQuality') as boolean, motion: sim.tectonics });
   const life = createLife(fields, stage.renderer, stage.scene, { highQuality: params.get('highQuality') as boolean, seed: params.get('seed') as number, camera: stage.camera });
+  const slice = createSlice(stage, fields);
   const atmo = createAtmosphere(fields, stage.renderer, stage.scene, stage.camera, { highQuality: params.get('highQuality') as boolean });
   params.onChange((k, v) => { if (k === 'highQuality') { look.setHighQuality(v as boolean); life.setHighQuality(v as boolean); atmo.setHighQuality(v as boolean); } });
   setVertEx(params.get('verticalExaggeration') as number);
@@ -104,7 +106,7 @@ async function main() {
   let volcanic = 0, seenEvents = 0;
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible);
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
     ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean));
     look.setDayLength((params.get('ambientMode') as boolean) ? 600 : 0); };
   params.onChange((key) => { if (key === 'ambientMode') applyUi(); });
@@ -130,6 +132,7 @@ async function main() {
     if (ran > 0) life.invalidate();
     life.update(dt, clock.ambTime);
     atmo.update(dt, clock.ambTime, { events: sim.events.log, seaLevel: sim.stats?.seaLevel });
+    slice.update(dt);
     saves.frame();
     savePanel.update();
     timebar.update();
@@ -151,7 +154,7 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo,
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo, slice,
     save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
