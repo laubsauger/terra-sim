@@ -135,7 +135,7 @@ T32|x|M6 Wilson cycle controller (disperse→drift→assemble→super→rift)|V5
 T33|x|M6 seeded event scheduler: hotspot, meteor, ice age, flood basalt|V2,V16
 T34|x|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
 T35|x|M6 NaN guard + autosave rollback|V7
-T36|~|M6 soak harness (headless, max speed) asserting bounds|V8
+T36|x|M6 soak harness (headless, max speed) asserting bounds|V8
 T37|.|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers|V17
 T38|.|M7 lava/magma emissive + cooling crust|-
 T39|.|M7 sky scattering + day/night + sun/moon on `ambTime`|V17
