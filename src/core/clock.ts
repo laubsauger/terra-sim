@@ -93,6 +93,20 @@ export class DualClock {
     return ticks;
   }
 
+  /** Integer sim tick count (geoTime = ticks * dtGeo when no loaded offset). */
+  get ticks(): number {
+    return this.geoTicks;
+  }
+
+  /**
+   * Return ticks granted by the last frame() that the sim could not run (e.g. waiting on a
+   * deterministic readback). Keeps geoTime equal to ticks actually simulated.
+   */
+  unrun(n: number): void {
+    if (!(Number.isInteger(n) && n >= 0 && n <= this.geoTicks)) throw new RangeError(`DualClock: bad unrun(${n})`);
+    this.geoTicks -= n;
+  }
+
   /** ambTime mod ambPeriod, for f32 GPU uniforms (V11). */
   ambTimeWrapped(): number {
     const p = this.ambPeriod;

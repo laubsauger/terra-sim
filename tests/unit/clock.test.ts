@@ -147,3 +147,16 @@ describe('DualClock', () => {
     expect(() => c.loadState({ geoTime: 1 } as never)).toThrow();
   });
 });
+
+describe('DualClock.unrun', () => {
+  // A stalled sim must not let geoTime run ahead of what was actually simulated (V12).
+  it('gives back ticks the sim could not run', () => {
+    const c = new DualClock({ dtGeo: 0.05, requestedSpeed: 1 });
+    const n = c.frame(0.25, 100);
+    expect(n).toBe(5);
+    c.unrun(3);
+    expect(c.ticks).toBe(2);
+    expect(c.geoTime).toBeCloseTo(0.1, 12);
+    expect(() => c.unrun(5)).toThrow();
+  });
+});

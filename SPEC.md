@@ -105,7 +105,7 @@ T9|x|M1 derived pass: `surfY` from `fill`, normals|V1
 T10|.|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wrap|V1
 T11|.|M1 side cut render: faces + bottom sample voxel 3D tex, strata colors|-
 T12|.|M1 inspect probe: raycast + small readback panel|I.probe
-T13|.|M2 plate table + kinematics (slab pull, ridge push, drag)|V12
+T13|x|M2 plate table + kinematics (slab pull, ridge push, drag)|V12
 T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|V1,V19
 T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
 T16|x|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
