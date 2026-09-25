@@ -93,7 +93,7 @@ V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = m
 ## §T TASKS
 id|status|task|cites
 T1|x|M0 scaffold Vite+TS strict+three+tweakpane, vitest, Playwright WebGPU harness|I.cmd
-T2|.|M0 renderer bootstrap: WebGPURenderer, orbit cam, WebGPU detect + error screen|V18
+T2|x|M0 renderer bootstrap: WebGPURenderer, orbit cam, WebGPU detect + error screen|V18
 T3|.|M0 PCG32 PRNG w/ serializable state|V2
 T4|.|M0 dual clock: `geoTime` f64, `ambTime` wrapped, pause geo only, speed → ticks/frame w/ budget cap|V11,V12,V17,V22
 T5|.|M0 GPU buffer registry: fixed alloc, named fields, ping-pong, timestamp-query perf HUD|V10,V9
