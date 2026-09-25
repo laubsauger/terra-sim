@@ -98,3 +98,15 @@ export class PingPongKernel<T extends NodeElem = 'float'> {
     this.fields.swap(this.field);
   }
 }
+
+/** Kernel that only reads a ping-pong field: two variants, picks the one bound to the current buffer. No swap. */
+export class ReaderKernel<T extends NodeElem = 'float'> {
+  private variants: [THREE.ComputeNode, THREE.ComputeNode];
+  constructor(private fields: GpuFields, private field: string, build: (cur: StorageNode<T>) => THREE.ComputeNode) {
+    const [a, b] = fields.pair<T>(field);
+    this.variants = [build(a), build(b)];
+  }
+  run(renderer: THREE.WebGPURenderer): void {
+    renderer.compute(this.variants[this.fields.parity(this.field) as 0 | 1]);
+  }
+}
