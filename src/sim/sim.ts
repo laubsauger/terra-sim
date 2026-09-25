@@ -14,6 +14,7 @@ import { createBiomePass, type BiomePass } from './biome';
 import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats';
 import { WilsonController } from './wilson';
 import { Diagenesis } from './diagenesis';
+import { OceanLevel } from './oceanLevel';
 import { GodTools } from './godTools';
 import { MantlePass } from './mantle';
 import { MagmaPass } from './magma';
@@ -51,6 +52,7 @@ export class Sim {
   readonly biome: BiomePass;
   private worldStats: THREE.ComputeNode;
   private diagenesis: Diagenesis;
+  private ocean: OceanLevel;
   readonly god: GodTools;
   readonly mantle: MantlePass;
   readonly magma: MagmaPass;
@@ -85,6 +87,7 @@ export class Sim {
     this.biome = createBiomePass(fields);
     this.worldStats = createWorldStats(fields);
     this.diagenesis = new Diagenesis(fields);
+    this.ocean = new OceanLevel(fields);
     this.god = new GodTools(fields);
     this.mantle = new MantlePass(fields, params, world);
     this.magma = new MagmaPass(fields, params);
@@ -151,6 +154,7 @@ export class Sim {
     this.derive.run(r);
     // 7 climate (evap/precip/ice into water), 8 hydrology + erosion (erosion needs fresh surfY)
     this.climate.step(r);
+    this.ocean.step(r); // open ocean levels quickly; pipe model handles rivers, lakes, coasts
     this.hydro.step(r, HYDRO_SUBSTEPS);
     if (t % EROSION_EVERY === 0) {
       this.erosion.uniforms.tick.value = t;

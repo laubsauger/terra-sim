@@ -6,6 +6,7 @@ import { registerHydroFields } from './hydro';
 import { registerClimateFields } from './climate';
 import { registerMantleFields } from './mantle';
 import { registerMagmaFields } from './magma';
+import { registerOceanFields } from './oceanLevel';
 import type { WorldData } from './worldData';
 
 export function registerSimFields(f: GpuFields): void {
@@ -27,6 +28,7 @@ export function registerSimFields(f: GpuFields): void {
   registerClimateFields(f);
   registerMantleFields(f);
   registerMagmaFields(f);
+  registerOceanFields(f);
   f.add('probe', 'uint', PROBE_SIZE); // inspect probe gather target (probe.ts), scratch
 }
 

@@ -91,7 +91,7 @@ V21: `mat` id list append-only; saves from older version keep valid materials.
 V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = min(requested, sim budget V9); UI shows both.
 V24: cont-cont collision → loser crust stacks onto winner (root down, isostatic rise) up to 64 layers; only excess delaminates. arc volcanism ! add FLAG_CONTINENTAL crust from reservoir (continents regrow). colliding continental plates lock (velocities converge); thick roots flow laterally into thinner continental neighbours.
 V25: plate speed drivers ⊥ positive feedback on own speed; slab pull normalised by plate speed.
-V26: water quasi-steady: overdamped flow; neighbour level roughness in open ocean ≤ 0.05 voxel after 40 substeps of perturbation.
+V26: water quasi-steady: overdamped flow + global open-ocean leveling (zero-sum, quantised); open-ocean level std ≤ 0.3 & neighbour roughness ≤ 0.05 voxel on the live sim.
 V27: standing water deeper than ~2 voxels ⊥ erosion capacity; sediment settles (deltas, shelves). Σ sedSusp stays ≤ ~2 layers/col.
 V28: thermal talus ≥ 2.5 layers/cell subaerial, ×2 submarine; stretched margins taper via lower-crust flow into oceanic neighbours.
 V29: reservoir debt ⊥ grows unbounded: accretion takes only slab excess over ridge mass; collided crust stacking fades to 0 over 1 layer/col of debt (window snapshot, deterministic).
@@ -165,4 +165,5 @@ B9|2026-09-25|talus 1.2 layer/cell (≈0.9° real) + underwater slumping → mar
 B10|2026-09-25|ridges draw fixed mass per gap while collisions/accretion withhold loser mass → reservoir debt → runaway continents|V29
 B11|2026-09-25|crustFlow treated crust-less neighbour (base=NY) as receiver → GNEISS written at ceiling → column sank to y=0 (holes)|V30
 B12|2026-09-25|oceanic subsidence √age uncapped; stripped old continental columns (age 3000 My) sank through mantle|V30
+B13|2026-09-25|tectonic water carry re-roughened ocean faster than local pipe model levels it → lumpy sea surface (level std ~2 voxels)|V26
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26
