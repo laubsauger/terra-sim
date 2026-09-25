@@ -12,6 +12,8 @@ import { createErosionPass, type ErosionPass } from './erosion';
 import { createClimatePass, type ClimatePass } from './climate';
 import { createBiomePass, type BiomePass } from './biome';
 import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats';
+import { WilsonController } from './wilson';
+import { EventScheduler, iceAgeForcing, type GeoEvent, type EventKind } from './events';
 import type { WorldData } from './worldData';
 
 /** Ticks per stats window. Readback issued at window end must land before the next window ends (V2). */
@@ -33,6 +35,12 @@ export class Sim {
   readonly biome: BiomePass;
   private worldStats: THREE.ComputeNode;
   stats: WorldStats | null = null;
+  readonly wilson = new WilsonController();
+  readonly events: EventScheduler;
+  /** Handlers for event kinds owned by other passes (magma, god tools). Unhandled kinds are counted, loudly. */
+  readonly handlers = new Map<EventKind, (e: GeoEvent) => void>();
+  unhandledEvents = 0;
+  iceAges: { start: number; durationMy: number; magnitude: number }[] = [];
   private derive;
   private rng: PCG32;
   private pending: Promise<ArrayBuffer> | null = null;
@@ -56,6 +64,8 @@ export class Sim {
     this.kGeoBase = this.erosion.uniforms.kGeo.value;
     this.erosion.uniforms.kGeo.value = this.kGeoBase * EROSION_EVERY;
     this.rng = new PCG32(world.seed, 0x7ec70);
+    this.events = new EventScheduler(world.seed);
+    this.handlers.set('iceAge', (e) => this.iceAges.push({ start: e.my, durationMy: e.durationMy ?? 20, magnitude: e.magnitude }));
     this.derive.run(renderer);
   }
 
@@ -106,11 +116,17 @@ export class Sim {
       const buf = this.pendingResult;
       this.lastCounters = new Int32Array(buf);
       const life = Lifecycle.parseStats(buf);
-      updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, STATS_WINDOW * this.dtGeo, this.rng, undefined, life.contact);
+      const my = this.geoMy, windowMy = STATS_WINDOW * this.dtGeo;
+      this.wilson.update(plates, life, my);
+      updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
       this.stats = parseWorldStats(buf);
       if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); }
-      const op = this.lifecycle.decide(plates, life, this.geoMy, this.rng);
-      if (op) this.lifecycle.apply(r, plates, op, this.geoMy);
+      const op = this.lifecycle.decide(plates, life, my, this.rng, this.wilson.riftRequest);
+      if (op) {
+        this.lifecycle.apply(r, plates, op, my);
+        if (op.kind === 'split') this.wilson.onSplit(my);
+      }
+      this.runEvents(my, windowMy);
       this.pendingResult = null;
     }
     // snapshot this window, then clear per-window counters (queue order keeps the copy before the clear)
@@ -122,6 +138,18 @@ export class Sim {
     this.tectonics.clearPlateStats(r);
     this.prevRuns = this.runsInWindow;
     this.runsInWindow = 0;
+  }
+
+  private runEvents(my: number, windowMy: number): void {
+    const rate = this.params.get('eventRate') as number;
+    this.events.roll(my, windowMy, { hotspot: rate, iceAge: rate, floodBasalt: rate, meteor: rate * (this.params.get('meteorRate') as number) });
+    for (const e of this.events.drain()) {
+      const h = this.handlers.get(e.kind);
+      if (h) h(e);
+      else { if (this.unhandledEvents++ === 0) console.warn(`Sim: no handler for event '${e.kind}' (counted in unhandledEvents)`); }
+    }
+    this.iceAges = this.iceAges.filter((a) => my <= a.start + a.durationMy);
+    this.climate.setIceAge(iceAgeForcing(this.iceAges, my));
   }
 
   /** Reservoir in fill units from the latest snapshot. */
