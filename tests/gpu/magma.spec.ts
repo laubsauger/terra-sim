@@ -258,6 +258,56 @@ test('perf: magma + lava + mantle average cost per tick', async ({ page }) => {
   expect(res.mine).toBeLessThan(3); // loose wall-clock bound (headless, includes CPU dispatch cost)
 });
 
+// Regression (holes through crust + mantle band, found in integration): a full-sim run must never sink a column
+// below the deepest crust base the world started with, nor lose the mantle floor at y = 0. Root causes were in
+// crustFlow (a crust-less receiver has base = NY, so flow wrote GNEISS at the grid ceiling → floating stacks that
+// isostasy sank through the mantle) and uncapped thermal subsidence of stripped, ancient columns.
+test('full sim 60 My: no column below the initial deepest crust base; y = 0 always PERIDOTITE', async ({ page }) => {
+  test.setTimeout(600_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { Sim } = await import('/src/sim/sim.ts');
+    const { Params } = await import('/src/core/params.ts');
+    const { generateWorld } = await import('/src/sim/worldgen.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const w = generateWorld(3, { plates: 7 });
+    let floor = L.NY;
+    for (let c = 0; c < L.NCOL; c++) for (let y = 0; y < L.NY; y++) {
+      const m = L.voxMat(w.vox[c + y * L.NCOL]!);
+      if (m !== L.Mat.AIR && m !== L.Mat.PERIDOTITE && m !== L.Mat.MAGMA) { floor = Math.min(floor, y); break; }
+    }
+    uploadWorld(f, w);
+    const sim = new Sim(r, f, w, new Params(), 0.05);
+    const frame = () => new Promise((res) => setTimeout(res, 0));
+    const checks: { my: number; minSurf: number; below: number; y0bad: number }[] = [];
+    let next = 200;
+    while (sim.tick < 1200) {
+      sim.runTicks(20); await frame();
+      if (sim.tick >= next) {
+        next += 200;
+        const s = new Float32Array(await f.read(r, 'surfY'));
+        const vox = new Uint32Array(await f.read(r, 'vox'), 0, L.NCOL); // layer y = 0
+        let minSurf = 1e9, below = 0, y0bad = 0;
+        for (let c = 0; c < L.NCOL; c++) {
+          minSurf = Math.min(minSurf, s[c]!); if (s[c]! < floor) below++;
+          if (L.voxMat(vox[c]!) !== L.Mat.PERIDOTITE) y0bad++;
+        }
+        checks.push({ my: Math.round(sim.geoMy), minSurf, below, y0bad });
+      }
+    }
+    return { floor, checks };
+  });
+  console.log('holes regression', JSON.stringify(res));
+  for (const c of res.checks) {
+    expect(c.below, `columns below initial crust floor ${res.floor} at ${c.my} My`).toBe(0);
+    expect(c.y0bad, `y=0 not PERIDOTITE at ${c.my} My`).toBe(0);
+  }
+});
+
 // Long-run balance report on a generated world (BALANCE=1): reservoir inflow from tectonics (subduction +
 // delamination − ridges) vs outflow through volcanism. Informational; prints rates per My.
 test('balance report (BALANCE=1)', async ({ page }) => {

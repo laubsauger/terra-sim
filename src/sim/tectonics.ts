@@ -212,7 +212,8 @@ export class Tectonics {
           const thick = float(bestMass.add(k.mul(255))).div(255);
           const isCont = bestCont.equal(uint(1));
           const rho = select(isCont, float(RHO_CONT), float(RHO_OCEAN));
-          const sub = select(isCont, float(0), sqrt(bestAge.max(0)).mul(SUBSIDENCE));
+          // thermal subsidence saturates (~150 My); uncapped, stripped continental columns sank through the mantle (B12)
+          const sub = select(isCont, float(0), sqrt(bestAge.clamp(0, 150)).mul(SUBSIDENCE));
           const eq = float(Y_COMP).add(thick.mul(float(1).sub(rho.div(RHO_MANTLE))).mul(ISO_GAIN)).sub(sub);
           const diff = eq.sub(bestSurf.add(float(up)));
           If(diff.greaterThan(0.75).and(top.add(up).add(uint(1)).lessThan(uint(NY - 1))), () => { v.assign(1); });

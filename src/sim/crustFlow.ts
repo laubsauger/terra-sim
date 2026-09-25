@@ -6,7 +6,7 @@
 import type * as THREE from 'three/webgpu';
 import { Fn, If, Loop, int, uint, instanceIndex, Return, select } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
-import { NCOL, Mat, FLAG_CONTINENTAL, packVoxel } from './layout';
+import { NCOL, NY, Mat, FLAG_CONTINENTAL, packVoxel } from './layout';
 import { tColIdx, tColXZ, tMat, tFill, tVoxIdx, uMin } from './tslLayout';
 import { COL_CONTINENTAL } from './derive';
 
@@ -74,7 +74,8 @@ export class CrustFlow {
           // oceanic receivers become transitional continental crust, but only from thick margins
           const minT = select(ncont, uint(FLOW_MIN_THICK), uint(FLOW_MIN_THICK_MARGIN));
           If(budget.greaterThan(uint(0)).and(thick.greaterThan(minT)).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
-            .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4))), () => {
+            .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4))).and(nbase.lessThan(uint(NY))), () => {
+            // nbase = NY means the neighbour has no crust at all: never a receiver (B11, root would land at the ceiling)
             bits.assign(bits.bitOr(uint(1 << d)));
             budget.subAssign(1);
           });

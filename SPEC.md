@@ -95,6 +95,7 @@ V26: water quasi-steady: overdamped flow; neighbour level roughness in open ocea
 V27: standing water deeper than ~2 voxels ⊥ erosion capacity; sediment settles (deltas, shelves). Σ sedSusp stays ≤ ~2 layers/col.
 V28: thermal talus ≥ 2.5 layers/cell subaerial, ×2 submarine; stretched margins taper via lower-crust flow into oceanic neighbours.
 V29: reservoir debt ⊥ grows unbounded: accretion takes only slab excess over ridge mass; collided crust stacking fades to 0 over 1 layer/col of debt (window snapshot, deterministic).
+V30: ∀ column surfY ≥ deepest initial crust base & y=0 always PERIDOTITE (no holes through the world).
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
 ## §T TASKS
@@ -162,4 +163,6 @@ B7|2026-09-25|plates ~2 cells/My on 256-cell world → continents collide consta
 B8|2026-09-25|no return path for eroded continental crust → continents thin & drown ~400 My|V24
 B9|2026-09-25|talus 1.2 layer/cell (≈0.9° real) + underwater slumping → margins slump into sea forever|V28
 B10|2026-09-25|ridges draw fixed mass per gap while collisions/accretion withhold loser mass → reservoir debt → runaway continents|V29
+B11|2026-09-25|crustFlow treated crust-less neighbour (base=NY) as receiver → GNEISS written at ceiling → column sank to y=0 (holes)|V30
+B12|2026-09-25|oceanic subsidence √age uncapped; stripped old continental columns (age 3000 My) sank through mantle|V30
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26
