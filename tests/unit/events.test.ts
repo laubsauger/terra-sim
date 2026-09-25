@@ -20,7 +20,7 @@ describe('event scheduler (T33)', () => {
     const ev = s.drain();
     for (const k of Object.keys(BASE_RATES) as (keyof typeof BASE_RATES)[]) {
       const n = ev.filter((e) => e.kind === k).length;
-      const expected = BASE_RATES[k] * my;
+      const expected = BASE_RATES[k]! * my;
       expect(Math.abs(n - expected) / expected).toBeLessThan(0.15);
     }
   });

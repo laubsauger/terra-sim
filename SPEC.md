@@ -130,7 +130,7 @@ T31|x|M5 biome classify + veg; veg lowers erodibility|-
 T32|x|M6 Wilson cycle controller (disperse→drift→assemble→super→rift)|V5,V8
 T33|x|M6 seeded event scheduler: hotspot, meteor, ice age, flood basalt|V2,V16
 T34|x|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
-T35|.|M6 NaN guard + autosave rollback|V7
+T35|x|M6 NaN guard + autosave rollback|V7
 T36|~|M6 soak harness (headless, max speed) asserting bounds|V8
 T37|.|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers|V17
 T38|.|M7 lava/magma emissive + cooling crust|-
@@ -143,9 +143,9 @@ T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect dr
 T45|.|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
 T46|x|M7 procedural ambient audio from sim stats|V14,V15
 T47|~|M8 debug overlays|I.overlays
-T48|.|M8 god tools via event path|V16,I.god tools
+T48|~|M8 god tools via event path|V16,I.god tools
 T49|x|M8 ambient mode: hide UI, cinematic auto cam, POI follow (eruptions, impacts)|I.keys
-T50|.|M8 save/load: `.terra` format, gzip, IDB autosave ring, file export/import|V13,V21,I.file,I.idb
+T50|x|M8 save/load: `.terra` format, gzip, IDB autosave ring, file export/import|V13,V21,I.file,I.idb
 T51|~|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19
 
 ## §B BUGS

@@ -9,7 +9,10 @@ import { createTimebar, type ClockLike } from './ui/timebar';
 import { bindKeys } from './ui/keys';
 import { registerSimFields, uploadWorld } from './sim/fields';
 import { generateWorld } from './sim/worldgen';
-import { Sim } from './sim/sim';
+import { Sim, STATS_WINDOW } from './sim/sim';
+import { SaveManager, SaveStore, SAVE_EXCLUDE } from './core/save';
+import { NanGuard } from './core/nanGuard';
+import { createSavePanel, showToast } from './ui/savePanel';
 import { createTerrain } from './render/terrain';
 import { createSides } from './render/sides';
 import { createWater } from './render/water';
@@ -21,6 +24,7 @@ import { createOverlays } from './overlay/overlays';
 import { createAmbientCam } from './ui/ambientCam';
 import { Ambience } from './audio/ambience';
 import { TickBudget } from './core/tickBudget';
+import { createGodPanel } from './ui/godPanel';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -62,6 +66,15 @@ async function main() {
   const world = generateWorld(params.get('seed') as number, { plates: params.get('initialPlates') as number });
   uploadWorld(fields, world);
   const sim = new Sim(stage.renderer, fields, world, params, DT_GEO);
+  // T50/T35: saves, autosave ring, NaN guard + rollback
+  const guard = new NanGuard(fields, SAVE_EXCLUDE);
+  let store: SaveStore | null = null;
+  try { store = await SaveStore.open(); } catch (e) { console.warn('IndexedDB unavailable: autosave keeps an in-memory snapshot only', e); }
+  const saves = new SaveManager({ renderer: stage.renderer, fields, sim, params, clock, guard }, store, {
+    windowTicks: STATS_WINDOW, notice: showToast, pause: () => { clock.paused = true; },
+  });
+  const loadSlot = new URLSearchParams(location.search).get('load'); // ?load=<slot key>|latest
+  if (loadSlot) await saves.loadSlot(loadSlot).catch(() => {}); // failure is toasted; the fresh world keeps running
 
   createLighting(stage.scene);
   stage.scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
@@ -69,12 +82,14 @@ async function main() {
   params.onChange((key, v) => { if (key === 'verticalExaggeration') setVertEx(v as number); });
 
   const panel = createPanel(params);
+  const savePanel = createSavePanel(panel.folders.Save, saves);
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
   // sim GPU budget per frame (V9): speed beyond this shows as effective < requested (V22)
   const budget = new TickBudget(5);
   let ticksSinceSample = 0;
   const hud = createPerfHud(stage.renderer, () => fields.bytes(), (ms) => { budget.observe(ms, ticksSinceSample); ticksSinceSample = 0; });
-  const probe = createProbeUI(stage.renderer, stage.camera, fields);
+  const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields);
+  const probe = createProbeUI(stage.renderer, stage.camera, fields, god.isInspect);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   const overlays = createOverlays(fields, stage.scene);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
@@ -101,6 +116,8 @@ async function main() {
     const ran = sim.runTicks(ticks);
     ticksSinceSample += ran;
     if (ran < ticks) clock.unrun(ticks - ran);
+    saves.frame();
+    savePanel.update();
     timebar.update();
     probe.update(dt);
     statsPane.update();
@@ -119,7 +136,8 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio };
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves,
+    save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
 

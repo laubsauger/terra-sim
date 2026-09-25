@@ -13,8 +13,16 @@ import { createClimatePass, type ClimatePass } from './climate';
 import { createBiomePass, type BiomePass } from './biome';
 import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats';
 import { WilsonController } from './wilson';
+import { Diagenesis } from './diagenesis';
+import { GodTools } from './godTools';
 import { EventScheduler, iceAgeForcing, type GeoEvent, type EventKind } from './events';
 import type { WorldData } from './worldData';
+// save/load (T50)
+import type { RngState } from '../core/rng';
+import { MAX_PLATES, type Plate } from './worldData';
+import type { LifecycleState } from './lifecycle';
+import type { WilsonState } from './wilson';
+import type { EventSchedulerState } from './events';
 
 /** Ticks per stats window. Readback issued at window end must land before the next window ends (V2). */
 export const STATS_WINDOW = 40;
@@ -34,6 +42,10 @@ export class Sim {
   readonly climate: ClimatePass;
   readonly biome: BiomePass;
   private worldStats: THREE.ComputeNode;
+  private diagenesis: Diagenesis;
+  readonly god: GodTools;
+  /** Plate a god-tool split asked for; consumed at the next window end ahead of the Wilson rift. */
+  private godSplit: number | undefined;
   stats: WorldStats | null = null;
   readonly wilson = new WilsonController();
   readonly events: EventScheduler;
@@ -61,11 +73,18 @@ export class Sim {
     this.climate = createClimatePass(fields, params);
     this.biome = createBiomePass(fields);
     this.worldStats = createWorldStats(fields);
+    this.diagenesis = new Diagenesis(fields);
+    this.god = new GodTools(fields);
     this.kGeoBase = this.erosion.uniforms.kGeo.value;
     this.erosion.uniforms.kGeo.value = this.kGeoBase * EROSION_EVERY;
     this.rng = new PCG32(world.seed, 0x7ec70);
     this.events = new EventScheduler(world.seed);
     this.handlers.set('iceAge', (e) => this.iceAges.push({ start: e.my, durationMy: e.durationMy ?? 20, magnitude: e.magnitude }));
+    // god tools + random meteors share handlers (V16); voxel edits need a derive afterwards
+    this.handlers.set('uplift', (e) => { this.god.uplift(renderer, e.x, e.z, e.radius ?? 10, e.magnitude); this.derive.run(renderer); });
+    this.handlers.set('meteor', (e) => { this.god.meteor(renderer, e.x, e.z, e.radius ?? 4 + 8 * e.magnitude, 1); this.derive.run(renderer); });
+    this.handlers.set('storm', (e) => { this.god.rainStorm(renderer, e.x, e.z, e.radius ?? 20, e.magnitude); });
+    this.handlers.set('split', (e) => { this.godSplit = e.magnitude; });
     this.derive.run(renderer);
   }
 
@@ -76,6 +95,7 @@ export class Sim {
    * window's readback has not arrived yet, instead of using stale or missing data.
    */
   runTicks(n: number): number {
+    if (this.holds > 0) return 0; // save/rollback in progress (hold())
     let ran = 0;
     for (; ran < n; ran++) {
       const next = this.tick + 1;
@@ -87,6 +107,8 @@ export class Sim {
 
   private step(t: number): void {
     const r = this.renderer;
+    // god-tool events apply at the next tick boundary (deterministic order, same handler path as random ones)
+    if (this.events.queue.length) this.dispatch(this.events.drain());
     // 3-4 tectonics + isostasy
     if (this.tectonics.tick(r, t, this.dtGeo, { speedMul: this.params.get('plateSpeed') as number, isoEvery: ISO_EVERY })) {
       this.runsInWindow++;
@@ -102,6 +124,8 @@ export class Sim {
       this.erosion.step(r);
       this.derive.run(r);
     }
+    // 9 diagenesis / metamorphism / aging (mass-neutral material changes)
+    this.diagenesis.step(r, t, this.dtGeo);
     // 10 derived: biome + vegetation
     this.biome.step(r);
     this.tick = t;
@@ -121,7 +145,8 @@ export class Sim {
       updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
       this.stats = parseWorldStats(buf);
       if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); }
-      const op = this.lifecycle.decide(plates, life, my, this.rng, this.wilson.riftRequest);
+      const op = this.lifecycle.decide(plates, life, my, this.rng, this.godSplit ?? this.wilson.riftRequest);
+      this.godSplit = undefined;
       if (op) {
         this.lifecycle.apply(r, plates, op, my);
         if (op.kind === 'split') this.wilson.onSplit(my);
@@ -143,16 +168,136 @@ export class Sim {
   private runEvents(my: number, windowMy: number): void {
     const rate = this.params.get('eventRate') as number;
     this.events.roll(my, windowMy, { hotspot: rate, iceAge: rate, floodBasalt: rate, meteor: rate * (this.params.get('meteorRate') as number) });
-    for (const e of this.events.drain()) {
+    this.dispatch(this.events.drain());
+    this.iceAges = this.iceAges.filter((a) => my <= a.start + a.durationMy);
+    this.climate.setIceAge(iceAgeForcing(this.iceAges, my));
+  }
+
+  private dispatch(events: GeoEvent[]): void {
+    for (const e of events) {
       const h = this.handlers.get(e.kind);
       if (h) h(e);
       else { if (this.unhandledEvents++ === 0) console.warn(`Sim: no handler for event '${e.kind}' (counted in unhandledEvents)`); }
     }
-    this.iceAges = this.iceAges.filter((a) => my <= a.start + a.durationMy);
-    this.climate.setIceAge(iceAgeForcing(this.iceAges, my));
   }
 
   /** Reservoir in fill units from the latest snapshot. */
   reservoir(): number { return this.lastCounters?.[0] ?? 0; }
   alivePlates(): number { return this.tectonics.plates.filter((p) => p.alive).length; }
+
+  // ---- save/load (T50, V13) ------------------------------------------------------------------
+  // A snapshot = GPU fields (save.ts) + getState(). Taken between ticks while hold() blocks runTicks, after
+  // settle() has landed the in-flight window readback; that readback is part of the state (pendingCounters)
+  // so the next window end after a load applies exactly what an unsaved run would apply.
+  private holds = 0;
+
+  /** Block ticking (runTicks returns 0) until the returned release() is called. Idempotent release. */
+  hold(): () => void {
+    this.holds++;
+    let done = false;
+    return () => { if (!done) { done = true; this.holds--; } };
+  }
+
+  get held(): boolean { return this.holds > 0; }
+
+  /** Wait for the in-flight window readback so getState() is complete. Call while held. */
+  async settle(): Promise<void> {
+    const p = this.pending;
+    if (!p || this.pendingResult) return;
+    const b = await p;
+    if (this.pending === p) this.pendingResult = b;
+  }
+
+  getState(): SimState {
+    if (this.pending && !this.pendingResult) throw new Error('Sim.getState: window readback in flight; hold() and await settle() first');
+    const tec = this.tectonics as unknown as { lastRunTick: number };
+    return {
+      tick: this.tick,
+      dtGeo: this.dtGeo,
+      plates: this.tectonics.plates.map((p) => ({ ...p, vel: [...p.vel] as [number, number], accum: [...p.accum] as [number, number] })),
+      rng: this.rng.getState(),
+      lifecycle: this.lifecycle.getState(),
+      wilson: this.wilson.getState(),
+      events: this.events.getState(),
+      iceAges: this.iceAges.map((a) => ({ ...a })),
+      unhandledEvents: this.unhandledEvents,
+      runsInWindow: this.runsInWindow,
+      prevRuns: this.prevRuns,
+      tecLastRunTick: tec.lastRunTick,
+      godSplit: this.godSplit ?? null,
+      pendingCounters: this.pendingResult ? [...new Int32Array(this.pendingResult)] : null,
+      lastCounters: this.lastCounters ? [...this.lastCounters] : null,
+      uniforms: {
+        climateSeaLevel: this.climate.uniforms.seaLevel.value,
+        iceAge: this.climate.uniforms.iceAge.value,
+        biomeSeaLevel: this.biome.uniforms.seaLevel.value,
+      },
+    };
+  }
+
+  /** Throws (message names the bad key) unless s is a SimState this sim can load. Pure: call before mutating anything. */
+  checkState(s: unknown): asserts s is SimState {
+    const bad = (k: string) => { throw new Error(`Sim state: invalid or missing '${k}'`); };
+    if (typeof s !== 'object' || s === null) bad('(root)');
+    const o = s as Record<string, unknown>;
+    for (const k of ['tick', 'dtGeo', 'unhandledEvents', 'runsInWindow', 'prevRuns', 'tecLastRunTick']) if (typeof o[k] !== 'number' || !Number.isFinite(o[k])) bad(k);
+    if (o.dtGeo !== this.dtGeo) throw new Error(`Sim state: dtGeo ${String(o.dtGeo)} ≠ this world's ${this.dtGeo} (V12)`);
+    if (!Array.isArray(o.plates) || o.plates.length !== MAX_PLATES) bad('plates');
+    for (const k of ['rng', 'lifecycle', 'wilson', 'events', 'uniforms']) if (typeof o[k] !== 'object' || o[k] === null) bad(k);
+    if (!Array.isArray(o.iceAges)) bad('iceAges');
+    for (const k of ['pendingCounters', 'lastCounters']) if (o[k] !== null && !Array.isArray(o[k])) bad(k);
+    if (o.godSplit !== null && typeof o.godSplit !== 'number') bad('godSplit');
+    if (typeof (this.tectonics as unknown as { lastRunTick: unknown }).lastRunTick !== 'number') {
+      throw new Error('Sim state: Tectonics.lastRunTick not found (renamed?); update Sim.getState/loadState');
+    }
+  }
+
+  /** Restore CPU state. GPU fields are restored separately (save.ts); call both while held. */
+  loadState(s: SimState): void {
+    this.checkState(s);
+    const plates = this.tectonics.plates;
+    s.plates.forEach((p, i) => { Object.assign(plates[i]!, { ...p, vel: [...p.vel], accum: [...p.accum] }); });
+    this.tick = s.tick;
+    this.rng = PCG32.fromState(s.rng);
+    this.lifecycle.loadState(s.lifecycle);
+    this.wilson.loadState(s.wilson);
+    this.events.loadState(s.events);
+    this.iceAges = s.iceAges.map((a) => ({ ...a }));
+    this.unhandledEvents = s.unhandledEvents;
+    this.runsInWindow = s.runsInWindow;
+    this.prevRuns = s.prevRuns;
+    (this.tectonics as unknown as { lastRunTick: number }).lastRunTick = s.tecLastRunTick;
+    this.godSplit = s.godSplit ?? undefined;
+    // a stale in-flight read (pre-load) is dropped: its then() checks this.pending identity
+    this.pending = null;
+    this.pendingResult = s.pendingCounters ? Int32Array.from(s.pendingCounters).buffer : null;
+    this.lastCounters = s.lastCounters ? Int32Array.from(s.lastCounters) : null;
+    this.stats = this.lastCounters ? parseWorldStats(this.lastCounters.buffer as ArrayBuffer) : null;
+    this.climate.setSeaLevel(s.uniforms.climateSeaLevel);
+    this.climate.uniforms.iceAge.value = s.uniforms.iceAge;
+    this.biome.setSeaLevel(s.uniforms.biomeSeaLevel);
+  }
+}
+
+/** CPU half of a snapshot (T50). New CPU state that a later tick reads must be added here, or V13 breaks. */
+export interface SimState {
+  tick: number;
+  dtGeo: number;
+  plates: Plate[];
+  rng: RngState;
+  lifecycle: LifecycleState;
+  wilson: WilsonState;
+  events: EventSchedulerState;
+  iceAges: { start: number; durationMy: number; magnitude: number }[];
+  unhandledEvents: number;
+  runsInWindow: number;
+  prevRuns: number;
+  /** Tectonics.lastRunTick (private there; drives the crust-age dt of the next run). */
+  tecLastRunTick: number;
+  /** God-tool split request waiting for the next window end. */
+  godSplit: number | null;
+  /** Counters snapshot issued at the last window end, applied at the next one. null before the first window. */
+  pendingCounters: number[] | null;
+  lastCounters: number[] | null;
+  uniforms: { climateSeaLevel: number; iceAge: number; biomeSeaLevel: number };
 }

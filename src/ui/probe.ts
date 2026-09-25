@@ -36,7 +36,7 @@ export function pickColumn(ray: THREE.Ray, surfY: Float32Array): PickHit | null 
   return null;
 }
 
-export function createProbeUI(renderer: THREE.WebGPURenderer, camera: THREE.Camera, fields: GpuFields) {
+export function createProbeUI(renderer: THREE.WebGPURenderer, camera: THREE.Camera, fields: GpuFields, enabled: () => boolean = () => true) {
   const probe = new Probe(fields);
   const el = document.createElement('div');
   el.className = 'terra-probe';
@@ -113,7 +113,7 @@ export function createProbeUI(renderer: THREE.WebGPURenderer, camera: THREE.Came
   let down: [number, number] | null = null;
   renderer.domElement.addEventListener('pointerdown', (e) => { down = [e.clientX, e.clientY]; });
   renderer.domElement.addEventListener('pointerup', (e) => {
-    if (down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 4 && e.button === 0) void pickAt(e.clientX, e.clientY);
+    if (enabled() && down && Math.hypot(e.clientX - down[0], e.clientY - down[1]) < 4 && e.button === 0) void pickAt(e.clientX, e.clientY);
     down = null;
   });
 

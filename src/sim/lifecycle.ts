@@ -190,6 +190,23 @@ export class Lifecycle {
     return null;
   }
 
+  // save/load (T50). sutureRun keeps insertion order: decide() merges the first qualifying pair.
+  getState(): LifecycleState {
+    return {
+      sutureRun: [...this.sutureRun],
+      lastSplitMy: Number.isFinite(this.lastSplitMy) ? this.lastSplitMy : null,
+      log: this.log.map((e) => ({ my: e.my, op: { ...e.op } })),
+    };
+  }
+
+  loadState(s: LifecycleState): void {
+    if (!Array.isArray(s?.sutureRun) || !Array.isArray(s.log)) throw new Error('Lifecycle.loadState: invalid state');
+    this.sutureRun = new Map(s.sutureRun);
+    this.lastSplitMy = s.lastSplitMy ?? -Infinity;
+    this.log.length = 0;
+    for (const e of s.log) this.log.push({ my: e.my, op: { ...e.op } });
+  }
+
   /** Apply op on GPU (relabel) and CPU (plate table). */
   apply(renderer: THREE.WebGPURenderer, plates: Plate[], op: LifecycleOp, geoMy: number): void {
     this.log.push({ my: geoMy, op });
@@ -220,6 +237,9 @@ export class Lifecycle {
     f.swap('crustAge');
   }
 }
+
+/** Serializable Lifecycle state (T50). lastSplitMy null = never split (JSON has no -Infinity). */
+export interface LifecycleState { sutureRun: [string, number][]; lastSplitMy: number | null; log: { my: number; op: LifecycleOp }[] }
 
 const wrapDelta = (d: number, n: number) => ((d + n / 2) % n + n) % n - n / 2;
 
