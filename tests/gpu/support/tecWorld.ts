@@ -3,12 +3,12 @@
 import * as L from '/src/sim/layout.ts';
 import { emptyWorld, type WorldData } from '/src/sim/worldData.ts';
 
-export function twoPlateWorld(vel0: [number, number], vel1: [number, number]): WorldData {
+export function twoPlateWorld(vel0: [number, number], vel1: [number, number], opts: { bothContinental?: boolean } = {}): WorldData {
   const w = emptyWorld(7);
   for (let z = 0; z < L.NZ; z++) for (let x = 0; x < L.NX; x++) {
     const c = L.colIdx(x, z);
-    const cont = x >= 128;
-    w.plateId[c] = cont ? 1 : 0;
+    const cont = x >= 128 || !!opts.bothContinental;
+    w.plateId[c] = x >= 128 ? 1 : 0;
     const base = cont ? 44 : 52;
     const top = cont ? 84 : 61; // exclusive
     for (let y = 0; y < top; y++) {

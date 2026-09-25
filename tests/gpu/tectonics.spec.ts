@@ -115,3 +115,38 @@ test('isostasy lifts thick continent toward equilibrium and sinks old ocean', as
   expect(res.ocean).toBeLessThan(58);
   expect(res.m1).toBe(res.m0);
 });
+
+// B2: collisions used to keep 1 layer of the losing continent and delaminate the rest, so continents
+// melted away within ~150 My. Continental crust must stack (orogeny), not vanish.
+test('continent-continent collision thickens crust and keeps continental mass', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { createDerivePass } = await import('/src/sim/derive.ts');
+    const { Tectonics } = await import('/src/sim/tectonics.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields();
+    registerSimFields(f);
+    f.freeze();
+    const w = twoPlateWorld([2, 0], [-2, 0], { bothContinental: true });
+    uploadWorld(f, w);
+    const derive = createDerivePass(f);
+    derive.run(r);
+    const tec = new Tectonics(f, w.plates);
+    const crust = async () => { const ci = new Uint32Array(await f.read(r, 'colInfo')); let m = 0, maxTop = 0; for (let i = 0; i < ci.length; i += 2) { m += ci[i + 1]!; maxTop = Math.max(maxTop, (ci[i]! >> 8) & 0xff); } return { m, maxTop }; };
+    const a = await crust();
+    const res0 = new Int32Array(await f.read(r, 'counters'))[0]!;
+    for (let t = 1; t <= 80; t++) if (tec.tick(r, t, 0.05, { speedMul: 1, isoEvery: 4 })) derive.run(r);
+    const b = await crust();
+    const res1 = new Int32Array(await f.read(r, 'counters'))[0]!;
+    const ci = new Uint32Array(await f.read(r, "colInfo")); let thick = 0, maxM = 0; for (let i = 0; i < ci.length; i += 2) { if (ci[i + 1]! > 41 * 255) thick++; maxM = Math.max(maxM, ci[i + 1]!); }
+    return { m0: a.m, m1: b.m, top0: a.maxTop, top1: b.maxTop, res0, res1, dbg: [thick, maxM / 255] };
+  });
+  expect(res.m1 + res.res1).toBe(res.m0 + res.res0);   // V3
+  // capped orogens (64 layers) delaminate the excess by design; before the fix ~all loser crust vanished
+  expect(res.m1 / res.m0).toBeGreaterThan(0.9);
+  expect(res.top1).toBeGreaterThan(res.top0 + 3);       // mountains rise
+  expect(res.top1).toBeLessThan(126);                   // never hit the grid ceiling
+});

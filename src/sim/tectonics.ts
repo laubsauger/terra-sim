@@ -33,16 +33,20 @@ export const RIDGE_BASE = 58;
 export const RIDGE_GABBRO = 3;
 export const RIDGE_BASALT = 4;
 export const RIDGE_MASS = (RIDGE_GABBRO + RIDGE_BASALT) * 255;
-/** Max layers of crustal root added to the winner per collision event. */
-export const OROGENY_MAX = 1;
+/** Max layers of crustal root added to the winner per collision event (6-bit field). */
+export const OROGENY_MAX = 63;
 /** Crust thicker than this (layers) stops thickening; extra collided mass delaminates into the mantle. */
 export const MAX_CRUST_LAYERS = 64;
 /** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
 export const TEC_EVERY = 4;
 
-/** tecAct bits: 0-15 src col | 16 new ridge crust | 18-19 orogeny k | 20-21 isostasy v+1 | 24 oceanic slab consumed here. */
+/** tecAct bits: 0-15 src col | 16 new ridge crust | 17-18 isostasy v+1 | 19-24 orogeny k | 25 oceanic slab consumed here. */
 export const ACT_NEW = 1 << 16;
-export const ACT_SUBDUCT = 1 << 24;
+export const ACT_SUBDUCT = 1 << 25;
+const V_SHIFT = 17, K_SHIFT = 19;
+/** Root of k layers grows downward; the column rises only by its isostatic share, up = round(k·ROOT_UP/256). */
+const ROOT_UP = Math.round(256 * (1 - RHO_CONT / RHO_MANTLE) * ISO_GAIN);
+const rootUp = (k: THREE.Node<'uint'>) => k.mul(uint(ROOT_UP)).add(uint(128)).shiftRight(uint(8));
 
 export interface TectonicsStats { area: number[]; subducted: number[]; created: number[] }
 
@@ -151,12 +155,15 @@ export class Tectonics {
       }).Else(() => {
         const top = bestInfo.shiftRight(uint(8)).bitAnd(uint(0xff));
         const base = bestInfo.bitAnd(uint(0xff));
-        // orogeny: half the continental loser mass becomes crustal root, capped, never pushing past the grid top
+        // orogeny: continental losers stack onto the winner as crustal root (continents are not destroyed
+        // in collisions), limited by max crust thickness and grid top; only the excess delaminates
         const k = uint(0).toVar();
         If(bestCont.equal(uint(1)).and(contCount.greaterThan(uint(1))), () => {
-          k.assign(uMin(contMass.sub(bestMass).div(uint(510)), uint(OROGENY_MAX)));
-          k.assign(select(bestMass.greaterThanEqual(uint(MAX_CRUST_LAYERS * 255)), uint(0), k));
-          k.assign(select(top.add(k).greaterThanEqual(uint(NY - 2)), uint(NY - 2).sub(uMin(top, uint(NY - 2))), k));
+          const room = uint(MAX_CRUST_LAYERS).sub(uMin(bestMass.div(uint(255)), uint(MAX_CRUST_LAYERS)));
+          const floorRoom = base.sub(uMin(base, uint(1))); // root must stay above y=0
+          k.assign(uMin(uMin(contMass.sub(bestMass).div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
+          // shrink until the risen top fits under the ceiling
+          Loop(8, () => { If(top.add(rootUp(k)).greaterThanEqual(uint(NY - 3)).and(k.greaterThan(uint(0))), () => { k.assign(k.div(2)); }); });
         });
         const loserMass = massSum.sub(bestMass);
         // an oceanic loser means a slab went down here (arc volcanism input)
@@ -183,14 +190,14 @@ export class Tectonics {
           const rho = select(isCont, float(RHO_CONT), float(RHO_OCEAN));
           const sub = select(isCont, float(0), sqrt(bestAge.max(0)).mul(SUBSIDENCE));
           const eq = float(Y_COMP).add(thick.mul(float(1).sub(rho.div(RHO_MANTLE))).mul(ISO_GAIN)).sub(sub);
-          const diff = eq.sub(bestSurf.add(float(k)));
-          If(diff.greaterThan(0.75).and(top.add(k).add(uint(1)).lessThan(uint(NY - 1))), () => { v.assign(1); });
+          const diff = eq.sub(bestSurf.add(float(rootUp(k))));
+          If(diff.greaterThan(0.75).and(top.add(rootUp(k)).add(uint(1)).lessThan(uint(NY - 1))), () => { v.assign(1); });
           If(diff.lessThan(-0.75).and(base.greaterThan(uint(1))).and(base.lessThan(uint(NY))), () => { v.assign(-1); });
         });
 
         pidNext.element(d).assign(bestPlate);
         ageNext.element(d).assign(bestAge.add(ageDt));
-        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(18))).bitOr(uint(v.add(1)).shiftLeft(uint(20))).bitOr(oceanLost));
+        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(K_SHIFT))).bitOr(uint(v.add(1)).shiftLeft(uint(V_SHIFT))).bitOr(oceanLost));
         atomicAdd(ctr.element(bestPlate.mul(4).add(CTR_PLATE)), int(1));
       });
     })().compute(NCOL);
@@ -242,11 +249,13 @@ export class Tectonics {
             select(y.lessThan(int(RIDGE_BASE + RIDGE_GABBRO + RIDGE_BASALT)), uint(BAS), uint(0)))));
       }).Else(() => {
         const s = a.bitAnd(uint(0xffff));
-        const k = int(a.shiftRight(uint(18)).bitAnd(uint(3)));
-        const v = int(a.shiftRight(uint(20)).bitAnd(uint(3))).sub(1);
+        const k = int(a.shiftRight(uint(K_SHIFT)).bitAnd(uint(63)));
+        const v = int(a.shiftRight(uint(V_SHIFT)).bitAnd(uint(3))).sub(1);
         const base = int(colInfo.element(s).x.bitAnd(uint(0xff)));
-        const sy = y.sub(v).sub(k);
-        const root = k.greaterThan(int(0)).and(y.greaterThanEqual(base.add(v))).and(y.lessThan(base.add(v).add(k)));
+        const up = int(rootUp(uint(k)));
+        const sy = y.sub(v).sub(up);
+        const rootTop = base.add(v).add(up); // old base lands here
+        const root = k.greaterThan(int(0)).and(y.greaterThanEqual(rootTop.sub(k))).and(y.lessThan(rootTop));
         If(root, () => { out.assign(uint(GNEISS)); })
           .ElseIf(sy.lessThan(int(0)), () => { out.assign(uint(PERI)); })
           .ElseIf(sy.greaterThanEqual(int(NY)), () => { out.assign(uint(0)); })

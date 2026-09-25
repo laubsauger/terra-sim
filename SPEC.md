@@ -89,6 +89,9 @@ V19: heavy passes (plate shift, remesh, mantle) time-sliced; sim ⊥ adds frame 
 V20: params single schema {default, range, unit, persist}. UI, url, save, soak read same schema.
 V21: `mat` id list append-only; saves from older version keep valid materials.
 V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = min(requested, sim budget V9); UI shows both.
+V24: cont-cont collision → loser crust stacks onto winner (root down, isostatic rise) up to 64 layers; only excess delaminates. arc volcanism ! add FLAG_CONTINENTAL crust from reservoir (continents regrow).
+V25: plate speed drivers ⊥ positive feedback on own speed; slab pull normalised by plate speed.
+V26: water quasi-steady: overdamped flow; neighbour level roughness in open ocean ≤ 0.05 voxel after 40 substeps of perturbation.
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
 ## §T TASKS
@@ -110,7 +113,7 @@ T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|
 T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
 T16|x|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
 T17|x|M2 isostasy column adjust|-
-T18|.|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
+T18|~|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
 T19|.|M2 crust mass budget: subduction → `mantleReservoir` → ridges|volcanism|V3,V2
 T20|.|M3 mantle field: diffuse/advect, plumes, slab sinks, side render glow|V19
 T21|.|M3 crust temp field half-res, geotherm|-
@@ -148,3 +151,6 @@ T51|.|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19
 ## §B BUGS
 id|date|cause|fix
 B1|2026-09-25|tectonics decide kernel bound 13 storage buffers > adapter limit 10 ∴ pipeline invalid|V23
+B2|2026-09-25|cont-cont collision kept 1 layer of loser, rest → reservoir ∴ continents melted away ~150 My|V24
+B3|2026-09-25|slab pull ∝ subducted cols ∝ own speed → runaway, ∀ plates @ max speed|V25
+B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

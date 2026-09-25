@@ -29,8 +29,11 @@ import { NCOL, NX, NZ } from './layout';
 import { tColIdx, tColXZ } from './tslLayout';
 
 export const HYDRO_DEFAULTS = {
-  kFlow: 0.25,    // flux gain per voxel of head difference per substep (≤ 0.5 for stability)
-  friction: 0.02, // fraction of flux lost per substep (sets settling time ~1/friction substeps)
+  // Overdamped on purpose: geologic ticks want quasi-steady water, not sloshing waves. Steady flux per
+  // neighbour ≈ kFlow/friction · Δh = 0.2·Δh (explicit-diffusion stable ≤ 0.25). Low friction made deep
+  // oceans ring with persistent waves excited by every tectonic shift.
+  kFlow: 0.1,     // flux gain per voxel of head difference per substep
+  friction: 0.5,  // fraction of flux lost per substep
   rain: 0,        // TEST-ONLY uniform rain, depth per substep (× 'rainfall' param). Real precip is the climate pass.
   substeps: 4,    // default substeps per geo tick
 };
