@@ -18,6 +18,7 @@ import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
 import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE } from './fields';
 import { CrustFlow } from './crustFlow';
+import { OCEAN_POOL } from './oceanLevel';
 
 // Isostasy calibration (voxel-y units). Surface at equilibrium:
 //   eq = Y_COMP + thickness * (1 - ρcrust/ρmantle) * ISO_GAIN - (oceanic ? SUBSIDENCE * sqrt(age) : 0)
@@ -55,6 +56,14 @@ const V_SHIFT = 17, K_SHIFT = 19, UP_SHIFT = 26;
 const ROOT_UP = Math.round(256 * (1 - RHO_CONT / RHO_MANTLE) * ISO_GAIN);
 const rootUp = (k: THREE.Node<'uint'>) => k.mul(uint(ROOT_UP)).add(uint(128)).shiftRight(uint(8));
 
+/** Winner score of a candidate column: continental > oceanic; thicker continent / younger ocean wins; ties → lower id. */
+export function columnScore(ci: THREE.Node<'uvec2'>, age: THREE.Node<'float'>, plate: THREE.Node<'uint'>): THREE.Node<'uint'> {
+  const cont = ci.x.shiftRight(uint(16)).bitAnd(uint(COL_CONTINENTAL));
+  const tie = uint(MAX_PLATES - 1).sub(plate);
+  const ageKey = uint(0xffff).sub(uMin(uint(age.mul(10)), uint(0xffff)));
+  return select(cont.equal(uint(1)), uint(1 << 28).bitOr(ci.y.shiftLeft(uint(4))).bitOr(tie), ageKey.shiftLeft(uint(4)).bitOr(tie));
+}
+
 export interface TectonicsStats { area: number[]; subducted: number[]; created: number[] }
 
 export class Tectonics {
@@ -83,7 +92,7 @@ export class Tectonics {
     const [pid0, pid1] = fields.pair<'uint'>('plateId');
     const [age0, age1] = fields.pair('crustAge');
     this.decide = [this.buildDecide(pid0, pid1, age0, age1), this.buildDecide(pid1, pid0, age1, age0)];
-    this.waterGather = [this.buildWaterGather(pid0), this.buildWaterGather(pid1)];
+    this.waterGather = [this.buildWaterGather(pid0, age0), this.buildWaterGather(pid1, age1)];
     this.voxel = new PingPongKernel<'uint'>(fields, 'vox', (src, dst) => this.buildVoxel(src, dst));
     this.crustFlow = new CrustFlow(fields);
     const water = fields.cur('water');
@@ -142,12 +151,7 @@ export class Tectonics {
             const mass = ci.y;
             const cont = info.shiftRight(uint(16)).bitAnd(uint(COL_CONTINENTAL)).toVar();
             const age = ageCur.element(src).toVar();
-            const tie = uint(MAX_PLATES - 1).sub(uint(i));
-            // continental: thicker wins; oceanic: younger (more buoyant) wins; ties → lower plate id
-            const ageKey = uint(0xffff).sub(uMin(uint(age.mul(10)), uint(0xffff)));
-            const score = select(cont.equal(uint(1)),
-              uint(1 << 28).bitOr(mass.shiftLeft(uint(4))).bitOr(tie),
-              ageKey.shiftLeft(uint(4)).bitOr(tie)).toVar();
+            const score = columnScore(ci, age, uint(i)).toVar();
             count.addAssign(1);
             massSum.addAssign(mass);
             If(cont.equal(uint(1)), () => { contMass.addAssign(mass); contCount.addAssign(1); });
@@ -234,25 +238,46 @@ export class Tectonics {
    * Water and suspended sediment ride with their column; overlapping columns pool them, gaps start empty
    * (exactly conservative, V3/V4).
    */
-  private buildWaterGather(pidCur: THREE.StorageBufferNode<'uint'>): THREE.ComputeNode {
+  /**
+   * Water and suspended sediment follow the WINNING column; losers' water drains into the ocean pool
+   * (oceanSum[S_POOL], 2^-10 voxel units) that the ocean-leveling pass spreads over open ocean. Pooling all
+   * candidates' water onto the winner piled ocean water onto continents overriding the sea (B14).
+   * The sub-unit remainder of each loser's water stays with the winner, so Σ water is exact (V4).
+   */
+  private buildWaterGather(pidCur: THREE.StorageBufferNode<'uint'>, ageCur: THREE.StorageBufferNode<'float'>): THREE.ComputeNode {
     const water = this.fields.cur('water');
     const sed = this.fields.cur('sedSusp');
     const waterTmp = this.fields.cur<'vec2'>('waterTmp');
+    const colInfo = this.fields.cur<'uvec2'>('colInfo');
+    const ocean = this.fields.cur<'int'>('oceanSum');
     const table = this.table;
     return Fn(() => {
       const d = instanceIndex;
       If(d.greaterThanEqual(uint(NCOL)), () => { Return(); });
       const { x, z } = tColXZ(d);
-      const sum = float(0).toVar();
       const sedSum = float(0).toVar();
+      const wSum = float(0).toVar();
+      const best = uint(0).toVar();
+      const bestW = float(0).toVar();
       Loop(MAX_PLATES, ({ i }) => {
         const pt = table.element(i) as unknown as THREE.Node<'vec4'>;
         If(pt.z.greaterThan(0.5), () => {
           const src = tColIdx(x.sub(int(pt.x)), z.sub(int(pt.y))).toVar();
-          If(pidCur.element(src).equal(uint(i)), () => { sum.addAssign(water.element(src)); sedSum.addAssign(sed.element(src)); });
+          If(pidCur.element(src).equal(uint(i)), () => {
+            const ci = colInfo.element(src).toVar();
+            const score = columnScore(ci, ageCur.element(src), uint(i)).toVar();
+            const w = water.element(src).toVar();
+            wSum.addAssign(w);
+            sedSum.addAssign(sed.element(src));
+            If(score.greaterThan(best), () => { best.assign(score); bestW.assign(w); });
+          });
         });
       });
-      waterTmp.element(d).assign(vec2(sum, sedSum));
+      // losers' water in whole 2^-10 units to the pool; the remainder stays here
+      const lost = wSum.sub(bestW).max(0);
+      const units = int(lost.mul(1024).floor()).toVar();
+      If(units.greaterThan(int(0)), () => { atomicAdd(ocean.element(OCEAN_POOL), units); });
+      waterTmp.element(d).assign(vec2(bestW.add(lost.sub(float(units).div(1024))), sedSum));
     })().compute(NCOL);
   }
 

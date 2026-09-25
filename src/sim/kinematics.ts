@@ -66,3 +66,20 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
     for (const r of [p, q]) { r.vel[0] += (mx - r.vel[0]) * engage; r.vel[1] += (mz - r.vel[1]) * engage; }
   }
 }
+
+/**
+ * No-net-translation frame (geophysics' no-net-rotation analogue on the torus): subtract the area-weighted
+ * mean plate velocity. A common drift only scrolls the whole world; what matters is relative motion. Before
+ * this, locking and shared headings let every plate drift the same way, so plates rarely met or parted.
+ */
+export function removeNetMotion(plates: Plate[], stats: TectonicsStats, runs: number): void {
+  let ax = 0, az = 0, aw = 0;
+  for (const p of plates) {
+    if (!p.alive) continue;
+    const a = stats.area[p.id]! / Math.max(1, runs);
+    ax += p.vel[0] * a; az += p.vel[1] * a; aw += a;
+  }
+  if (aw <= 0) return;
+  ax /= aw; az /= aw;
+  for (const p of plates) if (p.alive) { p.vel[0] -= ax; p.vel[1] -= az; }
+}

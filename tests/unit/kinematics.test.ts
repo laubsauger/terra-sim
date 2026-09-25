@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { updateKinematics, MIN_SPEED, MAX_SPEED } from '../../src/sim/kinematics';
+import { updateKinematics, removeNetMotion, MIN_SPEED, MAX_SPEED } from '../../src/sim/kinematics';
 import { emptyWorld } from '../../src/sim/worldData';
 import { PCG32 } from '../../src/core/rng';
 
@@ -58,5 +58,22 @@ describe('collision locking (B5)', () => {
     for (let i = 0; i < 10; i++) updateKinematics(plates, stats, 40, 2, rng, undefined, contact);
     const rel = Math.hypot(plates[0]!.vel[0] - plates[1]!.vel[0], plates[0]!.vel[1] - plates[1]!.vel[1]);
     expect(rel).toBeLessThan(0.5);
+  });
+});
+
+describe('no net motion (user: all plates walk the same way)', () => {
+  // A shared drift hides tectonics: plates must move relative to each other, not together.
+  it('area-weighted mean plate velocity is zero after an update', () => {
+    const { plates, stats } = setup();
+    plates[0]!.vel = [2, 0.5]; plates[1]!.vel = [1.5, 0.2];
+    stats.area[1] = 10000 * 40 * 3;
+    removeNetMotion(plates, stats, 40);
+    const a0 = stats.area[0]!, a1 = stats.area[1]!;
+    const mx = (plates[0]!.vel[0] * a0 + plates[1]!.vel[0] * a1) / (a0 + a1);
+    const mz = (plates[0]!.vel[1] * a0 + plates[1]!.vel[1] * a1) / (a0 + a1);
+    expect(Math.abs(mx)).toBeLessThan(1e-9);
+    expect(Math.abs(mz)).toBeLessThan(1e-9);
+    // relative motion survives
+    expect(Math.hypot(plates[0]!.vel[0] - plates[1]!.vel[0], plates[0]!.vel[1] - plates[1]!.vel[1])).toBeGreaterThan(0.1);
   });
 });

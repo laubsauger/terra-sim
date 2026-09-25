@@ -5,7 +5,7 @@ import type { Params } from '../core/params';
 import { PCG32 } from '../core/rng';
 import { createDerivePass } from './derive';
 import { Tectonics } from './tectonics';
-import { updateKinematics } from './kinematics';
+import { updateKinematics, removeNetMotion } from './kinematics';
 import { Lifecycle } from './lifecycle';
 import { createHydroPass, type HydroPass } from './hydro';
 import { createErosionPass, type ErosionPass } from './erosion';
@@ -179,7 +179,9 @@ export class Sim {
       const life = Lifecycle.parseStats(buf);
       const my = this.geoMy, windowMy = STATS_WINDOW * this.dtGeo;
       this.wilson.update(plates, life, my);
-      updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
+      const tstats = Tectonics.parseStats(buf);
+      updateKinematics(plates, tstats, this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
+      removeNetMotion(plates, tstats, this.prevRuns); // relative motion only; a shared drift just scrolls the world
       this.stats = parseWorldStats(buf);
       // reservoir snapshot gates crust stacking (see Tectonics.stackGate)
       // full stacking unless the reservoir is in real debt (magma keeps it near 0 in normal operation)

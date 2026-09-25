@@ -38,7 +38,8 @@ async function run(page: import('@playwright/test').Page, ticks: number, isoEver
     const water0 = sumF(new Float32Array(await f.read(r, 'water')));
     for (let t = 1; t <= ticks; t++) if (tec.tick(r, t, 0.05, { speedMul: 1, isoEvery })) derive.run(r);
     const mass1 = await massNow();
-    const water1 = sumF(new Float32Array(await f.read(r, 'water')));
+    // loser water drains into the ocean pool (oceanSum[7], 2^-10 units) — part of the water budget (B14)
+    const water1 = sumF(new Float32Array(await f.read(r, 'water'))) + new Int32Array(await f.read(r, 'oceanSum'))[7]! / 1024;
     const pid = new Uint32Array(await f.read(r, 'plateId'));
     const age = new Float32Array(await f.read(r, 'crustAge'));
     const info = new Uint32Array(await f.read(r, 'colInfo'));

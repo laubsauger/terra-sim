@@ -23,6 +23,8 @@ const MAXQ = 2 ** 22;    // |Δ| ≤ 32 voxels per column per tick in quanta
 
 // oceanSum slots
 const S_HI = 0, S_N = 1, S_PREV = 2, S_DQ = 3, S_ABS = 4, S_DQLO = 5, S_LO = 6;
+/** Water drained from subducted/overridden columns, in 2^-10 voxel units, spread over open ocean each tick. */
+export const OCEAN_POOL = 7;
 
 export function registerOceanFields(f: GpuFields): void {
   f.add('oceanSum', 'int', 8, { atomic: true });
@@ -67,7 +69,7 @@ export class OceanLevel {
         atomicAdd(acc.element(S_LO), q.bitAnd(int(1023)));
         atomicAdd(acc.element(S_N), int(1));
         // deepest ocean column absorbs the residual: key = depth·64 in high bits, column index low 16 bits
-        const key = int(max(w, 0).min(500).mul(64)).shiftLeft(uint(16)).bitOr(int(c as unknown as THREE.Node<'int'>));
+        const key = int(max(w, 0).min(500).mul(64)).shiftLeft(int(16)).bitOr(int(c as unknown as THREE.Node<'int'>));
         atomicMax(acc.element(S_ABS), key);
       });
     })().compute(NCOL);
@@ -81,7 +83,9 @@ export class OceanLevel {
       const w = water.element(c).toVar();
       const s = surfY.element(c).toVar();
       If(isOcean(s, w), () => {
-        const want = mean.sub(s.add(w)).mul(LEVEL_RATE);
+        // + an even share of the pool (whole 2^-10 units; the remainder waits for the next tick)
+        const share = float(atomicLoad(acc.element(OCEAN_POOL)).div(n)).div(1024);
+        const want = mean.sub(s.add(w)).mul(LEVEL_RATE).add(share);
         // whole quanta, never below zero water
         const dq = iMax(iMin(iMax(int(want.div(Q).round()), int(-MAXQ)), int(MAXQ)), int(w.div(Q).floor()).negate()).toVar();
         water.element(c).assign(w.add(float(dq).mul(Q)));
@@ -96,10 +100,15 @@ export class OceanLevel {
       const n = atomicLoad(acc.element(S_N));
       If(n.greaterThan(int(0)), () => {
         const col = uint(atomicLoad(acc.element(S_ABS)).bitAnd(int(0xffff)));
-        const r = float(atomicLoad(acc.element(S_DQ))).mul(4096).add(float(atomicLoad(acc.element(S_DQLO))));
+        // Σdq should equal what the pool paid out (n·⌊pool/n⌋ units × 128 quanta); the rest is rounding residual
+        const paid = float(atomicLoad(acc.element(OCEAN_POOL)).div(n).mul(n)).mul(128);
+        const r = float(atomicLoad(acc.element(S_DQ))).mul(4096).add(float(atomicLoad(acc.element(S_DQLO)))).sub(paid);
         water.element(col).assign(water.element(col).sub(r.mul(Q)).max(0));
         const mean = meanOf(n);
         atomicStore(acc.element(S_PREV), int(mean.sub(OFFSET).mul(FIX).round()));
+        // pool paid out n·share units (added to the columns via dq); keep the remainder
+        const pool = atomicLoad(acc.element(OCEAN_POOL));
+        atomicStore(acc.element(OCEAN_POOL), pool.sub(pool.div(n).mul(n)));
       });
     })().compute(1);
   }
