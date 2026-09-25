@@ -110,7 +110,7 @@ export class Sim {
     this.handlers.set('iceAge', (e) => this.iceAges.push({ start: e.my, durationMy: e.durationMy ?? 20, magnitude: e.magnitude }));
     // god tools + random meteors share handlers (V16); voxel edits need a derive afterwards
     this.handlers.set('uplift', (e) => { this.god.uplift(renderer, e.x, e.z, e.radius ?? 10, e.magnitude); this.derive.run(renderer); });
-    this.handlers.set('meteor', (e) => { this.god.meteor(renderer, e.x, e.z, e.radius ?? 4 + 8 * e.magnitude, 1); this.derive.run(renderer); });
+    this.handlers.set('meteor', (e) => { this.god.meteor(renderer, e.x, e.z, e.radius ?? 4 + 8 * e.magnitude, 1, e.dir); this.derive.run(renderer); });
     this.handlers.set('storm', (e) => { this.god.rainStorm(renderer, e.x, e.z, e.radius ?? 20, e.magnitude); });
     this.handlers.set('split', (e) => { this.godSplit = e.magnitude; });
     // volcanism events: lava drawn from the reservoir (V16); new plumes fixed in the mantle frame

@@ -15,6 +15,7 @@ const wrapD = (a: THREE.Node<'float'>, n: number) => a.add(n / 2).mod(n).sub(n /
 
 export class GodTools {
   private cx = uniform(0); private cz = uniform(0); private radius = uniform(8); private strength = uniform(1);
+  private dirX = uniform(1); private dirZ = uniform(0); private obliq = uniform(0); // meteor travel unit dir + obliquity (0 = vertical)
   private brush: [THREE.ComputeNode, THREE.ComputeNode];
   private crater: [THREE.ComputeNode, THREE.ComputeNode];
   private storm: THREE.ComputeNode;
@@ -83,9 +84,15 @@ export class GodTools {
       const c = instanceIndex;
       If(c.greaterThanEqual(uint(NCOL)), () => { Return(); });
       const { x, z } = tColXZ(c);
-      const dx = wrapD(float(x).sub(this.cx), NX), dz = wrapD(float(z).sub(this.cz), NZ);
-      const d = sqrt(dx.mul(dx).add(dz.mul(dz))).div(this.radius);
-      If(d.greaterThan(1.6), () => { Return(); });
+      const dx0 = wrapD(float(x).sub(this.cx), NX), dz0 = wrapD(float(z).sub(this.cz), NZ);
+      // oblique impact: bowl stretched ~20% along the path and shifted downrange; ejecta heavier downrange
+      const along = dx0.mul(this.dirX).add(dz0.mul(this.dirZ));
+      const across = dx0.mul(this.dirZ.negate()).add(dz0.mul(this.dirX));
+      const obl = this.obliq;
+      const al = along.sub(this.radius.mul(0.15).mul(obl)).div(float(1).add(obl.mul(0.2)));
+      const d = sqrt(al.mul(al).add(across.mul(across))).div(this.radius);
+      const downrange = along.div(max(sqrt(dx0.mul(dx0).add(dz0.mul(dz0))), 1e-3)); // cos of angle to travel dir
+      If(d.greaterThan(1.8), () => { Return(); });
       const top = int(colInfo.element(c).x.shiftRight(uint(8)).bitAnd(uint(0xff))).toVar();
       const base = int(colInfo.element(c).x.bitAnd(uint(0xff)));
       If(d.lessThan(1), () => {
@@ -105,7 +112,8 @@ export class GodTools {
         atomicAdd(ctr.element(CTR_RESERVOIR), removed);
       }).Else(() => {
         // ejecta rim: up to 3 layers of loose sediment, drawn from the reservoir
-        const rim = float(1).sub(d.sub(1).div(0.6)).clamp(0, 1);
+        const rim = float(1).sub(d.sub(1).div(float(0.6).add(downrange.max(0).mul(obl).mul(0.25)))).clamp(0, 1)
+          .mul(float(1).add(downrange.mul(obl).mul(0.7))).max(0);
         const add = uMin(uint(rim.mul(this.strength).mul(3).round()), uint(NY - 2).sub(uMin(uint(top), uint(NY - 2)))).toVar();
         // fill the partial top voxel first so only the top stays partial
         const tv = vox.element(tVoxIdx(x, top, z)).toVar();
@@ -144,8 +152,10 @@ export class GodTools {
     this.set(x, z, radius, layers);
     r.compute(this.brush[this.fields.parity('vox') as 0 | 1]);
   }
-  meteor(r: THREE.WebGPURenderer, x: number, z: number, radius: number, strength = 1): void {
+  /** dir: travel azimuth (rad) for an oblique impact; undefined = vertical. */
+  meteor(r: THREE.WebGPURenderer, x: number, z: number, radius: number, strength = 1, dir?: number): void {
     this.set(x, z, radius, strength);
+    this.dirX.value = Math.cos(dir ?? 0); this.dirZ.value = Math.sin(dir ?? 0); this.obliq.value = dir === undefined ? 0 : 1;
     r.compute(this.crater[this.fields.parity('vox') as 0 | 1]);
   }
   rainStorm(r: THREE.WebGPURenderer, x: number, z: number, radius: number, strength = 0.8): void {

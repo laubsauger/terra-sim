@@ -12,6 +12,7 @@ export interface GeoEvent {
   x: number; z: number; // column
   magnitude: number;   // 0.5..1.5 random; god tools: layers (uplift ±), radius scale (meteor), strength (storm)
   radius?: number;     // cells, god tools
+  dir?: number;        // meteors: travel azimuth (rad) of an oblique impact; ejecta thrown downrange
   durationMy?: number; // ice ages
   source: 'random' | 'god';
 }
@@ -48,6 +49,7 @@ export class EventScheduler {
           x: this.rng.int(NX), z: this.rng.int(NZ),
           magnitude: 0.5 + this.rng.nextFloat(),
           durationMy: kind === 'iceAge' ? 10 + this.rng.nextFloat() * 25 : undefined,
+          dir: kind === 'meteor' ? this.rng.nextFloat() * Math.PI * 2 : undefined,
         });
       }
     }

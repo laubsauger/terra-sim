@@ -78,3 +78,30 @@ test('god tools apply immediately in the live app while paused', async ({ page }
   expect(res.ticked).toBe(true);
   expect(res.d).toBeGreaterThan(8);
 });
+
+// An oblique impact must read as directional: more ejecta downrange than uprange, mass still exact.
+test('oblique meteor throws ejecta downrange', async ({ page }) => {
+  await page.goto('/tests/gpu/support/blank.html');
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const L = await import('/src/sim/layout.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { createDerivePass } = await import('/src/sim/derive.ts');
+    const { GodTools } = await import('/src/sim/godTools.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const w = twoPlateWorld([0, 0], [0, 0]); w.mantleReservoir = 50_000_000; uploadWorld(f, w);
+    const derive = createDerivePass(f); derive.run(r);
+    const s0 = new Float32Array(await f.read(r, 'surfY'));
+    new GodTools(f).meteor(r, 200, 128, 10, 1, 0); // travelling +x
+    derive.run(r);
+    const s1 = new Float32Array(await f.read(r, 'surfY'));
+    const d = (x: number) => s1[L.colIdx(x, 128)]! - s0[L.colIdx(x, 128)]!;
+    let down = 0, up = 0; for (let k = 10; k <= 16; k++) { down += d(200 + k); up += d(200 - k); }
+    return { down, up, centre: d(201) };
+  });
+  expect(res.centre).toBeLessThan(-2);
+  expect(res.down).toBeGreaterThan(res.up * 1.5);
+});
