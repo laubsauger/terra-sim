@@ -23,7 +23,7 @@ export class GpuFields {
   private fields = new Map<string, Field>();
   private frozen = false;
 
-  add(name: string, type: FieldType, count: number, opts: { pingPong?: boolean } = {}): void {
+  add(name: string, type: FieldType, count: number, opts: { pingPong?: boolean; atomic?: boolean } = {}): void {
     if (this.frozen) throw new Error(`GpuFields: add('${name}') after freeze — GPU memory must be fixed after init (V10)`);
     if (this.fields.has(name)) throw new Error(`GpuFields: duplicate field '${name}'`);
     const n = opts.pingPong ? 2 : 1;
@@ -31,6 +31,10 @@ export class GpuFields {
     for (let i = 0; i < n; i++) {
       const b = makeArray(count, type);
       b.setName(n === 1 ? name : `${name}_${i}`);
+      if (opts.atomic) {
+        if (type !== 'int' && type !== 'uint') throw new Error(`GpuFields: atomic field '${name}' must be int|uint (V2: no float atomics)`);
+        b.toAtomic();
+      }
       bufs.push(b);
     }
     this.fields.set(name, { name, type, count, bufs, parity: 0 });
@@ -81,7 +85,15 @@ export class GpuFields {
   /** Async readback of the current buffer (debug, probe, stats, save). */
   async read(renderer: THREE.WebGPURenderer, name: string, offsetBytes = 0, countBytes = -1): Promise<ArrayBuffer> {
     const f = this.field(name);
-    return renderer.getArrayBufferAsync(f.bufs[f.parity]!.value, null, offsetBytes, countBytes) as Promise<ArrayBuffer>;
+    const attr = f.bufs[f.parity]!.value;
+    // three allocates GPU buffers lazily on first binding; an unbound field's CPU array is still the truth.
+    const backend = renderer.backend as unknown as { get(o: object): { buffer?: GPUBuffer } };
+    if (!backend.get(attr).buffer) {
+      const src = new Uint8Array((attr.array as ArrayBufferView).buffer);
+      const end = countBytes < 0 ? src.byteLength : offsetBytes + countBytes;
+      return src.slice(offsetBytes, end).buffer;
+    }
+    return renderer.getArrayBufferAsync(attr, null, offsetBytes, countBytes) as Promise<ArrayBuffer>;
   }
 }
 

@@ -1,5 +1,5 @@
 // TSL mirrors of layout.ts helpers. Plain builders (inline into kernels), not Fn() calls.
-import { uint, int } from 'three/tsl';
+import { uint, int, select } from 'three/tsl';
 import type * as THREE from 'three/webgpu';
 import { NX, NZ, NCOL } from './layout';
 
@@ -25,3 +25,9 @@ export const tVoxIdx = (x: I, y: I, z: I) => tColIdx(x, z).add(uint(y).mul(uint(
 
 /** Column coords from a column-sized dispatch index. */
 export const tColXZ = (i: U) => ({ x: int(i.bitAnd(uint(NX - 1))), z: int(i.shiftRight(uint(Math.log2(NX)))) });
+
+// @types/three only types min/max for float vectors; integer versions via select.
+export const uMin = (a: U, b: U) => select(a.lessThan(b), a, b);
+export const uMax = (a: U, b: U) => select(a.greaterThan(b), a, b);
+export const iMin = (a: I, b: I) => select(a.lessThan(b), a, b);
+export const iMax = (a: I, b: I) => select(a.greaterThan(b), a, b);

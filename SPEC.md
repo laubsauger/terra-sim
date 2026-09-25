@@ -89,6 +89,7 @@ V19: heavy passes (plate shift, remesh, mantle) time-sliced; sim ⊥ adds frame 
 V20: params single schema {default, range, unit, persist}. UI, url, save, soak read same schema.
 V21: `mat` id list append-only; saves from older version keep valid materials.
 V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = min(requested, sim budget V9); UI shows both.
+V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
 ## §T TASKS
 id|status|task|cites
@@ -105,10 +106,10 @@ T10|.|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wra
 T11|.|M1 side cut render: faces + bottom sample voxel 3D tex, strata colors|-
 T12|.|M1 inspect probe: raycast + small readback panel|I.probe
 T13|.|M2 plate table + kinematics (slab pull, ridge push, drag)|V12
-T14|.|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|V1,V19
-T15|.|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
-T16|.|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
-T17|.|M2 isostasy column adjust|-
+T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|V1,V19
+T15|x|M2 convergent resolve: subduction, orogeny, trench/arc tagging|V3
+T16|x|M2 divergent fill: new BASALT, ridge uplift, age reset|V3
+T17|x|M2 isostasy column adjust|-
 T18|.|M2 plate lifecycle: split, merge (suture), absorb tiny|V6
 T19|.|M2 crust mass budget: subduction → `mantleReservoir` → ridges|volcanism|V3,V2
 T20|.|M3 mantle field: diffuse/advect, plumes, slab sinks, side render glow|V19
@@ -146,3 +147,4 @@ T51|.|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19
 
 ## §B BUGS
 id|date|cause|fix
+B1|2026-09-25|tectonics decide kernel bound 13 storage buffers > adapter limit 10 ∴ pipeline invalid|V23
