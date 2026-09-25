@@ -13,8 +13,8 @@ export const SNOWY: Box = { x0: 150, x1: 200, z0: 150, z1: 200 };  // saturated,
 export const inBox = (b: Box, x: number, z: number) => x >= b.x0 && x <= b.x1 && z >= b.z0 && z <= b.z1;
 
 export interface Paint {
-  /** Column of a hot lava pool (radius 2 columns), or null. */
-  lava?: { x: number; z: number } | null;
+  /** Column of a hot lava pool (radius 2 columns), or null; `erupt` marks its centre as an active vent. */
+  lava?: { x: number; z: number; erupt?: boolean } | null;
   /** Rows z of a young-crust rift line (crustAge 0.2 My) spanning x0..x1. */
   rift?: { z: number; x0: number; x1: number } | null;
 }
@@ -45,6 +45,11 @@ export function paintWeather(fields: GpuFields, p: Paint = {}): void {
     }
   }
   (fields.cpuArray('lava') as Uint32Array).set(lava);
+  // magma.ts eruption state: x activity, y phase (2 = active)
+  const volc = new Float32Array(NCOL * 4);
+  if (p.lava && p.lava.erupt !== false) { const c = colIdx(p.lava.x, p.lava.z); volc[c * 4] = 1; volc[c * 4 + 1] = 2; volc[c * 4 + 2] = 1; }
+  (fields.cpuArray('volcano') as Float32Array).set(volc);
+  fields.markDirty('volcano');
   for (const w of [0, 1] as const) {
     const age = fields.cpuArray('crustAge', w) as Float32Array;
     age.fill(80);

@@ -3,7 +3,7 @@
 // reflections, so everything reflects the same sky. Time of day comes from ambTime only (V17).
 import * as THREE from 'three/webgpu';
 import {
-  Fn, uniform, vec3, float, dot, max, mix, pow, saturate, smoothstep, hash, floor, normalize, step,
+  Fn, uniform, vec3, float, dot, max, mix, pow, saturate, smoothstep, normalize, step,
 } from 'three/tsl';
 
 type V3 = THREE.Node<'vec3'>;
@@ -124,11 +124,7 @@ export const skyColor = (dir: V3, discs = true): V3 => Fn(() => {
     const moonVis = float(0.35).add(skyU.night.mul(0.65));                        // pale by day, bright at night
     col = col.add(vec3(0.82, 0.86, 1.0).mul(inDisc.mul(mix(0.06, 1.0, lit)).mul(moonVis).mul(2.6)))
       .add(vec3(0.3, 0.4, 0.7).mul(pow(cm, 80).mul(0.3).mul(skyU.night)));
-    // Stars: hashed cells on the direction sphere, twinkle-free (ambient stays calm).
-    const cell = floor(normalize(dir).mul(260));
-    const hsh = hash(cell.x.add(cell.y.mul(157.1)).add(cell.z.mul(311.7)));
-    const star = smoothstep(0.9975, 1.0, hsh).mul(skyU.night).mul(saturate(up.mul(6)));
-    col = col.add(vec3(star.mul(2.2)));
+    // Stars are a crisp screen-space layer after DOF / bloom (post.ts starLayer), not part of the dome.
   }
   // Keep it finite and non-negative for bloom / tone mapping.
   return max(col, vec3(0));

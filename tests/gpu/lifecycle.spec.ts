@@ -71,3 +71,33 @@ test('split relabels exactly the CPU-predicted side; absorb removes a tiny plate
   expect(res.left2).toBe(0);
   expect(res.alive2).toBe(false);
 });
+
+// User: plates fragment into stray specks. Rigid plates should stay contiguous: very few cells may have
+// ≤ 1 neighbour of their own plate after a long full-sim run.
+test('plates stay contiguous (few isolated plate cells) over 150 My', async ({ page }) => {
+  test.setTimeout(240_000);
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { Sim } = await import('/src/sim/sim.ts');
+    const { Params } = await import('/src/core/params.ts');
+    const { generateWorld } = await import('/src/sim/worldgen.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const w = generateWorld(3, { plates: 7 }); uploadWorld(f, w);
+    const sim = new Sim(r, f, w, new Params(), 0.05);
+    const frame = () => new Promise((res) => setTimeout(res, 0));
+    while (sim.geoMy < 150) { sim.runTicks(64); await frame(); }
+    const pid = new Uint32Array(await f.read(r, 'plateId'));
+    let iso = 0;
+    for (let z = 0; z < 256; z++) for (let x = 0; x < 256; x++) {
+      const me = pid[x + z * 256];
+      let own = 0;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) if (pid[((x + dx + 256) % 256) + ((z + dz + 256) % 256) * 256] === me) own++;
+      if (own <= 1) iso++;
+    }
+    return { isoFrac: iso / 65536 };
+  });
+  expect(res.isoFrac).toBeLessThan(0.002);
+});

@@ -27,6 +27,8 @@ const VIEWS: Record<string, [number[], number[], number]> = {
   top: [[0.01, 10.5, 0.01], [0, 0, 0], 30],
   // looking into the golden-hour sun (sun disc + halo over the block, glint trail on the sea)
   sun: [[4.2, 0.55, -2.0], [-1.2, 0.75, 0.6], 34],
+  // close on a spreading ridge (seed 1)
+  ridge: [[-0.2, 0.9, 1.3], [-0.9, 0.1, 0.5], 30],
 };
 
 async function main() {
@@ -81,7 +83,7 @@ async function main() {
     const r = stage.renderer as unknown as { _nodes: { nodeFrame: { update(): void; frameId: number } }; info: { frame: number } };
     const once = () => {
       r._nodes.nodeFrame.update(); r.info.frame = r._nodes.nodeFrame.frameId;
-      look.frame(ambNow()); updateAllRenderColumns(stage.renderer); look.post.render();
+      look.frame(ambNow()); updateAllRenderColumns(stage.renderer, 1 / 60); look.post.render();
     };
     for (let i = 0; i < 10; i++) once();
     await device.queue.onSubmittedWorkDone();

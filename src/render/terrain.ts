@@ -9,19 +9,33 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, vec2, vec3, vec4, float, uniform, varying, positionGeometry, positionWorld, transformNormalToView,
   mix, smoothstep, saturate, normalize, exp, uint, texture, max, min, dot, hash, floor, reflect,
-  color, step, cos, int, clamp, fract, sin,
+  color, step, cos, int, fract, sin, abs, cameraPosition, length,
 } from 'three/tsl';
 import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL, Mat } from '../sim/layout';
 import { tMat } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
-import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler } from './space';
-import { createPaletteNodes, createBiomeNodes, biomeColor, BIOME_SLOTS } from './palette';
+import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, ridgeGlow, volcanoSampler } from './space';
+import { createPaletteNodes, createBiomeNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
 import { skyU } from './sky';
 import { shadowProxy } from './lighting';
+import { cloudShadowAt } from '../atmo/atmosphere';
+import { tMeadowDensity } from '../life/flora';
 
 type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
+
+/**
+ * Stylised blackbody ramp for lava °C (linear HDR): dull red ~650, orange ~900, yellow ~1100,
+ * yellow-white ~1250, rising steeply in intensity so hot cores bloom.
+ */
+export const blackbody = (T: F): V3 => {
+  // deep red only at the cool edge; a saturated incandescent orange body; yellow → yellow-white hottest
+  const t = smoothstep(600, 1250, T);
+  const c = mix(mix(vec3(0.75, 0.1, 0.0), vec3(1.0, 0.42, 0.05), smoothstep(0.0, 0.3, t)),
+    mix(vec3(1.0, 0.7, 0.2), vec3(1.0, 0.92, 0.72), smoothstep(0.85, 1.0, t)), smoothstep(0.55, 0.85, t));
+  return c.mul(mix(float(1.2), float(9.0), t.mul(t))) as V3;
+};
 
 /** 1 where h > threshold (sparse selection helper). */
 const step01 = (h: F, t: number): F => smoothstep(t, t + 0.001, h) as F;
@@ -70,15 +84,19 @@ export interface TerrainOptions {
  * Animated caustic web on a horizontal plane at world xz, projected along the sun.
  * Two scrolled Worley-ridge layers min()'d together; returns 0..~1.
  */
+/** Seabed caustic strength (albedo boost). Tunable at runtime. */
+export const causticGain = uniform(0.4);
+
 export function causticsAt(p: V3, depth: F): F {
   const tex = lookTextures();
   const off = skyU.sunDir.xz.mul(depth.mul(VOXEL_H * 0.6)); // shift with depth along the light
   const q = p.xz.add(off);
   const t = ambTime;
   // scroll speeds are k / AMB_PERIOD multiples (seamless wrap): 0.01 = 36/3600
-  const a = texture(tex.caustics, q.mul(1.5).add(vec2(t.mul(0.01), t.mul(0.0075)))).r;
-  const b = texture(tex.caustics, q.mul(1.8).add(vec2(t.mul(-0.0075), t.mul(0.01)))).g;
-  return min(a, b).mul(1.6) as F;
+  // larger cells + a blurrier mip keep the web soft instead of wiry
+  const a = texture(tex.caustics, q.mul(0.9).add(vec2(t.mul(0.01), t.mul(0.0075)))).level(float(1.5)).r;
+  const b = texture(tex.caustics, q.mul(1.15).add(vec2(t.mul(-0.0075), t.mul(0.01)))).level(float(1.5)).g;
+  return smoothstep(0.05, 0.6, min(a, b)) as F;
 }
 
 export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { object: THREE.Mesh; dispose(): void } {
@@ -123,37 +141,26 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   const cold = float(0.5).sub(cos(tWorldToCell(p.z).mul(Math.PI * 2 / NZ)).mul(0.5));
   const snowLineEff = snowLine.sub(cold.mul(12)).toVar('snowLineEff');
 
-  // Biome blend from the sim 'biome'/'veg' fields (render columns .w = id + veg), bilinear across the
-  // four corner columns so biome borders are soft. bioCover = (ground covered by its vegetation) rgb,
-  // w = veg; bioFlags = (arid, forest, snow) of the blend, w = 1 when biome data exists.
-  const bioCover = Fn(() => {
+  // Biome display colours (eased in time, advected with the plates; colours blend, ids never do).
+  // bioCover = (ground covered by its vegetation) rgb, w = veg; bioFlags = (arid, forest, -, has biome data).
+  const bioS = biomeSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
+  const vegAmt = Fn(() => {
     const c = S.corners(tWorldToCell(p.x), tWorldToCell(p.z));
-    let col = vec3(0) as V3;
-    let veg = float(0) as F;
-    for (const k of c) {
-      const id = int(clamp(floor(k.bio), 0, BIOME_SLOTS - 1));
-      const v = fract(max(k.bio, 0));
-      // patchy cover: veg thins out in noise-shaped holes instead of a uniform fade
-      const cover = smoothstep(0.0, 0.35, v.add(nMid.mul(0.25)).sub(0.1));
-      col = col.add(mix(bio.ground(id), bio.veg(id), cover).mul(k.w));
-      veg = veg.add(v.mul(k.w));
-    }
-    return vec4(col, veg);
-  }).once()().toVar('terrBioCover');
-  const bioFlags = Fn(() => {
-    const c = S.corners(tWorldToCell(p.x), tWorldToCell(p.z));
-    let f = vec3(0) as V3;
-    let has = float(0) as F;
-    for (const k of c) {
-      f = f.add(bio.flags(int(clamp(floor(k.bio), 0, BIOME_SLOTS - 1))).mul(k.w));
-      has = has.add(step(0, k.bio).mul(k.w));
-    }
-    return vec4(f, has);
-  }).once()().toVar('terrBioFlags');
+    return c.slice(1).reduce((a, k) => a.add(k.veg.mul(k.w)), c[0]!.veg.mul(c[0]!.w) as F);
+  }).once()().toVar('terrVeg');
+  const hasVeg = step(0, vegAmt);
+  // patchy cover: veg thins out in noise-shaped holes instead of a uniform fade
+  const coverT = smoothstep(0.0, 0.35, max(vegAmt, 0).add(nMid.mul(0.25)).sub(0.1));
+  const bioCover = vec4(mix(bioS.ground.rgb, bioS.veg.rgb, coverT), max(vegAmt, 0)).toVar('terrBioCover');
+  const bioFlags = vec4(bioS.ground.w, bioS.veg.w, 0, hasVeg).toVar('terrBioFlags');
   const arid = bioFlags.x.mul(bioFlags.w), hasBio = bioFlags.w;
 
+  // Volcano display: x vent activity, y lava channel memory (both eased, advected).
+  const volcS = volcanoSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z)).toVar('terrVolc');
   // Heat summary (renderHeat): x crust age My, y lava layers, z lava °C, w sim 'ice' cover.
   const heat = heatSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z)).toVar('terrHeat');
+  const lavaMask = smoothstep(0.02, 0.35, heat.y).toVar('terrLava');
+  const slopeAt = float(1).sub(nVary.xyz.normalize().y);
 
   // Surface class masks, shared by colour, roughness, normal and emissive:
   // x rock, y snow, z forest, w underwater depth (voxel units) or -1 on land.
@@ -164,19 +171,20 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const rockAmt = smoothstep(mix(0.2, 0.1, arid), mix(0.36, 0.24, arid), slope.add(nHi.mul(0.03)).add(nLo.mul(0.05)));
     // Snow from the sim: 'ice' cover, biome ICE/ALPINE, plus a dusting on steep high peaks. The
     // altitude-only snow line is the fallback when there is no climate data.
-    const simSnow = smoothstep(0.02, 0.3, heat.w.add(nHi.mul(0.02)));
+    const simSnow = smoothstep(0.1, 0.6, heat.w.add(nHi.mul(0.08)).add(nMid.mul(0.1)));
     const peak = smoothstep(snowLineEff.add(2), snowLineEff.add(8), alt.add(nLo.mul(3))).mul(smoothstep(0.12, 0.3, slope));
     const altSnow = smoothstep(snowLineEff.sub(3), snowLineEff.add(2), alt.add(nLo.mul(4)).add(nHi.mul(1.2)));
-    const bioSnow = bioFlags.z.mul(smoothstep(-0.3, 0.3, nMid.add(0.2)));
-    const snowAmt = mix(altSnow.mul(float(1).sub(arid.mul(0.7))), max(max(simSnow, peak.mul(0.8)), bioSnow), hasBio)
+    const snowAmt = mix(altSnow.mul(float(1).sub(arid.mul(0.7))), max(simSnow, peak.mul(0.8)), hasBio)
       .mul(float(1).sub(smoothstep(0.45, 0.72, slope.add(nHi.mul(0.05)))));
     const clumps = smoothstep(0.08, 0.28, nMid.mul(0.6).add(nLo.mul(0.55)));
     const procForest = clumps.mul(float(1).sub(saturate(alt.sub(4).div(14)))).mul(smoothstep(1.2, 3.0, alt));
     const bioForest = bioFlags.y.mul(smoothstep(0.3, 0.7, bioCover.w)).mul(smoothstep(-0.2, 0.3, nMid.mul(0.7).add(nLo.mul(0.4)).add(0.2)));
     const forestAmt = mix(procForest, bioForest, hasBio).mul(float(1).sub(rockAmt));
     const wl = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z)));
-    const depth = wl.level.sub(h);
-    const under = wl.wet.greaterThan(0.001).and(depth.greaterThan(0.0));
+    // Underwater only where the corners are (nearly) all wet: near the coast the smoothed land can
+    // dip under the neighbours' water level without a real water sheet over it.
+    const depth = wl.level.sub(h).mul(smoothstep(0.5, 0.95, wl.wet));
+    const under = wl.wet.greaterThan(0.5).and(depth.greaterThan(0.0));
     return vec4(rockAmt, snowAmt, forestAmt, mix(float(-1), depth, float(under)));
   }).once()().toVar('terrMask');
   const rockAmt = masks.x, snowAmt = masks.y, forestAmt = masks.z, uwDepth = masks.w;
@@ -190,8 +198,6 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     let top = vec3(0) as V3;
     let bedTint = vec3(0) as V3;
     let rockR = float(0) as F;
-    // highest corner column (branch-free argmax): arid cliffs read its layers at this height
-    let bx = float(c[0]!.x) as F, bz = float(c[0]!.z) as F, bh = c[0]!.raw;
     for (const k of c) {
       const ty = tTopVoxel(k.raw);
       const m = tMat(vox(k.x, ty, k.z));
@@ -200,8 +206,6 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
       top = top.add(pal.color(m).mul(k.w));
       bedTint = bedTint.add(pal.color(bed).mul(k.w));
       rockR = rockR.add(pal.rough(bed).mul(k.w));
-      const hi = step(bh, k.raw);
-      bx = mix(bx, float(k.x), hi); bz = mix(bz, float(k.z), hi); bh = max(bh, k.raw);
     }
     const n = nVary.xyz.normalize();
     const slope = float(1).sub(n.y);
@@ -213,8 +217,11 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const alpine = mix(vec3(0.33, 0.4, 0.13), vec3(0.42, 0.38, 0.2), saturate(nMid.mul(0.5).add(0.5)));
     let proc = mix(lush, dry, saturate(alt.div(26).add(nLo.mul(0.3)).sub(0.15))) as V3;
     proc = mix(proc, alpine, smoothstep(snowLineEff.mul(0.4), snowLineEff.mul(0.85), alt.add(nLo.mul(3))));
-    // Biome ground cover with a little tonal variation so fields of one biome stay alive.
-    const cover = bioCover.rgb.mul(nMid.mul(0.07).add(1)).mul(nLo.mul(0.06).add(1));
+    // Biome ground cover with a little tonal variation so fields of one biome stay alive, and the
+    // life module's meadow patch field: greener/darker under dense drifts, straw on bare patches.
+    const meadow = smoothstep(0.15, 2.5, tMeadowDensity(p.x, p.z)).mul(max(vegAmt, 0));
+    const meadowTint = mix(vec3(1.12, 1.06, 0.82), vec3(0.78, 0.95, 0.72), meadow);
+    const cover = bioCover.rgb.mul(nMid.mul(0.07).add(1)).mul(nLo.mul(0.06).add(1)).mul(mix(vec3(1), meadowTint, float(1).sub(forestAmt)));
     const ground = mix(proc, cover, hasBio);
     const canopy = dFine.a; // clumps of trees
     const forestCol = mix(vec3(0.035, 0.12, 0.045), vec3(0.11, 0.26, 0.07), canopy);
@@ -224,11 +231,15 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const rockCol = mix(rockBase, bedTint.mul(0.8), 0.18).mul(nHi.mul(0.1).add(1)).mul(mix(0.75, 1.1, dFine.a));
     // Arid cliffs: the real near-surface layers at this height (SANDSTONE/SHALE/LIMESTONE → red,
     // ochre, cream bands), each layer with a lit top ledge and a shadowed lip.
+    // Layer colour blended over the four corner columns at this height (no brick seams between cells).
     const vyF = tVoxelY(p.y).sub(0.3);
-    const cy = int(min(floor(vyF), float(tTopVoxel(bh))));
-    const layer = tMat(vox(int(bx), cy, int(bz)));
-    const ledge = mix(0.68, 1.12, smoothstep(0.08, 0.3, fract(vyF))).mul(mix(1.0, 0.8, smoothstep(0.85, 1.0, fract(vyF))));
-    const canyon = bio.strata(layer).mul(ledge).mul(dFine.b.sub(0.5).mul(0.14).add(1));
+    let strataCol = vec3(0) as V3;
+    for (const k of c) {
+      const cy = int(min(floor(vyF), float(tTopVoxel(k.raw))));
+      strataCol = strataCol.add(bio.strata(tMat(vox(k.x, cy, k.z))).mul(k.w));
+    }
+    const ledge = mix(0.74, 1.08, smoothstep(0.05, 0.35, fract(vyF))).mul(mix(1.0, 0.86, smoothstep(0.85, 1.0, fract(vyF))));
+    const canyon = strataCol.mul(ledge).mul(dFine.b.sub(0.5).mul(0.14).add(1));
     const cliff = mix(rockCol, canyon, arid);
     const scree = mix(mix(vec3(0.42, 0.37, 0.31), vec3(0.55, 0.5, 0.43), dFine.b), canyon.mul(1.15), arid.mul(0.6));
     const screeAmt = smoothstep(0.08, 0.2, slope).mul(float(1).sub(rockAmt)).mul(smoothstep(0.5, 4, cavity))
@@ -253,7 +264,11 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
 
     // Seabed: the water shader does absorption, so the bed keeps its own colour; bright sand in the
     // shallows (luminous turquoise lagoons), darker sediment deeper.
-    const seabed = mix(mix(top, vec3(0.3, 0.26, 0.2), 0.5), color(biomeColor('sand')).mul(1.1), smoothstep(7, 0.5, uwDepth))
+    // Fresh ridge basalt is near-black blue; sediment settles with crust age (bright sand only on
+    // old, shallow shelves), so a raised young crest is dark, not a pale stripe.
+    const sedAge = smoothstep(0.5, 8.0, heat.x);
+    const bedOld = mix(mix(top, vec3(0.3, 0.26, 0.2), 0.5), color(biomeColor('sand')).mul(1.1), smoothstep(7, 0.5, uwDepth));
+    const seabed = mix(vec3(0.05, 0.06, 0.08), bedOld, sedAge)
       .mul(nHi.mul(0.08).add(1)).mul(nLo.mul(0.06).add(1));
 
     // Soft fake AO from curvature (SSGI/GTAO add real AO on top in high quality).
@@ -284,7 +299,10 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   // Seabed caustics: albedo boost so the sun shadow still gates them; fade in from the shoreline and out with depth.
   const caus = Fn(() => {
     const d = max(uwDepth, 0);
-    const k = step(0, uwDepth).mul(smoothstep(0.0, 0.8, d)).mul(exp(d.mul(-0.09)));
+    // subtle, soft and shallow-only: fade in off the shoreline, gone by ~10 layers depth
+    const k = step(0, uwDepth).mul(smoothstep(0.4, 1.8, d)).mul(exp(d.mul(-0.22)))
+      // distance-aware: the web is a close-up detail; from the hero distance it would tile into noise
+      .mul(float(1).div(positionWorld.sub(cameraPosition).length().mul(0.35).add(1)).mul(2.2).min(1));
     return causticsAt(p, d).mul(k).mul(saturate(skyU.sunDir.y.mul(5)));
   })();
 
@@ -302,31 +320,63 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   // z lava °C. Young crust (< ~1 My) glows along the seam through flickering fissures; underwater the
   // water refraction/absorption dims and tints it. Lava: blackbody glow broken by cooling crust.
   const glow = Fn(() => {
-    const age = heat.x;
-    // irregular width: the age falloff rate wanders along the seam; a soft continuous crack core
-    const width = mix(1.6, 3.6, dMid.r);
-    const ridge = exp(age.mul(width).negate()).mul(float(1).sub(smoothstep(1.0, 1.6, age)));
     const crack = texture(tex.detail, p.xz.mul(1.7).add(vec2(0, ambTime.mul(0.0025)))).a;
-    const fissure = smoothstep(0.2, 0.75, crack).mul(0.6).add(0.4);
-    const flicker = sin(ambTime.mul(1.7).add(dMid.r.mul(12))).mul(0.12).add(0.88);
-    const subaerial = float(1).sub(step(0, uwDepth));
+    const rg = ridgeGlow(heat.x, p.xz, dMid.r, crack);
+    // Subaerial (rift) glow only on truly dry ground: the bilinear age also sees young seafloor
+    // next to a coast, which must not light the beach.
+    const wet = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z))).wet;
+    const subaerial = float(1).sub(step(0, uwDepth)).mul(float(1).sub(smoothstep(0.0, 0.15, wet)));
+    const submerged = step(0, uwDepth);
     // Underwater the water's Beer-Lambert absorption (refraction pass) dims and tints it, so the
     // seabed source is hotter than the subaerial one.
-    const ridgeGlow = vec3(1.0, 0.34, 0.07).mul(ridge.mul(fissure).mul(flicker).mul(mix(9.0, 4.0, subaerial)));
-    const lavaAmt = smoothstep(0.02, 0.4, heat.y);
-    const hot = smoothstep(650, 1150, heat.z);
-    const cooled = smoothstep(0.35, 0.7, dFine.a.add(float(1).sub(hot).mul(0.4)));
-    const lavaGlow = mix(vec3(1, 0.12, 0.02), vec3(1, 0.55, 0.14), hot).mul(hot.mul(lavaAmt).mul(float(1).sub(cooled.mul(0.85))).mul(4.5));
-    return ridgeGlow.add(lavaGlow);
+    // Underwater the colour comes from the water's halo (unabsorbed, water.ts); a bright seabed source
+    // would reach the eye green-white after red absorption, so it stays a faint core here.
+    // deep red-orange core → dim ember halo; only subaerial here (the sea gets it from water.ts)
+    const ridgeCol = vec3(1.0, 0.4, 0.06).mul(rg.x.mul(4.0)).add(vec3(0.8, 0.16, 0.02).mul(rg.y));
+    // Subaerial rifts only: the underwater version never read convincingly (coordinator: ship it off).
+    const ridgeGlowC = ridgeCol.mul(subaerial).add(ridgeCol.mul(submerged).mul(0));
+    // Lava as molten rock (display-eased depth / temperature / channel memory): black crust plates
+    // drifting downhill (two-phase flow map along the slope), glowing cracks between them, an
+    // incandescent open core where the flow is thick, hot and in a live channel, blackbody colour
+    // by temperature, a faint heat shimmer. Never a smooth glaze.
+    const T = heat.z;
+    const lavaAmt = lavaMask;
+    const coreness = smoothstep(0.25, 1.0, heat.y).mul(smoothstep(900, 1200, T)).mul(volcS.y.mul(0.6).add(0.4));
+    const nrm = nVary.xyz.normalize();
+    const flow = nrm.xz.div(max(length(nrm.xz), 1e-3)).mul(smoothstep(0.0, 0.08, length(nrm.xz)));
+    const ph0 = fract(ambTime.mul(0.15)), ph1 = fract(ambTime.mul(0.15).add(0.5)); // 540 periods / AMB_PERIOD
+    const uvL = p.xz.mul(6.0);
+    const plA = texture(tex.detail, uvL.sub(flow.mul(ph0.mul(0.35)))).a;
+    const plB = texture(tex.detail, uvL.sub(flow.mul(ph1.mul(0.35))).add(0.37)).a;
+    const plates = mix(plA, plB, abs(ph0.mul(2).sub(1)));
+    const shimmer = texture(tex.detail, p.xz.mul(14).add(vec2(ambTime.mul(0.02), 0))).b.sub(0.5).mul(0.06);
+    const crust = smoothstep(0.42, 0.6, plates.add(shimmer).add(float(1).sub(coreness).mul(0.55)));
+    const cracks = float(1).sub(smoothstep(0.012, 0.07, abs(plates.sub(0.5))));
+    const pulseL = sin(ambTime.mul(1.1).add(dMid.r.mul(9))).mul(0.08).add(0.92);
+    const open = float(1).sub(crust).add(crust.mul(cracks).mul(0.45));
+    const lavaGlow = blackbody(T).mul(open.mul(lavaAmt).mul(pulseL).mul(smoothstep(550, 800, T)));
+    // Summit crater: glowing lava lake in the concave top while the vent is active, pulsing rim embers.
+    const act = volcS.x;
+    // vent columns are single cells: the bilinear activity already gives a small round crater spot;
+    // concave tops (carved craters) glow a little wider
+    const lake = smoothstep(0.25, 0.7, act).mul(smoothstep(-2.0, 1.5, nVary.w).mul(0.6).add(0.4));
+    const rimPulse = sin(ambTime.mul(2.2)).mul(0.3).add(0.7);
+    // an orange-yellow lake (not white-hot: it is a small spot and would clip)
+    const craterGlow = blackbody(float(1020)).mul(lake.mul(open.mul(0.6).add(0.4)).mul(0.7))
+      .add(blackbody(float(850)).mul(act.mul(float(1).sub(lake)).mul(rimPulse).mul(smoothstep(0.05, 0.25, slopeAt)).mul(0.25)));
+    return ridgeGlowC.add(lavaGlow).add(craterGlow);
   })();
-  const lavaCrust = smoothstep(0.02, 0.4, heat.y).mul(0.9);
+  // Crust albedo: black basalt under lava; old channels stay dark basalt ribbons after the flow stops.
+  const lavaCrust = max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75));
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   mat.positionNode = positionNode;
   mat.normalNode = transformNormalToView(bumpN);
-  mat.colorNode = mix(out0.rgb.mul(caus.mul(1.6).add(1)), vec3(0.035, 0.03, 0.03), lavaCrust);
-  mat.roughnessNode = out0.a;
+  mat.colorNode = mix(out0.rgb.mul(caus.mul(causticGain).add(1)), vec3(0.035, 0.03, 0.03), lavaCrust);
+  mat.roughnessNode = mix(out0.a, float(0.88), lavaMask);
   mat.emissiveNode = skyU.sunColor.mul(glint).add(glow);
+  // cloud shadows from the atmosphere module (1 until it runs)
+  mat.receivedShadowNode = Fn(([s]: [F]) => s.mul(cloudShadowAt(positionWorld))) as unknown as () => THREE.Node;
 
   const mesh = new THREE.Mesh(createColumnGrid(), mat);
   mesh.name = 'terrain';

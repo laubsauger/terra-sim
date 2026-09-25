@@ -34,7 +34,7 @@ export type LifecycleOp =
   | { kind: 'absorb'; plate: number }
   | { kind: 'kill'; plate: number };
 
-const OP_NONE = 0, OP_SPLIT = 1, OP_REMAP = 2, OP_ABSORB = 3;
+const OP_NONE = 0, OP_SPLIT = 1, OP_REMAP = 2, OP_ABSORB = 3, OP_CLEAN = 4;
 
 export class Lifecycle {
   private statsKernels: [THREE.ComputeNode, THREE.ComputeNode];
@@ -108,6 +108,17 @@ export class Lifecycle {
         const wob = sin(along.mul(0.09)).mul(7).add(sin(along.mul(0.23).add(1.7)).mul(3));
         const side = dx.mul(splitN.x).add(dz.mul(splitN.y)).add(wob);
         out.assign(select(side.greaterThan(0), uint(opInto), id));
+      }).ElseIf(opKind.equal(OP_CLEAN), () => {
+        // rigid plates don't fragment: a cell with ≥3 of its 4 neighbours on one other plate joins it
+        const n0 = pidCur.element(tColIdx(x.add(1), z)).toVar(), n1 = pidCur.element(tColIdx(x.sub(1), z)).toVar();
+        const n2 = pidCur.element(tColIdx(x, z.add(1))).toVar(), n3 = pidCur.element(tColIdx(x, z.sub(1))).toVar();
+        const cnt = (v: THREE.Node<'uint'>) => uint(n0.equal(v)).add(uint(n1.equal(v))).add(uint(n2.equal(v))).add(uint(n3.equal(v)));
+        const own = cnt(id);
+        If(own.lessThanEqual(uint(1)), () => {
+          If(cnt(n0).greaterThanEqual(uint(3)), () => { out.assign(n0); })
+            .ElseIf(cnt(n1).greaterThanEqual(uint(3)), () => { out.assign(n1); })
+            .ElseIf(cnt(n2).greaterThanEqual(uint(3)), () => { out.assign(n2); });
+        });
       }).ElseIf(opKind.equal(OP_ABSORB).and(id.equal(uint(opPlate))), () => {
         // take the first neighbouring plate (fixed order → deterministic); interior cells wait for later windows
         const found = uint(0).toVar();
@@ -121,6 +132,16 @@ export class Lifecycle {
       pidNext.element(c).assign(out);
       ageNext.element(c).assign(ageCur.element(c));
     })().compute(NCOL);
+  }
+
+  /** Majority-clean plate ids (deterministic, ping-pong); run after tectonics runs. */
+  clean(renderer: THREE.WebGPURenderer): void {
+    this.opKind.value = OP_CLEAN;
+    const f = this.fields;
+    renderer.compute(this.relabel[f.parity('plateId') as 0 | 1]);
+    f.swap('plateId');
+    f.swap('crustAge');
+    this.opKind.value = OP_NONE;
   }
 
   /** Accumulate this window's lifecycle stats into counters (call before the window readback). */

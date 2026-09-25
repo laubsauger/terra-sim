@@ -12,9 +12,9 @@ import type { GeoEvent } from '../sim/events';
 import { CELL, BLOCK_SIZE, Y_SEA_NOMINAL } from '../sim/layout';
 import { cellToWorld, voxelToWorldY, vertEx } from '../render/space';
 import { skyU } from '../render/sky';
-import { ATMO, AMB_PERIOD, BURST } from './atmoModel';
+import { ATMO, AMB_PERIOD, BURST, VENT_PHASE, VENT_SHALLOW, windProfile, decodeVent } from './atmoModel';
 import { createClouds, cloudShadowU, type Clouds } from './clouds';
-import { atmoSeaLevel } from './atmoTsl';
+import { atmoSeaLevel, atmoCut } from './atmoTsl';
 import { createPlumes, type Plumes } from './plumes';
 import { createRain, type Rain } from './rain';
 
@@ -43,10 +43,14 @@ export interface Atmosphere {
   /** dt: real seconds since the last frame; ambTime: ambience clock (s). */
   update(dt: number, ambTime: number, simState?: AtmoSimState): void;
   setHighQuality(v: boolean): void;
+  /** Slice inspection: hide everything beyond x > cutX or z > cutZ (world units; HALF = no cut). Call per frame. */
+  setCut(x: number, z: number): void;
+  /** Cloud opacity multiplier: 0 hidden … 1 normal (overlays dim clouds while active). Cloud shadows follow. */
+  setCloudFade(v: number): void;
   /** Fire an event's FX directly (tests, god tools preview). */
   trigger(e: Pick<GeoEvent, 'kind' | 'x' | 'z' | 'magnitude'> & { radius?: number }): void;
   /** Debug counters. */
-  readonly stats: { flashes: number; bursts: number; lightning: number };
+  readonly stats: { flashes: number; bursts: number; lightning: number; volcanicLightning: number; pdc: number };
   dispose(): void;
 }
 
@@ -83,20 +87,22 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
   bolt.name = 'lightning';
   bolt.frustumCulled = false;
   bolt.visible = false;
-  bolt.renderOrder = 4;
+  bolt.renderOrder = 8; // additive, after the cloud composite: glows through the cloud it strikes from
   const flashLight = new THREE.PointLight(0xcfd8ff, 0, 3.5, 2);
   flashLight.name = 'atmoFlash';
   object.add(bolt, flashLight);
   scene.add(object);
 
   // ---- state ----
-  const stats = { flashes: 0, bursts: 0, lightning: 0 };
+  const stats = { flashes: 0, bursts: 0, lightning: 0, volcanicLightning: 0, pdc: 0 };
   let fxTime = 0;
   let first = true;
   let seaLevel = Y_SEA_NOMINAL;
   const seen = new WeakSet<GeoEvent>();
   let impact: { t0: number; pos: THREE.Vector3; mag: number } | null = null;
-  let strike: { t0: number; dur: number; idx: number; mid: THREE.Vector3 } | null = null;
+  let strike: { t0: number; dur: number; idx: number; mid: THREE.Vector3; volcanic: boolean } | null = null;
+  // lava vents (small readback, throttled): drive pyroclastic-current episodes and volcanic lightning
+  let vents: { x: number; y: number; z: number; heat: number; wet: boolean; phase: number; depth: number }[] = [];
   // cloudlet readback for lightning (small, throttled)
   let cells: Float32Array | null = null;
   let sinceRead = 0, reading = false;
@@ -108,15 +114,20 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
     const y = groundY();
     const add = (kind: number, dur: number, radius: number, m = mag) => { plumes.addBurst({ x, y, z, kind, t0: fxTime, dur, mag: m, radius }); stats.bursts++; };
     switch (e.kind) {
-      case 'volcano':
+      case 'volcano': {
+        // eruption: ash column, lava fountain, ballistic bombs, a crater flash, then a pyroclastic current
         add(BURST.ASH, 14 + 8 * mag, 0.05);
+        add(BURST.FOUNTAIN, 6 + 4 * mag, 0.02);
+        add(BURST.BOMB, 8 + 4 * mag, 0.02);
+        plumes.addBurst({ x, y, z, kind: BURST.PDC, t0: fxTime + 2.5, dur: 3, mag: 0.7 + 0.4 * mag, radius: 0.03 }); stats.bursts++;
+        impact = { t0: fxTime, pos: new THREE.Vector3(x, y + 0.08, z), mag: 0.35 * mag };
         break;
+      }
       case 'meteor': {
+        // the cinematic strike (flash, curtain, dust column) lives in src/fx; atmosphere only adds the
+        // lingering regional haze so the two don't double up
         const r = (e.radius ?? 4 + 8 * mag) * CELL;
-        add(BURST.DUST, 2.5, r * 2.5, 1);
         add(BURST.HAZE, 18, r * 4, 0.5);
-        impact = { t0: fxTime, pos: new THREE.Vector3(x, y + 0.05, z), mag };
-        stats.flashes++;
         break;
       }
       case 'floodBasalt':
@@ -130,10 +141,54 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
 
   function readClouds(): void {
     reading = true;
-    renderer.getArrayBufferAsync(clouds.cells.value as unknown as THREE.StorageBufferAttribute)
-      .then((a) => { cells = new Float32Array(a); })
+    Promise.all([
+      renderer.getArrayBufferAsync(clouds.cells.value as unknown as THREE.StorageBufferAttribute),
+      renderer.getArrayBufferAsync(plumes.vents.value as unknown as THREE.StorageBufferAttribute, null, 0, ATMO.VENTS_MAX * 16),
+      renderer.getArrayBufferAsync(plumes.ctr.value as unknown as THREE.StorageBufferAttribute, null, 0, 4),
+    ]).then(([a, v, c]) => {
+      cells = new Float32Array(a);
+      const vf = new Float32Array(v), n = Math.min(new Int32Array(c)[0]!, ATMO.VENTS_MAX);
+      vents = [];
+      for (let i = 0; i < n; i++) {
+        const d = decodeVent(vf[i * 4 + 3]!);
+        // 'wet' = no subaerial ash column: submarine deeper than the Surtseyan range
+        vents.push({ x: vf[i * 4]!, y: vf[i * 4 + 1]!, z: vf[i * 4 + 2]!, heat: d.heat, wet: d.depth > VENT_SHALLOW, phase: d.phase, depth: d.depth });
+      }
+    })
       .catch((err) => console.error('atmosphere: cloud readback failed: ' + (err as Error).message))
       .finally(() => { reading = false; });
+  }
+
+  // ---- big plumes in the cloud volume: strongest dry vents + eruption bursts, eased so they never pop ----
+  const slots: { x: number; y: number; z: number; s: number; target: number }[] = [];
+  function updatePlumes(dt: number): void {
+    const cands: { x: number; y: number; z: number; s: number }[] = [];
+    for (const b of plumes.bursts) if (b.kind === BURST.ASH && fxTime >= b.t0 && fxTime - b.t0 < b.dur) cands.push({ x: b.x, y: -1, z: b.z, s: Math.min(1.5, b.mag) });
+    // only erupting (active / waning) vents on land or in the Surtseyan range get a big ash plume
+    for (const v of [...vents].sort((a, b) => b.heat - a.heat)) if (!v.wet && v.heat > 0.3 && v.phase >= VENT_PHASE.ACTIVE) cands.push({ x: v.x, y: v.y, z: v.z, s: v.heat * (v.phase === VENT_PHASE.WANING ? 0.6 : 1) });
+    const picked: typeof cands = [];
+    for (const c of cands) {
+      if (picked.length >= ATMO.PLUMES) break;
+      const near = picked.find((q) => Math.hypot(q.x - c.x, q.z - c.z) < 0.2);
+      if (near) { near.s = Math.max(near.s, c.s); if (near.y < 0) near.y = c.y; } else picked.push({ ...c });
+    }
+    for (const sl of slots) sl.target = 0;
+    for (const c of picked) {
+      let sl = slots.find((q) => Math.hypot(q.x - c.x, q.z - c.z) < 0.2);
+      if (!sl && slots.length < ATMO.PLUMES) { sl = { x: c.x, y: c.y, z: c.z, s: 0, target: 0 }; slots.push(sl); }
+      if (!sl) { const idle = slots.find((q) => q.s < 0.02); if (idle) { Object.assign(idle, { x: c.x, y: c.y, z: c.z, s: 0 }); sl = idle; } }
+      if (sl) { sl.target = c.s; if (c.y >= 0) sl.y = c.y; }
+    }
+    const k = 1 - Math.exp(-dt * 0.35);
+    for (const sl of slots) sl.s += (sl.target - sl.s) * k;
+    const yHi = clouds.uniforms.yHi.value;
+    clouds.setPlumes(slots.filter((q) => q.s > 0.01).map((q) => {
+      const vy = q.y >= 0 ? q.y : groundY() + 0.05;
+      const top = Math.min(vy + 0.2 + 0.32 * Math.min(q.s, 1.2), yHi - 0.12);
+      const w = windProfile(q.z, Math.min(1, (top - groundY()) / ATMO.WIND_H));
+      const sp = Math.hypot(w.u, w.v) || 1e-6;
+      return { x: q.x, y: vy, z: q.z, s: Math.min(q.s, 1.2), dx: w.u / sp, dz: w.v / sp, len: 0.35 + Math.min(0.8, sp * 8) * Math.min(1, q.s), top };
+    }));
   }
 
   const tmpA = new THREE.Vector3(), tmpB = new THREE.Vector3(), side = new THREE.Vector3(), view = new THREE.Vector3();
@@ -165,8 +220,8 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
         // two or three flickers inside the envelope
         const flick = Math.max(0, Math.sin(t * Math.PI * 5.5)) * (1 - t) + (t < 0.12 ? 1 : 0);
         boltAmt.value = flick;
-        clouds.uniforms.flash.value = flick;
-        light = flick * 2.5;
+        if (!strike.volcanic) clouds.uniforms.flash.value = flick; else clouds.uniforms.flash.value = 0;
+        light = flick * (strike.volcanic ? 1.2 : 2.5);
         flashLight.position.copy(strike.mid);
         flashLight.color.setRGB(0.8, 0.85, 1);
       }
@@ -179,11 +234,28 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
         if (Math.random() > ATMO.FLASH_RATE * storm * dt) continue;
         const top = new THREE.Vector3(((c % n) + Math.random()) * cw - BLOCK_SIZE / 2, cells[c * 4 + 2]! + 0.01, (Math.floor(c / n) + Math.random()) * cw - BLOCK_SIZE / 2);
         const bottom = new THREE.Vector3(top.x + (Math.random() - 0.5) * 0.08, cells[c * 4 + 3]!, top.z + (Math.random() - 0.5) * 0.08);
+        if (top.x > atmoCut.value.x || top.z > atmoCut.value.y) break; // beyond the slice cut
         buildBolt(top, bottom);
         bolt.visible = true;
-        strike = { t0: fxTime, dur: 0.32 + Math.random() * 0.2, idx: c, mid: top.clone().lerp(bottom, 0.3) };
+        strike = { t0: fxTime, dur: 0.32 + Math.random() * 0.2, idx: c, mid: top.clone().lerp(bottom, 0.3), volcanic: false };
         clouds.uniforms.flashPos.value.copy(top).lerp(bottom, -0.4);
         stats.lightning++;
+        break;
+      }
+    }
+    // volcanic lightning: short bolts flickering inside big ash columns (vivid at night)
+    if (!strike && lightningOn) {
+      const night = skyU.night.value;
+      for (const v of vents) {
+        if (v.wet || v.heat < 0.5 || v.phase !== VENT_PHASE.ACTIVE || v.x > atmoCut.value.x || v.z > atmoCut.value.y) continue;
+        if (Math.random() > ATMO.VOLC_FLASH_RATE * v.heat * (0.15 + 0.85 * night) * dt) continue;
+        const j = () => (Math.random() - 0.5) * 0.06;
+        const top = new THREE.Vector3(v.x + j(), v.y + 0.22 + Math.random() * 0.22, v.z + j());
+        const bottom = new THREE.Vector3(top.x + j() * 2, top.y - 0.08 - Math.random() * 0.1, top.z + j() * 2);
+        buildBolt(top, bottom);
+        bolt.visible = true;
+        strike = { t0: fxTime, dur: 0.18 + Math.random() * 0.15, idx: -1, mid: top.clone().lerp(bottom, 0.5), volcanic: true };
+        stats.volcanicLightning++;
         break;
       }
     }
@@ -233,12 +305,27 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
       }
       first = false;
       sinceRead += dt;
-      if (lightningOn && !reading && sinceRead >= 1) { sinceRead = 0; readClouds(); }
+      if (!reading && sinceRead >= 1) { sinceRead = 0; readClouds(); }
       updateLightning(dt);
+      updatePlumes(dt);
+      // pyroclastic density currents: occasional episodes at strong, dry vents (≤ 2 at a time)
+      let livePdc = plumes.bursts.filter((b) => b.kind === BURST.PDC && fxTime - b.t0 < b.dur).length;
+      for (const v of vents) {
+        if (livePdc >= 2 || v.wet || v.depth > 0.05 || v.heat < 0.6 || v.phase !== VENT_PHASE.ACTIVE) continue;
+        if (Math.random() > ATMO.PDC_RATE * v.heat * dt) continue;
+        plumes.addBurst({ x: v.x, y: v.y, z: v.z, kind: BURST.PDC, t0: fxTime, dur: 2.5, mag: 0.6 + 0.6 * v.heat, radius: 0.03 });
+        stats.pdc++; livePdc++;
+      }
     },
     setHighQuality(v) {
       hq = v;
       clouds.setHighQuality(v); plumes.setHighQuality(v); rain.setHighQuality(v);
+    },
+    setCut(x, z) { atmoCut.value.set(x, z); },
+    setCloudFade(v) {
+      const f = Math.min(1, Math.max(0, v));
+      clouds.uniforms.fade.value = f;
+      cloudShadowU.on.value = f; // shadows fade with the clouds
     },
     trigger,
     dispose() {

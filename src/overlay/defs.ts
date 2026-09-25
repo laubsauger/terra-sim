@@ -113,7 +113,7 @@ export const OVERLAYS: OverlayDef[] = [
     key: 8, id: 'biome', title: 'Biomes',
     blurb: 'Life zones set by long-term temperature and rainfall.',
     swatches: BIOME_NAMES.map((name, i) => ({ name, color: BIOME_COLORS[i]! })),
-    relief: 0.55, smoothS: 0,
+    relief: 0.4, smoothS: 0,
   },
   {
     key: 9, id: 'elev', title: 'Elevation & bathymetry',

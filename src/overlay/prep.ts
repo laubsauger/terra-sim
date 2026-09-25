@@ -7,16 +7,16 @@
 //   continuous  (t 0..1, value, 0, 0)                age, temp, heat, moist, elev
 //   flow        (river log net discharge 0..1, 3×3 max of it, sea, lake)   ovB.x = net discharge
 //   plates      separate buffers T / TN (below), shared with the Tectonics layer
-//   biome       (5×5 majority biome id, 0, 0, 0)
+//   biome       (5×5 majority display biome id, sea depth layers, 0, 0)   ovB: pre-majority class
 //   activity    (thickness-change t, subduction, ridge, collision)   geo-time EMA / peak-hold
 // ovB activity: (5×5 mean crust mass last frame, thickness change EMA layers/My, 0, 0)
 import * as THREE from 'three/webgpu';
-import { Fn, If, Return, float, uint, vec2, vec3, vec4, floor, instanceIndex, instancedArray, uniform, uniformArray, mix, max, length, dot, step, normalize } from 'three/tsl';
+import { Fn, If, Return, select, float, uint, vec2, vec3, vec4, floor, instanceIndex, instancedArray, uniform, uniformArray, mix, max, length, dot, step, normalize } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { NCOL } from '../sim/layout';
 import { tColIdx, tColXZ } from '../sim/tslLayout';
 import { ACT_NEW, ACT_SUBDUCT } from '../sim/tectonics';
-import { BIOME } from '../sim/biomeModel';
+import { BIOME, Biome } from '../sim/biomeModel';
 import { MAX_PLATES } from '../sim/worldData';
 import { tScale } from './overlayTsl';
 import type { OverlayDef } from './defs';
@@ -25,6 +25,8 @@ type F = THREE.Node<'float'>;
 type U = THREE.Node<'uint'>;
 type I = THREE.Node<'int'>;
 
+/** Biome overlay: placeholder id for cells the majority pass must fill (non-coastal beach). */
+const UNKNOWN = 255;
 /** Orogeny layers field in tecAct (tectonics.ts K_SHIFT, 6 bits). */
 const K_SHIFT = 19;
 /** Discharge overlay: standing water above sea level deeper than this is a lake, not a river. */
@@ -86,23 +88,32 @@ export function createPrep(fields: GpuFields): Prep {
    * 5×5 majority of a categorical uint field → out.x (drops 1-2 column speckles: plate slivers at
    * boundaries, flickering beach/ice cells). Votes are only counted where the window is mixed.
    */
-  const majority = (src: StorageNode<'uint'>, out: StorageNode<'vec4'>) => Fn(() => {
-    If(instanceIndex.greaterThanEqual(uint(NCOL)), () => { Return(); });
-    const { x, z } = tColXZ(instanceIndex);
-    const win: U[] = [];
-    for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) win.push((src.element(tColIdx(x.add(dx), z.add(dz))) as unknown as U).toVar());
-    const inner = [12, 7, 11, 13, 17, 6, 8, 16, 18]; // centre first: ties keep the column's own id
-    const best = win[12]!.toVar();
-    const mixed = win.reduce((s: THREE.Node<'bool'>, w) => s.or(w.notEqual(win[12]!)), win[0]!.notEqual(win[12]!));
-    If(mixed, () => {
-      const bestN = float(-1).toVar();
-      for (const j of inner) {
-        const n = win.reduce((s: F, w) => s.add(w.equal(win[j]!).toFloat()) as F, float(0));
-        If(n.greaterThan(bestN), () => { bestN.assign(n); best.assign(win[j]!); });
-      }
-    });
-    out.element(instanceIndex).assign(vec4(float(best), 0, 0, 0));
-  })().compute(NCOL);
+  const majority = (src: StorageNode<'uint'>, out: StorageNode<'vec4'>) =>
+    majorityOf((idx) => src.element(idx) as unknown as U, (i, best) => out.element(i).assign(vec4(float(best), 0, 0, 0)));
+  /**
+   * Majority core: read(idx) → id; ids equal to `skip` never win (unless the whole window is unknown).
+   * write(i, winner) stores the result.
+   */
+  function majorityOf(read: (idx: U) => U, write: (i: U, best: U) => void, skip = -1) {
+    return Fn(() => {
+      If(instanceIndex.greaterThanEqual(uint(NCOL)), () => { Return(); });
+      const { x, z } = tColXZ(instanceIndex);
+      const win: U[] = [];
+      for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) win.push(read(tColIdx(x.add(dx), z.add(dz))).toVar());
+      const inner = [12, 7, 11, 13, 17, 6, 8, 16, 18]; // centre first: ties keep the column's own id
+      const best = win[12]!.toVar();
+      const mixed = win.reduce((s: THREE.Node<'bool'>, w) => s.or(w.notEqual(win[12]!)), win[0]!.notEqual(win[12]!));
+      If(mixed, () => {
+        const bestN = float(-1).toVar();
+        for (const j of inner) {
+          let n = win.reduce((s: F, w) => s.add(w.equal(win[j]!).toFloat()) as F, float(0));
+          if (skip >= 0) n = n.sub(win[j]!.equal(uint(skip)).toFloat().mul(100)) as F;
+          If(n.greaterThan(bestN), () => { bestN.assign(n); best.assign(win[j]!); });
+        }
+      });
+      write(instanceIndex, best);
+    })().compute(NCOL);
+  }
 
   /** Continuous overlay: blurred t (EMA'd), raw value at the column. */
   const continuous = (def: OverlayDef, read: (idx: U) => F, extra: (i: U) => F = () => float(0)) => kernel((i, x, z) => {
@@ -202,7 +213,34 @@ export function createPrep(fields: GpuFields): Prep {
           return vec4(mix(prev.x, r, u.ema), mix(prev.y, rmax, u.ema), c.sea, lake);
         });
       }
-      case 'biome': return majority(f<'uint'>('biome'), A);
+      case 'biome': {
+        // pass 1 (→ ovB): display class. Sea columns (water surface at sea level) are OCEAN, or ICE only where the
+        // 'ice' field says so; BEACH only on a true coastline (land next to sea), else unknown (the majority fills it).
+        const bio = f<'uint'>('biome'), water = f('water'), surf = f('surfY');
+        const ice = has('ice') ? f('ice') : null;
+        const seaAt = (idx: U) => {
+          const wd = water.element(idx) as unknown as F;
+          return step(0.05, wd).mul(step((surf.element(idx) as unknown as F).add(wd), u.seaLevel.add(0.6)));
+        };
+        const classify = Fn(() => {
+          If(instanceIndex.greaterThanEqual(uint(NCOL)), () => { Return(); });
+          const i = instanceIndex;
+          const { x, z } = tColXZ(i);
+          const id = (bio.element(i) as unknown as U).toVar();
+          const sea = seaAt(i).toVar();
+          const coast = float(0).toVar();
+          for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) coast.assign(max(coast, seaAt(tColIdx(x.add(dx), z.add(dz)))));
+          const iced = ice ? step(BIOME.ICE_MIN, ice.element(i) as unknown as F) : float(0);
+          If(sea.greaterThan(0.5), () => { id.assign(select(iced.greaterThan(0.5), uint(Biome.ICE), uint(Biome.OCEAN))); })
+            .ElseIf(id.equal(uint(Biome.BEACH)).and(coast.lessThan(0.5)), () => { id.assign(uint(UNKNOWN)); });
+          const depth = max(u.seaLevel.sub(surf.element(i) as unknown as F), 0).mul(sea);
+          B.element(i).assign(vec4(float(id), depth, 0, 0));
+        })().compute(NCOL);
+        // pass 2 (→ ovA): 5×5 majority (isolated cells and unknown beaches take their surroundings), depth kept
+        const major = majorityOf((idx) => uint((B.element(idx) as unknown as THREE.Node<'vec4'>).x),
+          (i, best) => A.element(i).assign(vec4(float(best), (B.element(i) as unknown as THREE.Node<'vec4'>).y, 0, 0)), UNKNOWN);
+        return [classify, major] as unknown as [THREE.ComputeNode, THREE.ComputeNode];
+      }
       case 'plates': throw new Error('plates prep runs through runPlates()');
       case 'activity': {
         const act = f<'uint'>('tecAct'), info = f<'uvec2'>('colInfo');
@@ -249,6 +287,7 @@ export function createPrep(fields: GpuFields): Prep {
       if (def.id === 'moist' && !has('climAvg')) return;
       let k = kernels.get(def.id);
       if (!k) { k = build(def); kernels.set(def.id, k); }
+      if (def.id === 'biome') { for (const kk of k as THREE.ComputeNode[]) renderer.compute(kk); return; }
       if (Array.isArray(k)) k = k[fields.parity('crustAge') as 0 | 1];
       renderer.compute(k);
     },

@@ -113,3 +113,88 @@ for (const quality of ['high', 'low'] as const) {
     expect(problems).toEqual([]);
   });
 }
+
+// Regression (B: faces flicker to uniform brown every other sim tick): the sim swaps the 'vox'
+// ping-pong each run, so faces must read identical strata on both parities, frame after frame.
+test('cut faces show the same strata on both vox parities across many swaps', async ({ page }) => {
+  mkdirSync(OUT, { recursive: true });
+  const problems: string[] = [];
+  page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.location().url)) problems.push(m.text()); });
+  await page.goto('/tests/gpu/support/render.html');
+  await page.waitForFunction(() => (window as any).rt?.ready === true, null, { timeout: 60_000 });
+  await page.evaluate(() => (window as any).rt.mirrorVox());
+  const pts: FrontPts = await page.evaluate(() => (window as any).rt.view('front'));
+  let ref: number[][] | null = null;
+  for (let i = 0; i < 8; i++) {
+    await page.evaluate((p) => { (window as any).rt.setVoxParity(p); return (window as any).rt.frame(); }, i & 1);
+    const a = await shoot(page, `swap-${i}`, pts.strata);
+    // every frame: real strata (several distinct layers), nothing magma-like or washed to one colour
+    expect(distinct(a.samples), `frame ${i} parity ${i & 1}: ${JSON.stringify(a.samples)}`).toBeGreaterThanOrEqual(5);
+    if (!ref) ref = a.samples;
+    else a.samples.forEach((c, k) => expect(dist(c, ref![k]!), `frame ${i} sample ${k}`).toBeLessThan(24));
+  }
+  expect(problems).toEqual([]);
+});
+
+// Plates move in whole cells in the sim; the display must not jump (user: "mountains jump after a
+// move… the whole tick moves one grid unit at once"). Sub-cell advection + remap on tectonics runs
+// keep the rendered peak moving smoothly and monotonically.
+test('rendered mountain moves continuously across whole-cell plate shifts', async ({ page }) => {
+  const problems: string[] = [];
+  page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.location().url)) problems.push(m.text()); });
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  // 60 fps at 1 My/s with a fast plate (4 cells/My): ~0.067 cell per frame, 4 shifts in 70 frames
+  const { peaks, shifts } = await page.evaluate(() => (window as any).rm.run(70, 1 / 60, 4));
+  expect(shifts.length, 'whole-cell shifts happened').toBeGreaterThanOrEqual(4);
+  for (let i = 1; i < peaks.length; i++) {
+    const step = peaks[i] - peaks[i - 1];
+    expect(step, `frame ${i} step ${step.toFixed(3)} (shift frames ${shifts})`).toBeGreaterThanOrEqual(-0.02);
+    expect(step, `frame ${i} step ${step.toFixed(3)} (shift frames ${shifts})`).toBeLessThan(0.3);
+  }
+  expect(peaks.at(-1)! - peaks[0]!, 'total advance ≈ 70 frames × 4/60 cell').toBeGreaterThan(3.5);
+  // Both plateId ping-pong halves hold the same plates here, so the parity must not move anything
+  // (regression: a branch-cached index read garbage plate ids on one parity → faces flickered).
+  const pp: number[] = await page.evaluate(() => (window as any).rm.parityPeaks());
+  for (const v of pp) expect(Math.abs(v - pp[0]!), `parity peaks ${pp}`).toBeLessThan(0.02);
+  expect(problems).toEqual([]);
+});
+
+// Regression (faces alternated between two cross-sections every few frames): plate offsets hovering
+// around ±0.5 cell perpendicular to a face must not switch the face to another column / the far side.
+test('cut face stays stable while plate offsets hover around half a cell', async ({ page }) => {
+  const problems: string[] = [];
+  page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.location().url)) problems.push(m.text()); });
+  await page.goto('/tests/gpu/support/render.html');
+  await page.waitForFunction(() => (window as any).rt?.ready === true, null, { timeout: 60_000 });
+  await page.evaluate(() => (window as any).rt.markNeighbourRows()); // any column switch would show magma
+  const pts: FrontPts = await page.evaluate(() => (window as any).rt.view('front'));
+  let ref: number[][] | null = null;
+  for (const oz of [0.45, 0.55, 0.45, -0.55, -0.45, 0.55]) {
+    await page.evaluate((o) => { (window as any).rt.setPlateOffset(0, o); return (window as any).rt.frame(); }, oz);
+    const a = await shoot(page, `offset-${oz}`, pts.strata);
+    if (!ref) ref = a.samples;
+    else a.samples.forEach((c, k) => expect(dist(c, ref![k]!), `offset ${oz} sample ${k}`).toBeLessThan(30));
+  }
+  expect(problems).toEqual([]);
+});
+
+// Regression (flicker of terrain, shadows and cut-face layers every few frames): life/flora called
+// updateRenderColumns() without dt on every refresh, which snapped the eased display to the raw sim.
+test('foreign display refreshes between frames do not snap the eased display', async ({ page }) => {
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  const { peaks, heights } = await page.evaluate(() => (window as any).rm.run(70, 1 / 60, 4, true));
+  for (let i = 1; i < peaks.length; i++) {
+    const step = peaks[i] - peaks[i - 1];
+    expect(step, `frame ${i} step ${step.toFixed(3)}`).toBeGreaterThanOrEqual(-0.02);
+    expect(step, `frame ${i} step ${step.toFixed(3)}`).toBeLessThan(0.3);
+    // a 12-layer in-place uplift eases in over ~0.5 s (τ = 0.45 s): < 1 layer per frame, never a snap
+    const dh = heights[i] - heights[i - 1];
+    expect(Math.abs(dh), `frame ${i} height step ${dh.toFixed(2)}`).toBeLessThan(1.0);
+  }
+  expect(heights.at(-1)! - heights[0]!, 'uplift arrived').toBeGreaterThan(12);
+});

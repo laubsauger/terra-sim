@@ -56,7 +56,9 @@ test('clouds form over saturated air, not over dry air, and shade the ground und
   console.log(`clouds: wet cells ${(100 * frac(wet)).toFixed(0)} % covered (${wet.length}), dry ${(100 * frac(dry)).toFixed(1)} % (${dry.length}); whole sky ${(100 * frac(cells)).toFixed(0)} %`);
   expect(wet.length).toBeGreaterThan(20);
   expect(frac(wet), 'saturated air grows clouds').toBeGreaterThan(0.3);
-  expect(frac(wet), 'but never a solid blanket').toBeLessThan(0.95);
+  const solid = wet.filter((c) => c.cov > 0.5).length / wet.length;
+  console.log(`solid (cov > 0.5) share of the saturated box: ${(100 * solid).toFixed(0)} %`);
+  expect(solid, 'clumpy with gaps, never a solid blanket, even in saturated air').toBeLessThan(0.8);
   expect(Math.max(...dry.map((c) => c.cov)), 'dry air stays clear').toBeLessThan(0.01);
   expect(frac(cells), 'moderate sky coverage').toBeLessThan(0.35);
   // storm cells only where precip is heavy
@@ -87,7 +89,7 @@ test('clouds form over saturated air, not over dry air, and shade the ground und
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
-test('ash plume spawns at a hot lava column and rises; steam where lava meets water', async ({ page }) => {
+test('an erupting vent (volcano.x) spawns an ash column that rises, plus fountain spray and bombs', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');
   const vent = { x: 200, z: 60 };
@@ -103,6 +105,9 @@ test('ash plume spawns at a hot lava column and rises; steam where lava meets wa
   expect(b.ventCount).toBeLessThanOrEqual(4);
   for (let i = 0; i < b.ventCount; i++) expect(Math.hypot(b.vents[i * 4] - vx, b.vents[i * 4 + 2] - vz), 'vent at the lava column').toBeLessThan(0.06);
   const plume = (s: typeof b) => s.live.filter((p: { kind: number }) => p.kind < 1.5);
+  const ejecta = b.live.filter((p: { kind: number }) => Math.abs(p.kind - 7) < 0.5 || Math.abs(p.kind - 8) < 0.5);
+  console.log(`ejecta (fountain + bombs): ${ejecta.length}`);
+  expect(ejecta.length, 'an active vent throws fountain spray and bombs').toBeGreaterThan(5);
   const pa = plume(a), pb = plume(b);
   console.log(`plume: ${pa.length} → ${pb.length} particles; mean height above vent ${(avg(pa.map((p: any) => p.y)) - b.vents[1]).toFixed(3)} → ${(avg(pb.map((p: any) => p.y)) - b.vents[1]).toFixed(3)}`);
   expect(pb.length, 'plume particles spawned').toBeGreaterThan(40);
@@ -124,14 +129,15 @@ test('hydrothermal vents sit on young crust: bubbles and smokers under water sta
   await page.evaluate((r) => (window as any).at.paint({ rift: r }), rift);
   await page.evaluate(() => (window as any).at.frames(120, 1 / 30));
   const s = await page.evaluate(() => (window as any).at.particles());
-  console.log(`hydrothermal: ${s.hydroCount} vents, ${s.live.filter((p: any) => p.kind >= 3.5).length} underwater particles`);
+  const isUnder = (p: any) => p.kind > 3.5 && p.kind < 6.5; // bubble, smoker, turbid
+  console.log(`hydrothermal: ${s.hydroCount} vents, ${s.live.filter(isUnder).length} underwater particles`);
   expect(s.hydroCount, 'young crust hosts vents').toBeGreaterThan(0);
   // vents only on the rift rows (4×4-column scan cells), a sparse subset (deterministic hash)
   const n = Math.min(s.hydroCount, 64);
   for (let i = 0; i < n; i++) expect(Math.abs(colOf(s.hydro[i * 4 + 2]) - rift.z), 'vent on the rift').toBeLessThanOrEqual(2);
   // the 3-row rift touches 2 × 64 scan cells; a deterministic ~30 % subset hosts vents
   expect(s.hydroCount, 'sparse').toBeLessThan(0.5 * 128);
-  const under = s.live.filter((p: any) => p.kind >= 3.5);
+  const under = s.live.filter(isUnder);
   for (const p of under) expect(p.y, 'dissipates before the surface').toBeLessThanOrEqual(p.ceil + 1e-4);
   for (const p of under) expect(Math.abs(colOf(p.z) - rift.z)).toBeLessThanOrEqual(4);
   expect(problems, problems.join('\n')).toEqual([]);
@@ -157,7 +163,7 @@ test('rain falls only from precipitating columns; snow where it is freezing', as
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
-test('storm lightning, meteor flash + dust ring, flood-basalt haze', async ({ page }) => {
+test('storm lightning, meteor haze (strike itself is src/fx), flood-basalt haze', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');
   await page.evaluate(() => (window as any).at.paint({}));
@@ -165,16 +171,14 @@ test('storm lightning, meteor flash + dust ring, flood-basalt haze', async ({ pa
   const st = await page.evaluate(() => (window as any).at.stats());
   console.log('lightning strikes in 10 s:', st.lightning);
   expect(st.lightning, 'storm cells flash').toBeGreaterThan(0);
-  // meteor at column (190, 20): flash + a dust ring rushing outward
+  // meteor: the cinematic strike (flash, curtain, dust column) is src/fx; atmosphere adds only a regional
+  // haze, so the two never double up (user: 'random grey poof out of nowhere')
   await page.evaluate(() => (window as any).at.trigger({ kind: 'meteor', x: 190, z: 20, magnitude: 1 }));
   await page.evaluate(() => (window as any).at.frames(20, 1 / 30));
   const m = await page.evaluate(() => (window as any).at.particles());
-  const mx = cellW(190), mz = cellW(20);
-  const dust = m.live.filter((p: any) => Math.abs(p.kind - 2) < 0.5);
-  expect(dust.length, 'dust ring').toBeGreaterThan(100);
-  const ring = dust.filter((p: any) => Math.hypot(p.x - mx, p.z - mz) > 0.03);
-  expect(ring.length / dust.length, 'dust moves outward from the impact').toBeGreaterThan(0.5);
-  expect((await page.evaluate(() => (window as any).at.stats())).flashes).toBe(1);
+  expect(m.live.filter((p: any) => Math.abs(p.kind - 2) < 0.5).length, 'no atmosphere dust poof').toBe(0);
+  expect(m.live.filter((p: any) => Math.abs(p.kind - 3) < 0.5).length, 'regional haze').toBeGreaterThan(5);
+  expect((await page.evaluate(() => (window as any).at.stats())).flashes).toBe(0);
   await page.evaluate(() => (window as any).at.trigger({ kind: 'floodBasalt', x: 120, z: 200, magnitude: 1 }));
   await page.evaluate(() => (window as any).at.frames(60, 1 / 30));
   const f = await page.evaluate(() => (window as any).at.particles());

@@ -7,8 +7,11 @@ import * as THREE from 'three/webgpu';
 import {
   pass, mrt, output, diffuseColor, normalView, velocity, packNormalToRGB, unpackRGBToNormal, sample,
   vec2, vec3, vec4, float, uniform, uv, mix, smoothstep, saturate, abs, sign, pow, length, hash,
-  renderOutput, luminance, frameId, max, screenCoordinate,
+  renderOutput, luminance, frameId, max, screenCoordinate, Fn, normalize, step, floor, dot, exp, sin, fract, texture,
 } from 'three/tsl';
+import { skyU } from './sky';
+import { ambTime } from './space';
+import { lookTextures } from './textures';
 import { ssgi } from 'three/addons/tsl/display/SSGINode.js';
 import { ao } from 'three/addons/tsl/display/GTAONode.js';
 import { traa } from 'three/addons/tsl/display/TRAANode.js';
@@ -39,6 +42,56 @@ export interface Post {
 }
 
 /** ACES over AgX: AgX desaturates the saturated diorama palette and glowing magma toward pastel. */
+/**
+ * Night sky stars as pinpoints: evaluated per pixel after DOF and bloom, only on backdrop pixels, so
+ * they stay ~1 px and are never blurred or bloomed into blobs. Stars live on a fine direction grid
+ * (one candidate per cell); a steep magnitude curve gives a few bright stars and many faint ones,
+ * with a colour temperature spread, gentle twinkle, a faint Milky Way band and a horizon fade.
+ */
+/**
+ * Float hash of a 3D point (Hoskins hash13). TSL's hash() converts its seed to uint, which collapses
+ * negative and fractional seeds, so it is unusable for direction-grid cells.
+ */
+const hash13 = (p: V3): THREE.Node<'float'> => {
+  const p3 = fract(p.mul(0.1031)).toVar();
+  p3.addAssign(dot(p3, p3.yzx.add(33.33)));
+  return fract(p3.x.add(p3.y).mul(p3.z));
+};
+
+function starLayer(camera: THREE.PerspectiveCamera, depth: V4): V3 {
+  const projInv = uniform(camera.projectionMatrixInverse);
+  const camWorld = uniform(camera.matrixWorld);
+  const tmpSize = new THREE.Vector2();
+  const pxAngle = uniform(0.0005).onRenderUpdate(({ renderer }) => {
+    const h = (renderer as THREE.WebGPURenderer).getDrawingBufferSize(tmpSize).y;
+    return (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)) / Math.max(1, h);
+  });
+  return Fn(() => {
+    const st = uv();
+    const ndc = vec4(st.x.mul(2).sub(1), float(1).sub(st.y.mul(2)), 1, 1);
+    const vp = projInv.mul(ndc);
+    const dir = normalize(camWorld.mul(vec4(vp.xyz.div(vp.w), 0)).xyz).toVar();
+    const bg = step(0.99999, depth.r);                       // backdrop only (sphere sits on the far plane)
+    const cell = floor(dir.mul(700));                        // direction grid: one star candidate per cell
+    const h1 = hash13(cell).toVar();
+    const exists = step(0.965, h1);
+    const jit = vec3(hash13(cell.add(17.1)), hash13(cell.add(41.3)), hash13(cell.add(73.9))).mul(0.6).add(0.2);
+    const sdir = normalize(cell.add(jit));
+    const angDist = length(dir.sub(sdir.mul(dot(dir, sdir))));
+    const mag = pow(hash13(cell.add(5.7)), 10).mul(9).add(0.25); // many faint, few bright
+    const pt = pow(saturate(float(1).sub(angDist.div(pxAngle.mul(0.75)))), 2);
+    const tint = mix(vec3(1.0, 0.78, 0.6), vec3(0.72, 0.85, 1.0), hash13(cell.add(9.1)));
+    const tw = sin(ambTime.mul(mix(1.5, 3.5, hash13(cell.add(3.3)))).add(h1.mul(60))).mul(0.18).add(0.82);
+    // faint Milky Way: a tilted great-circle band with patchy structure
+    const band = exp(pow(dot(dir, normalize(vec3(0.35, 0.6, -0.72))), 2).mul(-40));
+    // patchy dust lanes from the detail texture in stereographic coords (smooth, no seam, no blocks)
+    const lanes = texture(lookTextures().detail, dir.xz.div(dir.y.add(1.05)).mul(2.5)).r;
+    const mw = band.mul(smoothstep(0.25, 0.8, lanes)).mul(0.035);
+    const vis = smoothstep(0.02, 0.2, dir.y).mul(skyU.night).mul(bg);
+    return tint.mul(pt.mul(exists).mul(mag).mul(tw)).add(vec3(0.6, 0.65, 0.8).mul(mw)).mul(vis);
+  })() as V3;
+}
+
 export const TONE_MAPPING = THREE.ACESFilmicToneMapping;
 
 /**
@@ -157,6 +210,7 @@ export function createPost(renderer: THREE.WebGPURenderer, scene: THREE.Scene, c
       disposables.push(d);
       hdr = d as unknown as V4;
     }
+    hdr = vec4(hdr.rgb.add(starLayer(camera, depth as unknown as V4)), 1);
     const ldr = renderOutput(vec4(max(hdr.rgb.mul(u.exposure), vec3(0)), 1), opts.toneMapping ?? TONE_MAPPING, THREE.SRGBColorSpace);
     const out = vec4(grade(ldr.rgb as V3), 1);
     if (f.traa) return out;

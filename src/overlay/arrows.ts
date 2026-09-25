@@ -108,7 +108,9 @@ export function createArrows(fields: GpuFields, U: SheetUniforms) {
     object: group,
     state,
     /** plates + centroids (cells, torus mean) → instance data. dt real seconds (smoothing). */
-    update(plates: readonly { id: number; alive: boolean; vel: [number, number] }[], centroids: ([number, number] | undefined)[] | null, dt: number) {
+    /** cut: slice inspection bounds (visible x ≤ cut.x, z ≤ cut.z); arrows anchored beyond it are hidden. */
+    update(plates: readonly { id: number; alive: boolean; vel: [number, number] }[], centroids: ([number, number] | undefined)[] | null, dt: number,
+      cut: { x: number; z: number } = { x: HALF, z: HALF }) {
       // ease everything (≈1 s): stats land once per window and must never make an arrow jump
       const a = 1 - Math.exp(-Math.max(0, dt) / 0.9);
       for (let i = 0; i < MAX_PLATES; i++) {
@@ -127,9 +129,10 @@ export function createArrows(fields: GpuFields, U: SheetUniforms) {
         const lim = HALF - st.length / 2 - 0.06;
         st.x = Math.max(-lim, Math.min(lim, cellToWorld(cell[0]![i]!)));
         st.z = Math.max(-lim, Math.min(lim, cellToWorld(cell[1]![i]!)));
-        st.visible = true;
+        // anchor sliced away (slice.ts): hide, the arrow would float over the removed block (state keeps easing)
+        st.visible = st.x <= cut.x && st.z <= cut.z;
         dataA[i]!.set(st.x, st.z, st.heading, st.length);
-        dataB[i]!.x = 1;
+        dataB[i]!.x = st.visible ? 1 : 0;
       }
     },
     dispose() { geo.dispose(); for (const c of group.children) ((c as THREE.Mesh).material as THREE.Material).dispose(); },

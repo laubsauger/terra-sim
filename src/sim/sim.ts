@@ -151,6 +151,7 @@ export class Sim {
       this.runsInWindow++;
       this.derive.run(r);
       this.tectonics.flow(r);
+      this.lifecycle.clean(r); // stray single cells rejoin the surrounding plate
       this.derive.run(r);
       this.magma.afterTectonics(r);
     }

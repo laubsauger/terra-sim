@@ -12,7 +12,7 @@ import { Lifecycle, type LifecycleOp } from '../sim/lifecycle';
 import { NX, NZ, colIdx } from '../sim/layout';
 import { MAX_PLATES } from '../sim/worldData';
 import { createColumnGrid } from '../render/terrain';
-import { worldToCell, voxelToWorldY } from '../render/space';
+import { worldToCell, voxelToWorldY, cellToWorld, HALF } from '../render/space';
 import { pickColumn } from '../ui/probe';
 import { uniform } from 'three/tsl';
 import { OVERLAYS, overlayByKey, readout, plateSpeedText, CM_PER_YR_PER_CELL_MY, type OverlayDef } from './defs';
@@ -82,10 +82,14 @@ export interface OverlayOptions {
   clouds?: { object: THREE.Object3D; setCloudFade?: (v: number) => void };
   /** Ambient mode: the Tectonics layer is off there unless the user switches it on. */
   ambient?: () => boolean;
+  /** Slice inspection cut (slice.ts): visible block x ≤ cut.x, z ≤ cut.z (HALF = no cut). Default: window.terra.slice.cut. */
+  cut?: () => { x: number; z: number } | undefined;
 }
 
 export function createOverlays(o: OverlayOptions) {
   const { fields, scene, renderer, camera, source } = o;
+  const NO_CUT = { x: HALF, z: HALF };
+  const cutNow = () => (o.cut ? o.cut() : (window as unknown as { terra?: { slice?: { cut?: { x: number; z: number } } } }).terra?.slice?.cut) ?? NO_CUT;
   const U: SheetUniforms = { opacity: uniform(0.85), exposure: uniform(1), tecOpacity: uniform(0), arrowFade: uniform(0) };
   const prep = createPrep(fields);
   const legend = createLegend();
@@ -221,7 +225,14 @@ export function createOverlays(o: OverlayOptions) {
       const r = dom.getBoundingClientRect();
       ndc.set(((pointer.x - r.left) / r.width) * 2 - 1, -((pointer.y - r.top) / r.height) * 2 + 1);
       ray.setFromCamera(ndc, camera);
-      const hit = pickColumn(ray.ray, surf);
+      // slice inspection: removed columns are transparent to the pick (the ray reaches what is actually visible)
+      const cut = cutNow();
+      let heights = surf;
+      if (cut.x < HALF - 1e-4 || cut.z < HALF - 1e-4) {
+        heights = surf.slice();
+        for (let z = 0; z < NZ; z++) for (let x = 0; x < NX; x++) if (cellToWorld(x) > cut.x || cellToWorld(z) > cut.z) heights[colIdx(x, z)] = -1e9;
+      }
+      const hit = pickColumn(ray.ray, heights);
       if (!hit) { legend.setReadout(null); return; }
       const a = await readCol(d.id === 'plates' ? prep.tec.T : prep.ovA, hit.x, hit.z);
       const b = d.id === 'activity' || d.id === 'flow' ? await readCol(prep.ovB, hit.x, hit.z) : new Float32Array(4);
@@ -282,7 +293,7 @@ export function createOverlays(o: OverlayOptions) {
     reset = false;
 
     if (plates) {
-      arrows.update(plateList, source.centroids(), dt);
+      arrows.update(plateList, source.centroids(), dt, cutNow());
       if (d?.id === 'plates') {
         let fastest = 0, n = 0;
         for (const s of arrows.state) if (s.visible) { n++; fastest = Math.max(fastest, s.speed); }

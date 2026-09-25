@@ -108,7 +108,7 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
         for (const cb of frameCbs) cb(dt);
         controls.update();
         constrain();
-        updateAllRenderColumns(renderer); // render-only column summaries from the latest sim fields
+        updateAllRenderColumns(renderer, dt); // display columns: advect + ease toward the latest sim fields
         if (renderFn) renderFn(); else renderer.render(scene, camera);
         cpuMs = performance.now() - now;
       });

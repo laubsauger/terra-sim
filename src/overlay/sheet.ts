@@ -84,6 +84,23 @@ function prepCorners(ov: StorageNode<'vec4'>) {
     a: (ov.element(tColIdx(xi.add(dx), zi.add(dz))) as unknown as V4).toVar() as V4,
   }));
 }
+/**
+ * 3×3 quadratic B-spline taps of a prep buffer at the fragment (C1-smooth weights): categorical contours come out
+ * as smooth curves instead of the cell staircase a bilinear 2×2 gives.
+ */
+function splineTaps(ov: StorageNode<'vec4'>) {
+  const u = tWorldToCell(positionWorld.x), v = tWorldToCell(positionWorld.z);
+  const uc = floor(u.add(0.5)), vc = floor(v.add(0.5));
+  const tu = u.sub(uc).toVar(), tv = v.sub(vc).toVar();
+  const bs = (t: F) => [float(0.5).mul(float(0.5).sub(t).pow(2)), float(0.75).sub(t.mul(t)), float(0.5).mul(float(0.5).add(t).pow(2))];
+  const wu = bs(tu), wv = bs(tv);
+  const xi = int(uc).toVar(), zi = int(vc).toVar();
+  const out: { w: F; a: V4 }[] = [];
+  for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
+    out.push({ w: wu[dx + 1]!.mul(wv[dz + 1]!).toVar() as F, a: (ov.element(tColIdx(xi.add(dx), zi.add(dz))) as unknown as V4).toVar() as V4 });
+  }
+  return out;
+}
 const wsum = (c: ReturnType<typeof prepCorners>, f: (k: ReturnType<typeof prepCorners>[number]) => THREE.Node) =>
   c.slice(1).reduce((s, k) => s.add(k.w.mul(f(k) as F)), c[0]!.w.mul(f(c[0]!) as F)) as THREE.Node;
 
@@ -92,11 +109,11 @@ const wsum = (c: ReturnType<typeof prepCorners>, f: (k: ReturnType<typeof prepCo
  * side of the marching-squares contour), edges anti-aliased in screen space. Returns the fill colour and the
  * pixel distance to the id boundary.
  */
-function categorical(c: ReturnType<typeof prepCorners>, pal: Palette) {
+function categorical(c: { w: F; a: V4 }[], pal: Palette) {
   const ids = c.map((k) => floor(k.a.x.add(0.5)).toVar());
   const share = ids.map((id) => c.reduce((s: F, k, j) => s.add(k.w.mul(abs(ids[j]!.sub(id)).lessThan(0.5).toFloat())) as F, float(0)).toVar());
   const best = share[0]!.toVar(), bid = ids[0]!.toVar();
-  for (let k = 1; k < 4; k++) {
+  for (let k = 1; k < c.length; k++) {
     const take = share[k]!.greaterThan(best).toFloat();
     best.assign(mix(best, share[k]!, take)); bid.assign(mix(bid, ids[k]!, take));
   }
@@ -157,15 +174,20 @@ export function createSheetMaterial(fields: GpuFields, B: SheetBuffers, def: Ove
       if (b.bold !== undefined) col = mix(col, ink, isoLines(t, [scaleT(b.scale, b.bold)], 2.2).mul(0.85)) as V3;
       if (def.fadeLow !== undefined) alpha = alpha.mul(mix(def.fadeLow, 1, smoothstep(0.0, 0.45, t))) as F;
     } else if (def.id === 'plates') {
-      const c = prepCorners(B.T);
-      const cat = categorical(c, uniformArray(B.plateColors, 'color'));
+      const cat = categorical(splineTaps(B.T), uniformArray(B.plateColors, 'color'));
       col = cat.color;
-      const bc = boundaryClass(c);
+      const bc = boundaryClass(prepCorners(B.T));
       const line = float(1).sub(smoothstep(1.0, 2.0, cat.dist));
       const casing = float(1).sub(smoothstep(2.4, 3.6, cat.dist));
       col = mix(mix(col, ink, casing.mul(0.7)), bc.color, line) as V3;
     } else if (def.id === 'biome') {
-      col = categorical(prepCorners(B.ovA), palette(BIOME_COLORS)).color;
+      const cat = categorical(splineTaps(B.ovA), palette(BIOME_COLORS));
+      // open ocean: one calm colour, darker with depth (prep y = depth below sea level)
+      const depth = wsum(prepCorners(B.ovA), (k) => k.a.y) as F;
+      const shade = mix(float(1.08), float(0.7), smoothstep(1, 18, depth));
+      col = cat.color.mul(mix(float(1), shade, step(0.05, depth))) as V3;
+      // near-opaque: water foam / textures under a translucent sheet muddied the categorical colours
+      alpha = min(U.opacity.mul(1.15), 1) as F;
     } else {
       // activity: thickness-change tint underneath, glowing activity marks on top
       const c = prepCorners(B.ovA);
@@ -198,8 +220,9 @@ export function createTectonicsMaterial(fields: GpuFields, B: SheetBuffers, U: S
     // lines climbing cliff faces read as noise: fade them on steep ground
     const flat = mix(float(0.2), float(1), smoothstep(0.35, 0.7, normalize(normal).y));
     // pixel distance to the id contour (same construction as the Plates overlay)
-    const ids = cT.map((k) => floor(k.a.x.add(0.5)).toVar());
-    const share = ids.map((id) => cT.reduce((s: F, k, j) => s.add(k.w.mul(abs(ids[j]!.sub(id)).lessThan(0.5).toFloat())) as F, float(0)));
+    const sT = splineTaps(B.T);
+    const ids = sT.map((k) => floor(k.a.x.add(0.5)).toVar());
+    const share = ids.map((id) => sT.reduce((s: F, k, j) => s.add(k.w.mul(abs(ids[j]!.sub(id)).lessThan(0.5).toFloat())) as F, float(0)));
     const best = share.slice(1).reduce((a: F, b) => max(a, b) as F, share[0]!).toVar();
     const gC = best.mul(2).sub(1);
     const dist = abs(gC).div(max(fwidth(gC), 1e-5)).toVar();

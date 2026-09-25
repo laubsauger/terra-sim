@@ -18,7 +18,7 @@ import { tWorldY } from '../render/shared';
 import { skyU } from '../render/sky';
 import { ATMO, HALF } from './atmoModel';
 import type { Clouds } from './clouds';
-import { tWind, tWindHF, fxMRT } from './atmoTsl';
+import { tWind, tWindHF, fxMRT, tCutHard } from './atmoTsl';
 
 type F = THREE.Node<'float'>;
 type V4 = THREE.Node<'vec4'>;
@@ -93,18 +93,19 @@ export function createRain(fields: GpuFields, clouds: Clouds, opts: { highQualit
   mat.positionNode = d0.xyz;
   mat.scaleNode = mix(vec2(0.0026, 0.055), vec2(0.011, 0.011), isSnow).mul(alive);
   const vSnow = varying(isSnow, 'vSnow');
+  const vDrop = varying(d0.xyz, 'vDropPos');
   const q = uv().mul(2).sub(1);
   const streak = smoothstep(1, 0.1, abs(q.x)).mul(smoothstep(1, 0.2, abs(q.y)));
   const flake = smoothstep(1, 0.3, q.length());
   const amb = mix(skyU.horizon, skyU.zenith, 0.6);
   const keyCol = mix(skyU.sunColor.mul(skyU.sunIntensity), vec3(0.6, 0.7, 1.0).mul(0.3), step(0.02, skyU.night));
   mat.colorNode = vec4(mix(amb.mul(vec3(0.85, 0.9, 1.05)).mul(1.1), amb.mul(0.9).add(keyCol.mul(0.25)), vSnow), 1);
-  mat.opacityNode = mix(streak.mul(0.42), flake.mul(0.9), vSnow);
+  mat.opacityNode = mix(streak.mul(0.42), flake.mul(0.9), vSnow).mul(clouds.occlusion(vDrop)).mul(tCutHard(vDrop));
   const drops = new THREE.Sprite(mat);
   drops.name = 'rain';
   drops.count = opts.highQuality ? ATMO.RAIN_HIGH : ATMO.RAIN_LOW;
   drops.frustumCulled = false;
-  drops.renderOrder = 5; // transparents ≥ 4 (after water, which writes depth); clouds (6) composite over
+  drops.renderOrder = 7; // after water (writes depth) and the cloud composite (6); depth-aware vs clouds
 
   // ---- wet-haze curtain: soft vertical sheets on a fixed jittered grid, shown under raining cloud ----
   const cmat = new THREE.SpriteNodeMaterial();
@@ -131,12 +132,13 @@ export function createRain(fields: GpuFields, clouds: Clouds, opts: { highQualit
   const streaks = sin(cq.x.mul(31).add(vC.w.mul(1.7))).mul(0.25).add(sin(cq.x.mul(13).add(vC.w)).mul(0.2)).add(0.75);
   const prof = smoothstep(0, 0.35, cq.x).mul(smoothstep(1, 0.65, cq.x)).mul(pow(cq.y, 0.7)).mul(smoothstep(0, 0.12, cq.y));
   cmat.colorNode = vec4(mix(skyU.horizon, skyU.zenith, 0.5).mul(0.55).add(vec3(0.05)), 1);
-  cmat.opacityNode = prof.mul(streaks).mul(vC.x).mul(0.22).mul(float(1).sub(pow(viewY, 1.5)));
+  const vCPos = varying(vec3(cxw, cground.add(h.mul(0.5)), czw), 'vCurtainPos');
+  cmat.opacityNode = prof.mul(streaks).mul(vC.x).mul(0.22).mul(float(1).sub(pow(viewY, 1.5))).mul(clouds.occlusion(vCPos)).mul(tCutHard(vCPos));
   const curtain = new THREE.Sprite(cmat);
   curtain.name = 'rainCurtain';
   curtain.count = CG * CG;
   curtain.frustumCulled = false;
-  curtain.renderOrder = 5;
+  curtain.renderOrder = 7;
 
   let hq = opts.highQuality;
   return {

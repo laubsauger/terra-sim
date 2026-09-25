@@ -1,6 +1,6 @@
 // TSL helpers shared by the atmosphere kernels and materials.
 import * as THREE from 'three/webgpu';
-import { uniform, float, vec2, vec3, vec4, cos, sin, min, floor, saturate, mix, step, select, mrt, fract, screenCoordinate, frameId } from 'three/tsl';
+import { uniform, float, vec2, vec3, vec4, cos, sin, min, floor, saturate, mix, step, select, mrt, fract, screenCoordinate, frameId, smoothstep } from 'three/tsl';
 import { NZ, CELL, Y_SEA_NOMINAL } from '../sim/layout';
 import { CLIMATE } from '../sim/climateModel';
 import { tWorldY } from '../render/space';
@@ -13,6 +13,13 @@ type V3 = THREE.Node<'vec3'>;
 
 /** Sea level (voxel y) seen by all atmosphere kernels; the atmosphere updates it from sim stats. */
 export const atmoSeaLevel = uniform(Y_SEA_NOMINAL);
+
+/** Slice inspection cut planes (world x, z): only x ≤ cut.x and z ≤ cut.y stay visible. HALF = no cut. */
+export const atmoCut = uniform(new THREE.Vector2(HALF, HALF));
+/** Soft cut mask for volumes (fades over ~2 cells). */
+export const tCutSoft = (p: V3): F => smoothstep(atmoCut.x, atmoCut.x.sub(0.032), p.x).mul(smoothstep(atmoCut.y, atmoCut.y.sub(0.032), p.z)) as F;
+/** Hard cut mask for particles. */
+export const tCutHard = (p: V3): F => step(p.x, atmoCut.x).mul(step(p.z, atmoCut.y)) as F;
 
 /** Height fraction of world y above sea level over WIND_H. */
 export const tWindHF = (y: F): F => saturate(y.sub(tWorldY(atmoSeaLevel)).div(ATMO.WIND_H));

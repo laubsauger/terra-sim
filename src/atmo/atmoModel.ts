@@ -22,6 +22,8 @@ export const ATMO = {
   /** Surface → top multiplier of the band wind, and the jet (world/s, +x, peaks at mid-latitudes). */
   WIND_TOP: 2.2,
   JET: 0.07,
+  /** Meridional turning of the band drift (fraction of |u|): diagonal, never grid-aligned. */
+  CURL: 0.55,
   /** Height fraction (of WIND_H) the cumulus layer steers with. */
   CLOUD_HF: 0.4,
 
@@ -50,7 +52,7 @@ export const ATMO = {
   /** Towers lean downwind: the height-dependent part of the wind is applied over this many seconds. */
   TILT_S: 5,
   /** Global coverage scale: noise survives where it exceeds 1 - blurredCover·COVERAGE (≤ ~35 % sky). */
-  COVERAGE: 0.48,
+  COVERAGE: 0.75,
   /** Coverage noise evolves through the 3D noise's third axis: cycles per ambTime period. */
   EVOLVE: 5,
   /** Cloud base above the tallest ground nearby (voxels) and absolute floor above sea (voxels). */
@@ -72,10 +74,10 @@ export const ATMO = {
   /** Detail noise tile (world); the base noise tile is 4× so wrapped offsets tile both. */
   DETAIL_TILE: 0.3,
   /** Raymarch iteration budget and the in-cloud step (world units). */
-  STEPS_HIGH: 72,
-  STEPS_LOW: 44,
-  STEP_IN_HIGH: 0.016,
-  STEP_IN_LOW: 0.026,
+  STEPS_HIGH: 56,
+  STEPS_LOW: 36,
+  STEP_IN_HIGH: 0.02,
+  STEP_IN_LOW: 0.03,
   /** Raymarch resolution (fraction of the drawing buffer) and history blend (weight of the new frame). */
   RES_HIGH: 0.5,
   RES_LOW: 0.25,
@@ -93,18 +95,19 @@ export const ATMO = {
   SHADOW_MAX: 0.62,
 
   // ---- plumes ----
-  PARTICLES_HIGH: 8192,
-  PARTICLES_LOW: 2560,
+  PARTICLES_HIGH: 6144,
+  PARTICLES_LOW: 2048,
   VENTS_MAX: 256,
   /** Lava hotter than this (°C) at a column counts as an active vent; full strength at VENT_T1. */
   VENT_T0: 850,
   VENT_T1: 1150,
   /** Water depth (voxel-y) that makes a hot vent a steam vent (lava.ts wetDepth = 0.05). */
   STEAM_WET: 0.05,
-  /** Particles per second per full-strength vent. */
+  /** Particles per second per full-strength vent; at most VENTS_EMIT vents' worth in total. */
   VENT_RATE: 34,
+  VENTS_EMIT: 14,
   /** Share of a vent's spawns that are lava-fountain spray / ballistic bombs (× vent heat, × heat² for bombs). */
-  FOUNTAIN_SHARE: 0.3,
+  FOUNTAIN_SHARE: 0.22,
   BOMB_SHARE: 0.08,
   /** Gravity for ejecta (world/s², diorama scale: a fast fountain reaches ~0.15 world). */
   GRAVITY: 1.1,
@@ -113,6 +116,8 @@ export const ATMO = {
   /** Volcanic lightning inside big ash columns: flashes/s at a full-heat vent at night (day × 0.15). */
   VOLC_FLASH_RATE: 0.4,
   BURSTS_MAX: 12,
+  /** Big eruption plumes rendered in the cloud volume (column + umbrella). */
+  PLUMES: 6,
   // hydrothermal vents on spreading ridges (young crust)
   /** crustAge (My) below which a column counts as a fresh rift / ridge axis. */
   HYDRO_AGE: 1,
@@ -139,8 +144,20 @@ export const ATMO = {
 
 /** Burst kinds (event-driven emitters); order is the GPU code. */
 export const BURST = { ASH: 0, DUST: 1, HAZE: 2, STEAM: 3, FOUNTAIN: 4, BOMB: 5, PDC: 6 } as const;
-/** Particle kinds: ash/steam/fountain spray/bombs from lava vents, pyroclastic currents, dust/haze from impacts and flood basalts, bubble/smoker (underwater) and steam wisps from hydrothermal vents. */
-export const PK = { ASH: 0, STEAM: 1, DUST: 2, HAZE: 3, BUBBLE: 4, SMOKER: 5, FOUNTAIN: 6, BOMB: 7, PDC: 8 } as const;
+/** Particle kinds: ash/steam/fountain spray/bombs/tephra jets from vents, pyroclastic currents, dust/haze from impacts and flood basalts, bubble/smoker/turbid clouds underwater, floating pumice. */
+export const PK = { ASH: 0, STEAM: 1, DUST: 2, HAZE: 3, BUBBLE: 4, SMOKER: 5, TURBID: 6, FOUNTAIN: 7, BOMB: 8, PDC: 9, PUMICE: 10, TEPHRA: 11, SLICK: 12 } as const;
+/** Underwater kinds (drawn before the water sheet): BUBBLE..TURBID. */
+export const PK_UNDER = [PK.BUBBLE, PK.TURBID] as const;
+
+/** Vent phase classes in the vent list (magma.ts PHASE for eruption episodes; 0 = plain hot lava pool). */
+export const VENT_PHASE = { POOL: 0, BUILD: 1, ACTIVE: 2, WANING: 3 } as const;
+/** Water depth classes at a vent (voxel-y): deep = underwater only, medium = steam, shallow = Surtseyan. */
+export const VENT_DEEP = 4, VENT_SHALLOW = 1;
+/** Decode a vent list entry's w (see plumes.ts vent kernel). */
+export function decodeVent(w: number): { heat: number; depth: number; phase: number; coast: number } {
+  const code = Math.floor(w / 2);
+  return { heat: w - code * 2, depth: (code % 64) / 4, phase: Math.floor(code / 64) % 4, coast: Math.floor(code / 256) };
+}
 
 /** World z → continuous cell coordinate (cell c centre at c), as space.ts worldToCell. */
 export const zToCell = (z: number) => (z + HALF) / CELL - 0.5;
@@ -163,20 +180,25 @@ export function windProfile(z: number, hf: number): { u: number; v: number } {
 /** Wind bands of the analytic model across the torus: centred on cells 0 (trades), 64 (westerlies), 128 (polar), 192 (westerlies). */
 export const BANDS = 4;
 /**
- * Band-average steering wind (world/s along +x) per band, quantised to DRIFT_TILE per ambTime period.
- * Clouds translate rigidly inside a band (no shear stretching them into streaks) and cross-fade
- * where two bands meet, like convergence zones.
+ * Band-average steering wind (world/s, x and z) per band, quantised to DRIFT_TILE per ambTime period.
+ * Clouds translate rigidly inside a band (no shear stretching them into streaks) and cross-fade where
+ * two bands meet, like convergence zones. The meridional part is the model's windV plus a turning
+ * component (CURL × |u|, alternating per band: trades toward the equator, westerlies poleward), so the
+ * drift is diagonal and never runs along the block's grid axes.
  */
-export function bandSpeeds(): number[] {
+export function bandSpeeds(): { u: number; v: number }[] {
   const q = ATMO.DRIFT_TILE / AMB_PERIOD;
   return Array.from({ length: BANDS }, (_, i) => {
-    let s = 0;
+    let su = 0, sv = 0;
     const n = 32;
     for (let k = 0; k < n; k++) {
       const cell = i * (NZ / BANDS) - NZ / (2 * BANDS) + ((k + 0.5) / n) * (NZ / BANDS);
-      s += windProfile((cell + 0.5) * CELL - HALF, ATMO.CLOUD_HF).u;
+      const w = windProfile((cell + 0.5) * CELL - HALF, ATMO.CLOUD_HF);
+      su += w.u; sv += w.v;
     }
-    return Math.round(s / n / q) * q;
+    su /= n; sv /= n;
+    const turn = ATMO.CURL * Math.abs(su) * (i % 2 === 0 ? 1 : -1);
+    return { u: Math.round(su / q) * q, v: Math.round((sv + turn) / q) * q };
   });
 }
 

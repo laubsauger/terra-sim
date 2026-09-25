@@ -8,6 +8,7 @@ import { colIdx, CELL } from '../sim/layout';
 import { pickColumn } from './probe';
 import { cellToWorld, voxelToWorldY } from '../render/space';
 import { showToast } from './savePanel';
+import type { Fx } from '../fx/fx';
 
 export type GodTool = 'inspect' | 'uplift' | 'subside' | 'volcano' | 'meteor' | 'storm' | 'split';
 
@@ -18,7 +19,7 @@ const TOOL_LABEL: Record<GodTool, string> = {
   inspect: 'inspect', uplift: 'uplift', subside: 'subside', volcano: 'volcano', meteor: 'meteor', storm: 'rain storm', split: 'split plate',
 };
 
-export function createGodPanel(folder: FolderApi, sim: Sim, renderer: THREE.WebGPURenderer, camera: THREE.Camera, fields: GpuFields, scene: THREE.Scene) {
+export function createGodPanel(folder: FolderApi, sim: Sim, renderer: THREE.WebGPURenderer, camera: THREE.Camera, fields: GpuFields, scene: THREE.Scene, fx?: Pick<Fx, 'meteorStrike'>) {
   const state = { tool: 'inspect' as GodTool, radius: 12, strength: 12 };
   const toolBinding = folder.addBinding(state, 'tool', {
     options: { inspect: 'inspect', 'uplift ▲': 'uplift', 'subside ▼': 'subside', volcano: 'volcano', meteor: 'meteor', 'rain storm': 'storm', 'split plate': 'split' },
@@ -63,7 +64,15 @@ export function createGodPanel(folder: FolderApi, sim: Sim, renderer: THREE.WebG
     switch (state.tool) {
       case 'uplift': sim.events.enqueue({ ...base, kind: 'uplift', magnitude: state.strength }); break;
       case 'subside': sim.events.enqueue({ ...base, kind: 'uplift', magnitude: -state.strength }); break;
-      case 'meteor': sim.events.enqueue({ ...base, kind: 'meteor', magnitude: state.strength / 12 }); break;
+      case 'meteor': {
+        // cinematic strike: streak crosses the view, the crater lands on the flash (sim event in onImpact)
+        const mag = state.strength / 12;
+        const view = Math.atan2(-camera.position.z, -camera.position.x);
+        const dir = view + (Math.random() < 0.5 ? 1 : -1) * Math.PI / 2 + (Math.random() - 0.5) * 0.6;
+        const enqueue = () => sim.events.enqueue({ ...base, kind: 'meteor', magnitude: mag, dir });
+        if (fx) void fx.meteorStrike(hit.x, hit.z, dir, mag, enqueue, state.radius); else enqueue();
+        break;
+      }
       case 'storm': sim.events.enqueue({ ...base, kind: 'storm', magnitude: Math.min(1, state.strength / 20) }); break;
       case 'volcano': sim.events.enqueue({ ...base, kind: 'volcano', magnitude: state.strength / 12 }); break;
       case 'split': {

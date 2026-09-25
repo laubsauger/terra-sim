@@ -221,6 +221,7 @@ async function main() {
     setQuality: (v: boolean) => { atmo.setHighQuality(v); look?.setHighQuality(v); },
     setTime: (tod: number) => look?.setTimeOfDay(tod),
     stats: () => ({ ...atmo.stats }),
+    setCut: (x: number, z: number) => atmo.setCut(x, z),
     shadowParams: () => ({ key: cloudShadowU.keyDir.value.toArray(), planeY: cloudShadowU.planeY.value, on: cloudShadowU.on.value }),
     colWorld: (x: number, z: number) => [cellToWorld(x), cellToWorld(z)],
     NCOL, NX,

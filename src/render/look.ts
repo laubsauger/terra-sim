@@ -15,7 +15,7 @@ import { createWater } from './water';
 import { createBackdrop, installAtmosphere, type Backdrop } from './backdrop';
 import { createPost, type Post, type PostFeatures } from './post';
 import { GOLDEN_HOUR } from './sky';
-import { setAmbTime, voxelToWorldY, HALF } from './space';
+import { setAmbTime, voxelToWorldY, HALF, setRenderMotion, type RenderMotion } from './space';
 import { NY } from '../sim/layout';
 
 export interface LookOptions {
@@ -26,6 +26,8 @@ export interface LookOptions {
   dayLength?: number;
   /** Override individual post passes (perf triage); defaults follow highQuality. */
   postFeatures?: Partial<PostFeatures>;
+  /** Plate motion source (Sim.tectonics): display follows plates continuously instead of jumping. */
+  motion?: RenderMotion;
   /** Override the tone mapping operator (look-dev A/B). */
   toneMapping?: THREE.ToneMapping;
 }
@@ -61,6 +63,7 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
   const water = createWater(fields);
   scene.add(backdrop.object, terrain.object, sides.object, water.object);
 
+  if (opts.motion) setRenderMotion(fields, opts.motion);
   const post = createPost(renderer, scene, camera, { highQuality: hq, features: opts.postFeatures, toneMapping: opts.toneMapping });
   stage.setRender(() => post.render());
 

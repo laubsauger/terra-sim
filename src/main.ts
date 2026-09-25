@@ -17,6 +17,7 @@ import { createLook } from './render/look';
 import { createLife } from './life/life';
 import { createAtmosphere } from './atmo/atmosphere';
 import { createSlice } from './slice/slice';
+import { createFx } from './fx/fx';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
@@ -92,14 +93,20 @@ async function main() {
   const budget = new TickBudget(5);
   let ticksSinceSample = 0;
   const hud = createPerfHud(stage.renderer, () => fields.bytes(), (ms) => { budget.observe(ms, ticksSinceSample); ticksSinceSample = 0; });
-  const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields, stage.scene);
+  const fx = createFx(fields, stage.renderer, stage.scene, stage.camera, sim, {
+    highQuality: params.get('highQuality') as boolean,
+    controls: stage.controls,
+    speed: () => clock.effectiveSpeed,
+  });
+  params.onChange((k, v) => { if (k === 'highQuality') fx.setHighQuality(v as boolean); });
+  const god = createGodPanel(panel.folders.God, sim, stage.renderer, stage.camera, fields, stage.scene, fx);
   const probe = createProbeUI(stage.renderer, stage.camera, fields, god.isInspect);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   // overlays (T47) + Tectonics layer (key T / 'Plates' pill): per-frame prep via stage.onFrame; colours pre-compensate
   // the post exposure + tone map; life hidden and clouds faded while a data overlay is on
   const overlays = createOverlays({ fields, scene: stage.scene, renderer: stage.renderer, camera: stage.camera, source: simSource(sim),
     exposure: () => look.post.u.exposure.value, onFrame: (cb) => stage.onFrame(cb), declutter: [life.object], clouds: atmo,
-    ambient: () => params.get('ambientMode') as boolean });
+    ambient: () => params.get('ambientMode') as boolean, cut: () => slice.cut });
   createOverlayPanel(panel.folders.Overlays, overlays);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
   const audio = new Ambience();
@@ -131,6 +138,7 @@ async function main() {
     life.setSeaLevel(sim.stats?.seaLevel ?? 76);
     if (ran > 0) life.invalidate();
     life.update(dt, clock.ambTime);
+    atmo.setCut(slice.cut.x, slice.cut.z);
     atmo.update(dt, clock.ambTime, { events: sim.events.log, seaLevel: sim.stats?.seaLevel });
     slice.update(dt);
     saves.frame();
@@ -141,6 +149,7 @@ async function main() {
     statsPane.update();
     ambientCam.notice(sim.events.log, () => sim.stats?.seaLevel ?? 76);
     ambientCam.update(dt);
+    fx.update(dt, clock.ambTime);
     // audio levels from sim state only (V15)
     const log = sim.events.log;
     for (; seenEvents < log.length; seenEvents++) if (log[seenEvents]!.kind !== 'iceAge') volcanic = Math.min(1, volcanic + 0.5);
@@ -154,7 +163,7 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo, slice,
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo, slice, fx,
     save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }

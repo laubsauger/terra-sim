@@ -10,15 +10,19 @@ import {
   viewportSharedTexture, viewportDepthTexture, perspectiveDepthToViewZ, cameraNear, cameraFar, screenUV, color,
 } from 'three/tsl';
 import type { GpuFields } from '../core/gpu';
-import { tWorldY, tWorldToCell, columnSampler, ambTime } from './space';
+import { tWorldY, tWorldToCell, columnSampler, ambTime, heatSampler, ridgeGlow } from './space';
 import { viewDirWorld } from './space';
 import { createColumnGrid } from './terrain';
 import { lookTextures } from './textures';
 import { skyColor, skyU } from './sky';
+import { cloudShadowAt } from '../atmo/atmosphere';
 
 type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
 type V3 = THREE.Node<'vec3'>;
+
+/** Underwater spreading-ridge halo strength (0 = off). */
+export const RIDGE_HALO = 0;
 
 /** Absorption per world unit (red goes first): shallow turquoise → deep sapphire. */
 export const WATER_SIGMA = new THREE.Vector3(13, 1.9, 1.05);
@@ -70,7 +74,8 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
     return S.level(c).level.sub(S.height(c));
   })(), 'vWaterDepth');
   // Fraction of wet corner columns: < 1 only within a cell of dry land → the real shoreline.
-  const wetVary = varying(Fn(() => S.level(S.corners(gu, gv)).wet)(), 'vWaterWet');
+  // Share of dry-land corner columns: > 0 only within a cell of the true coastline.
+  const dryVary = varying(Fn(() => S.level(S.corners(gu, gv)).dry)(), 'vWaterDry');
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0, transparent: true, depthWrite: true });
   const swellV = varying(swell(positionGeometry.xz, depthVary), 'vSwell'); // (h, dh/dx, dh/dz)
@@ -85,7 +90,9 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   // Calm the normals with distance and at grazing angles (where they would only alias into noise).
   const calm = float(1).div(positionView.length().mul(0.12).add(1))
     .mul(smoothstep(0.02, 0.35, abs(dot(viewDirWorld, vec3(0, 1, 0)))));
-  const slope = wA.rg.sub(0.5).mul(0.13).add(wB.rg.sub(0.5).mul(0.07)).mul(calm).toVar('wSlope');
+  // Lagoons are calm: ripple normals fade out over shallow flats (no sparkle carpet).
+  const shallowCalm = mix(float(0.3), float(1), smoothstep(0.3, 4.0, depthVary));
+  const slope = wA.rg.sub(0.5).mul(0.13).add(wB.rg.sub(0.5).mul(0.07)).mul(calm).mul(shallowCalm).toVar('wSlope');
   const nW = normalize(vec3(slope.x.add(swellV.y).negate(), 1, slope.y.add(swellV.z).negate())).toVar('wN');
 
   const d = depthVary.max(0);
@@ -114,7 +121,7 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   // Swash: the foam band surges up the beach and retreats (two out-of-phase sets, noise-staggered).
   const surge = sin(t.mul(0.9).add(shoreN.mul(5))).mul(0.5).add(0.5).mul(sin(t.mul(0.37).add(1.3)).mul(0.25).add(0.75));
   // Foam hugs the shoreline (next to dry columns), not every thin sheet over a flat.
-  const nearLand = float(1).sub(smoothstep(0.55, 0.98, wetVary));
+  const nearLand = smoothstep(0.02, 0.3, dryVary);
   const shore = float(1).sub(smoothstep(0.0, mix(0.35, 1.1, surge), d.add(shoreN.mul(0.8)).sub(wB.b.mul(0.3)))).mul(nearLand);
   const foam = saturate(shore.mul(0.95)).toVar('wFoam');
 
@@ -123,12 +130,27 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   const lum = float(1).sub(T.g); // how much of the column scatters instead of transmitting
   const body = mix(color(WATER_SHALLOW), color(WATER_SCATTER), smoothstep(0.05, 0.45, thick));
   const scatter = body.mul(lum).mul(float(1).sub(fres));
-  mat.colorNode = mix(scatter, vec3(0.92, 0.95, 0.97), foam);
   // A little self-lit body colour keeps the sea luminous on the shadow side and at dusk.
   const glow = body.mul(lum).mul(skyU.sunIntensity.mul(0.03).add(0.02));
-  mat.emissiveNode = refr.mul(T).mul(float(1).sub(fres)).add(refl.mul(fres).mul(0.8)).add(glow).mul(float(1).sub(foam));
+  // Glowing seam halo in the water column above young crust (spreading ridges): stylised, mostly
+  // unabsorbed, soft (bilinear age, no crack pattern here), so the ridge network reads through the sea.
+  const heat = heatSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
+  const seamN = texture(tex.detail, p.xz.mul(1.7).add(vec2(0, t.mul(0.0025)))).a; // same crack field as the seabed
+  const seamW = texture(tex.detail, p.xz.mul(1.1)).g;
+  const rg = ridgeGlow(heat.x, p.xz, seamW, seamN);
+  // Replaces (not adds to) the cyan body where it glows: added on top it would sum to peach-white.
+  // Slightly dimmed and tinted with depth, but it still reads red.
+  const depthFade = exp(d.mul(-0.02)).mul(0.5).add(0.5);
+  const haloK = saturate(rg.x.add(rg.y).mul(depthFade)).toVar('wHalo');
+  const haloCol = mix(vec3(0.55, 0.08, 0.03), vec3(1.0, 0.26, 0.05), saturate(rg.x.mul(1.5))).mul(1.6).mul(depthFade);
+  const waterEm = refr.mul(T).mul(float(1).sub(fres)).add(refl.mul(fres).mul(0.8)).add(glow);
+  // Underwater ridge halo is OFF (RIDGE_HALO = 0): it did not read convincingly through the sea.
+  const haloOn = haloK.mul(RIDGE_HALO);
+  mat.emissiveNode = mix(waterEm, haloCol, haloOn.mul(0.85)).mul(float(1).sub(foam));
+  mat.colorNode = mix(scatter, vec3(0.92, 0.95, 0.97), foam).mul(float(1).sub(haloOn.mul(0.85)));
   mat.roughnessNode = mix(float(0.13), float(0.85), foam); // not glassier: the sun glint would blow out into glare
   mat.normalNode = transformNormalToView(nW);
+  mat.receivedShadowNode = Fn(([s]: [F]) => s.mul(cloudShadowAt(positionWorld))) as unknown as () => THREE.Node;
   // Where the flat level is below the land, the depth test already hides it; drop it outright.
   mat.maskNode = depthVary.greaterThan(-0.05);
 

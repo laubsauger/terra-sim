@@ -22,20 +22,22 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, If, Return, float, int, uint, vec2, vec3, vec4, uniform, uniformArray, instanceIndex, instancedArray,
   hash, sin, cos, exp, mix, smoothstep, saturate, max, min, floor, abs, length, normalize, dot, pow, sqrt,
-  atomicAdd, atomicLoad, atomicStore, uv, varying, cameraViewMatrix, step, round,
+  atomicAdd, atomicLoad, atomicStore, uv, varying, cameraViewMatrix, cameraPosition, step, round, atan, texture3D,
 } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { ReaderKernel } from '../core/gpu';
-import { NX, CELL } from '../sim/layout';
+import { NX, CELL, VOXEL_H } from '../sim/layout';
 import { tColIdx, iMin } from '../sim/tslLayout';
-import { tLavaTemp } from '../sim/magmaTsl';
-import { tWorldY } from '../render/shared';
+import { tLavaTemp, tLavaDepth } from '../sim/magmaTsl';
+import { tWorldY, vertEx } from '../render/shared';
 import { skyU } from '../render/sky';
-import { ATMO, HALF, PK, BURST } from './atmoModel';
+import { ATMO, HALF, PK, BURST, VENT_DEEP, VENT_SHALLOW } from './atmoModel';
 import { cloudShadowU, type Clouds } from './clouds';
-import { atmoSeaLevel, tWind, tWindHF, tKeyColor, fxMRT } from './atmoTsl';
+import { cloudNoiseTexture } from './noise3d';
+import { atmoSeaLevel, tWind, tWindHF, tKeyColor, fxMRT, tCutHard } from './atmoTsl';
 
 type F = THREE.Node<'float'>;
+type V3 = THREE.Node<'vec3'>;
 type V4 = THREE.Node<'vec4'>;
 
 const S = ATMO.SUM;
@@ -56,7 +58,7 @@ export interface Plumes {
   /** Underwater particles: bubbles, black smokers (drawn before the water). */
   under: THREE.Sprite;
   flash: THREE.Sprite;
-  /** Particle state: P0 = (pos, age), P1 = (vel, life), P2 = (kind, seed, heat | strength | ceiling y, origin y). */
+  /** Particle state: P0 = (pos, age), P1 = (vel, life), P2 = (kind PK, seed, heat | strength | ceiling y, origin y). */
   P0: StorageNode<'vec4'>; P1: StorageNode<'vec4'>; P2: StorageNode<'vec4'>;
   /** Lava vents [0, VENTS_MAX): (x, y, z, heat + 2·steamQ); hydrothermal [VENTS_MAX, +HYDRO_MAX): (x, floor y, z, -(1 + water depth)). */
   vents: StorageNode<'vec4'>;
@@ -80,11 +82,12 @@ export interface Plumes {
   dispose(): void;
 }
 
-const BURST_RATE: Record<number, number> = { [BURST.ASH]: 260, [BURST.DUST]: 900, [BURST.HAZE]: 70, [BURST.STEAM]: 120 };
+const BURST_RATE: Record<number, number> = { [BURST.ASH]: 260, [BURST.DUST]: 900, [BURST.HAZE]: 70, [BURST.STEAM]: 160, [BURST.FOUNTAIN]: 170, [BURST.BOMB]: 22, [BURST.PDC]: 110 };
 
 export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQuality: boolean; renderer: THREE.WebGPURenderer }): Plumes {
   const N = ATMO.PARTICLES_HIGH;
   const lava = fields.cur<'uvec2'>('lava'), water = fields.cur('water'), surfY = fields.cur('surfY');
+  const volc = fields.cur<'vec4'>('volcano');
   const mk = (n: number, name: string) => {
     const b = instancedArray(n, 'vec4') as unknown as StorageNode<'vec4'>;
     b.setName(name);
@@ -120,32 +123,43 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     If(instanceIndex.greaterThanEqual(uint(S * S)), () => { Return(); });
     const sx = int(instanceIndex.mod(uint(S))).mul(STEP), sz = int(instanceIndex.div(uint(S))).mul(STEP);
     const best = float(0).toVar(), bx = int(0).toVar(), bz = int(0).toVar(), by = float(0).toVar(), wet = float(0).toVar();
+    const bw = float(0).toVar(), bpc = float(0).toVar();
     const hkey = float(2).toVar(), hx = int(0).toVar(), hz = int(0).toVar(), hy = float(0).toVar(), hw = float(0).toVar();
     for (let dz = 0; dz < STEP; dz++) for (let dx = 0; dx < STEP; dx++) {
       const cx = sx.add(dx), cz = sz.add(dz);
       const c = tColIdx(cx, cz);
       const lv = lava.element(c).toVar();
-      const m = float(lv.x);
-      const heat = smoothstep(ATMO.VENT_T0, ATMO.VENT_T1, tLavaTemp(lv.y)).mul(min(m.div(255).mul(3).add(0.25), 1)).mul(step(0.5, m));
-      const wd = (water.element(c) as unknown as F).toVar();
+      const depth = tLavaDepth(lv).toVar(); // magmaTsl accessors only: the packing is theirs to change
+      const wd = max(water.element(c) as unknown as F, 0).toVar();
+      const vo = volc.element(c).toVar();
+      // eruption episode at a vent column (magma.ts 'volcano': x activity, y phase 1 build, 2 active, 3 waning)
+      const inEpisode = step(0.5, vo.y).mul(step(vo.y, 3.5));
+      const erupt = vo.x.mul(inEpisode);
+      // plain hot lava pools only degas gently (thin fissure films don't count)
+      const pool = smoothstep(ATMO.VENT_T0, ATMO.VENT_T1, tLavaTemp(lv.y)).mul(smoothstep(0.04, 0.5, depth)).mul(0.35);
+      const heat = max(erupt, pool);
       const sy = (surfY.element(c) as unknown as F).toVar();
       wet.addAssign(step(ATMO.STEAM_WET, wd));
       If(heat.greaterThan(best), () => {
-        best.assign(heat); bx.assign(cx); bz.assign(cz);
-        by.assign(sy.add(m.div(255)));
+        best.assign(heat); bx.assign(cx); bz.assign(cz); bw.assign(wd);
+        bpc.assign(mix(float(0), round(vo.y), step(pool, erupt)));
+        by.assign(max(sy.add(depth), sy.add(wd)));
       });
       // hydrothermal candidate: young crust, lowest per-column hash wins (deterministic)
       const key = hash(float(c).mul(0.917).add(41.3));
       If((crustAge.element(c) as unknown as F).lessThan(ATMO.HYDRO_AGE).and(key.lessThan(hkey)), () => {
-        hkey.assign(key); hx.assign(cx); hz.assign(cz); hy.assign(sy); hw.assign(max(wd, 0));
+        hkey.assign(key); hx.assign(cx); hz.assign(cz); hy.assign(sy); hw.assign(wd);
       });
     }
     If(best.greaterThan(0.02), () => {
       const slot = atomicAdd(ctr.element(CTR_VENTS), int(1));
       If(slot.lessThan(int(ATMO.VENTS_MAX)), () => {
-        const steamQ = round(wet.div(STEP * STEP).mul(7));
+        // w = heat + 2·(water depth code + 64·phase class + 256·coast): see decodeVent
+        const dCode = min(round(bw.mul(4)), 63);
+        const coast = round(wet.div(STEP * STEP).mul(3));
         vents.element(uint(slot)).assign(vec4(
-          float(bx).add(0.5).mul(CELL).sub(HALF), tWorldY(by), float(bz).add(0.5).mul(CELL).sub(HALF), best.add(steamQ.mul(2))));
+          float(bx).add(0.5).mul(CELL).sub(HALF), tWorldY(by), float(bz).add(0.5).mul(CELL).sub(HALF),
+          best.min(0.999).add(dCode.add(bpc.mul(64)).add(coast.mul(256)).mul(2))));
       });
     }).ElseIf(hkey.lessThan(1.5).and(hash(float(instanceIndex).mul(1.37).add(7.1)).lessThan(ATMO.HYDRO_FRAC)), () => {
       const slot = atomicAdd(ctr.element(CTR_HVENTS), int(1));
@@ -160,32 +174,126 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
   const ventK = new ReaderKernel<'float'>(fields, 'crustAge', buildVentK);
 
   // ---- particles ----
+  const G = ATMO.GRAVITY;
+  const groundAt = (x: F, z: F): F => tWorldY((clouds.sampleSummary(x, z) as V4).w);
   const buildPart = (count: number) => Fn(() => {
     const id = instanceIndex;
     If(id.greaterThanEqual(uint(count)), () => { Return(); });
     const p0 = P0.element(id).toVar(), p1 = P1.element(id).toVar(), p2 = P2.element(id).toVar();
     const fid = float(id);
     const rnd = (salt: number) => hash(fid.mul(0.7071).add(u.frame.mul(13.37)).add(salt * 17.13));
+    /**
+     * One volcanic particle of `kind` from origin o (vent surface), vent heat 0..1, magnitude and spread
+     * radius. Shared by lava vents and eruption bursts so both look the same.
+     */
+    const emit = (kind: F, o: V3, heat: F, mag: F, rad: F, surf: F) => {
+      const a = rnd(12).mul(TAU), rr = rnd(13);
+      const dir = vec2(cos(a), sin(a));
+      const seed = rnd(16);
+      const is = (k: number) => abs(kind.sub(k)).lessThan(0.5);
+      If(is(PK.ASH), () => { // ASH: billowing column from a slim crater
+        const j = dir.mul(rr.mul(rad).mul(0.3).add(0.003));
+        p0.assign(vec4(o.x.add(j.x), o.y.add(0.006), o.z.add(j.y), 0));
+        p1.assign(vec4(j.x.mul(0.8), rnd(14).mul(0.06).add(heat.mul(0.08)).add(0.1).mul(mag), j.y.mul(0.8), rnd(15).mul(7).add(11)));
+        p2.assign(vec4(float(PK.ASH), seed, heat.mul(mag).min(1.3), o.y));
+      }).ElseIf(is(PK.STEAM), () => { // STEAM: blasts / boiling sea / degassing (heat = strength)
+        const j = dir.mul(rr.mul(rad).mul(0.6).add(0.004));
+        const out = dir.mul(rnd(14).mul(0.06).mul(heat));
+        p0.assign(vec4(o.x.add(j.x), o.y.add(0.006), o.z.add(j.y), 0));
+        // weak sources (degassing) give short low wisps; strong ones (sea blasts) tall billows
+        p1.assign(vec4(out.x, rnd(15).mul(0.16).mul(heat).add(0.05), out.y, rnd(17).mul(1.6).add(2).mul(heat.mul(0.8).add(0.35).min(1))));
+        p2.assign(vec4(float(PK.STEAM), seed, heat.max(0.35), o.y));
+      }).ElseIf(is(PK.BUBBLE), () => { // BUBBLE: from a submarine vent up to the surface
+        const j = dir.mul(rr.mul(0.02));
+        const up = rnd(14).mul(0.05).add(0.08);
+        p0.assign(vec4(o.x.add(j.x), o.y.add(0.003), o.z.add(j.y), 0));
+        p1.assign(vec4(0, up, 0, surf.sub(o.y).div(up).mul(1.2).add(0.1)));
+        p2.assign(vec4(float(PK.BUBBLE), seed, surf, o.y));
+      }).ElseIf(is(PK.TURBID), () => { // TURBID: dark glowing cloud billowing off a deep vent, dies below the surface
+        const j = dir.mul(rr.mul(0.025));
+        const up = rnd(14).mul(0.015).add(0.025);
+        p0.assign(vec4(o.x.add(j.x), o.y.add(0.003), o.z.add(j.y), 0));
+        p1.assign(vec4(dir.x.mul(0.01), up, dir.y.mul(0.01), min(surf.sub(o.y).mul(0.7).div(up), 7)));
+        p2.assign(vec4(float(PK.TURBID), seed, surf, o.y));
+      }).ElseIf(is(PK.FOUNTAIN), () => { // FOUNTAIN: bright spray arcing just above the vent
+        const out = dir.mul(rr.mul(0.18).add(0.04)).mul(sqrt(heat));
+        p0.assign(vec4(o.x.add(dir.x.mul(0.004)), o.y.add(0.004), o.z.add(dir.y.mul(0.004)), 0));
+        p1.assign(vec4(out.x, rnd(14).mul(0.22).add(0.2).mul(sqrt(heat)).mul(mag.min(1.2)), out.y, 3));
+        p2.assign(vec4(float(PK.FOUNTAIN), seed, heat, o.y));
+      }).ElseIf(is(PK.BOMB), () => { // BOMB: glowing lava bomb on a ballistic arc
+        const out = dir.mul(rr.mul(0.24).add(0.1)).mul(mag.min(1.2));
+        p0.assign(vec4(o.x, o.y.add(0.01), o.z, 0));
+        p1.assign(vec4(out.x, rnd(14).mul(0.25).add(0.35).mul(mag.min(1.2)), out.y, 6));
+        p2.assign(vec4(float(PK.BOMB), seed, heat, o.y));
+      }).ElseIf(is(PK.TEPHRA), () => { // TEPHRA: black cock's-tail jets fanning out of a shallow sea vent
+        const out = dir.mul(rr.mul(0.22).add(0.06)).mul(heat.add(0.3).min(1));
+        p0.assign(vec4(o.x, o.y.add(0.004), o.z, 0));
+        p1.assign(vec4(out.x, rnd(14).mul(0.3).add(0.3).mul(heat.add(0.3).min(1)), out.y, 4));
+        p2.assign(vec4(float(PK.TEPHRA), seed, heat, o.y));
+      }).ElseIf(is(PK.SLICK), () => { // SLICK: milky discoloured water spreading on the surface above a submarine vent
+        const d = dir.mul(rr.mul(0.04));
+        p0.assign(vec4(o.x.add(d.x), surf.add(0.002), o.z.add(d.y), 0));
+        p1.assign(vec4(0, 0, 0, rnd(15).mul(8).add(12)));
+        p2.assign(vec4(float(PK.SLICK), seed, heat, surf));
+      }).ElseIf(is(PK.PUMICE), () => { // PUMICE: specks floating on the sea above a submarine vent
+        const d = dir.mul(sqrt(rr).mul(0.12));
+        p0.assign(vec4(o.x.add(d.x), surf.add(0.001), o.z.add(d.y), 0));
+        p1.assign(vec4(0, 0, 0, rnd(15).mul(10).add(12)));
+        p2.assign(vec4(float(PK.PUMICE), seed, surf, surf));
+      }).Else(() => { // PDC: pyroclastic density current, starts at the crater rim, rolls down the flanks
+        const r0 = rr.mul(0.02).add(0.01);
+        p0.assign(vec4(o.x.add(dir.x.mul(r0)), o.y.add(0.01), o.z.add(dir.y.mul(r0)), 0));
+        const out = dir.mul(rnd(14).mul(0.08).add(0.05)).mul(mag);
+        p1.assign(vec4(out.x, 0, out.y, rnd(15).mul(3).add(4)));
+        p2.assign(vec4(float(PK.PDC), seed, heat, o.y));
+      });
+    };
     If(p0.w.greaterThanEqual(p1.w), () => {
       const spawned = float(0).toVar();
-      // lava vents
+      // lava vents, by eruption phase and water depth at the vent:
+      //   dry:    active → ash column, fountain spray, bombs (steam blasts where lava meets the sea);
+      //           build-up / plain pools → degassing steam wisps + a little ash; waning → ash only
+      //   shallow (≤ 1 voxel, Surtseyan): black tephra jets, white steam billows, some ash
+      //   medium (1-4 voxels): white steam puffs boiling off the sea surface, no ash column
+      //   deep (> 4 voxels): nothing in the air; a dark turbid glowing cloud + bubbles under water,
+      //           pumice specks floating on the surface above
       const nV = iMin(atomicLoad(ctr.element(CTR_VENTS)) as unknown as THREE.Node<'int'>, int(ATMO.VENTS_MAX)).toVar();
       If(nV.greaterThan(int(0)), () => {
         const vi = iMin(int(floor(rnd(1).mul(float(nV)))), nV.sub(1));
         const v = vents.element(uint(vi)).toVar();
         const code = floor(v.w.mul(0.5));
-        const heat = v.w.sub(code.mul(2)), steam = code.div(7);
-        If(rnd(2).lessThan(heat), () => {
-          const allowed = int(floor(float(nV).mul(u.ventBudget).add(u.dither)));
+        const heat = v.w.sub(code.mul(2));
+        const wdep = code.mod(64).div(4), pc = floor(code.div(64)).mod(4), coast = floor(code.div(256)).div(3);
+        // plain lava pools only puff now and then; eruption episodes get the budget
+        If(rnd(2).lessThan(mix(heat.mul(0.2), heat.add(0.15), step(0.5, pc))), () => {
+          // strict budget: beyond VENTS_EMIT vents the same total rate is shared (big eruptions stay readable)
+          const allowed = int(floor(min(float(nV), float(ATMO.VENTS_EMIT)).mul(u.ventBudget).add(u.dither)));
           const slot = atomicAdd(ctr.element(CTR_VSPAWN), int(1));
           If(slot.lessThan(allowed), () => {
             spawned.assign(1);
-            const jx = rnd(4).sub(0.5).mul(0.035), jz = rnd(5).sub(0.5).mul(0.035);
-            const isSteam = step(rnd(6), steam.mul(0.9));
-            p0.assign(vec4(v.x.add(jx), v.y.add(0.008), v.z.add(jz), 0));
-            const up = mix(rnd(7).mul(0.05).add(heat.mul(0.06)).add(0.1), float(0.06), isSteam);
-            p1.assign(vec4(jx.mul(0.8), up, jz.mul(0.8), mix(rnd(8).mul(7).add(10), rnd(8).mul(1.5).add(2), isSteam)));
-            p2.assign(vec4(mix(float(PK.ASH), float(PK.STEAM), isSteam), rnd(10), heat, v.y));
+            const r = rnd(6), r2 = rnd(9);
+            const kind = float(PK.ASH).toVar();
+            const origin = v.xyz.toVar();
+            const floorY = v.y.sub(wdep.mul(VOXEL_H).mul(vertEx));
+            const active = step(1.5, pc).mul(step(pc, 2.5));
+            If(wdep.greaterThan(VENT_DEEP), () => { // deep submarine: turbid cloud + bubbles below, slick + pumice on top
+              If(r.lessThan(0.07), () => { kind.assign(PK.PUMICE); })
+                .ElseIf(r.lessThan(0.16), () => { kind.assign(PK.SLICK); })
+                .ElseIf(r.lessThan(0.5), () => { kind.assign(PK.BUBBLE); origin.y.assign(floorY); })
+                .Else(() => { kind.assign(PK.TURBID); origin.y.assign(floorY); });
+            }).ElseIf(wdep.greaterThan(VENT_SHALLOW), () => { // boiling sea: steam, a discoloured patch, pumice
+              If(r.lessThan(0.12), () => { kind.assign(PK.SLICK); }).ElseIf(r.lessThan(0.18), () => { kind.assign(PK.PUMICE); }).Else(() => { kind.assign(PK.STEAM); });
+            })
+              .ElseIf(wdep.greaterThan(ATMO.STEAM_WET), () => { // Surtseyan: cock's-tail tephra jets + steam billows
+                If(r.lessThan(0.4), () => { kind.assign(PK.TEPHRA); }).ElseIf(r.lessThan(0.8), () => { kind.assign(PK.STEAM); });
+              })
+              .Else(() => {
+                If(r.lessThan(coast.mul(0.7)), () => { kind.assign(PK.STEAM); }) // lava hitting the sea
+                  .ElseIf(pc.lessThan(1.5), () => { kind.assign(PK.STEAM); }) // pools / build-up: degassing wisps only
+                  .ElseIf(active.greaterThan(0.5).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE))), () => { kind.assign(PK.FOUNTAIN); })
+                  .ElseIf(active.greaterThan(0.5).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE).add(heat.mul(heat).mul(ATMO.BOMB_SHARE)))).and(heat.greaterThan(0.4)), () => { kind.assign(PK.BOMB); });
+              });
+            emit(kind, origin, heat, float(1), float(0.03), v.y);
           });
         });
       });
@@ -226,33 +334,27 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
           const slot = atomicAdd(ctr.element(uint(bi.add(CTR_BURST))), int(1));
           If(float(slot).lessThan(allow), () => {
             const A = (bA.element(bi) as unknown as V4).toVar(), B = (bB.element(bi) as unknown as V4).toVar();
-            A.y.assign(max(A.y, tWorldY((clouds.sampleSummary(A.x, A.z) as V4).w)));
+            A.y.assign(max(A.y, groundAt(A.x, A.z)));
             const kind = A.w, mag = B.z, rad = B.w;
             const a = rnd(12).mul(TAU), rr = rnd(13);
             const dir = vec2(cos(a), sin(a));
-            If(kind.lessThan(0.5), () => { // ASH eruption column
-              const j = dir.mul(rr.mul(rad).mul(0.25));
-              p0.assign(vec4(A.x.add(j.x), A.y.add(0.01), A.z.add(j.y), 0));
-              p1.assign(vec4(j.x.mul(0.6), rnd(14).mul(0.12).add(0.28).mul(mag), j.y.mul(0.6), rnd(15).mul(8).add(12)));
-              p2.assign(vec4(float(PK.ASH), rnd(16), mag.min(1.2), A.y));
-            }).ElseIf(kind.lessThan(1.5), () => { // DUST ring (meteor)
-              const ring = rad.mul(rr.mul(0.3).add(0.15));
-              const col = step(rnd(17), 0.25); // a quarter rise as the impact column
-              p0.assign(vec4(A.x.add(dir.x.mul(ring)), A.y.add(0.01), A.z.add(dir.y.mul(ring)), 0));
-              const out = rnd(14).mul(0.5).add(0.35).mul(mag).mul(float(1).sub(col.mul(0.8)));
-              p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.25).add(0.3), col), dir.y.mul(out), rnd(15).mul(4).add(3.5)));
-              p2.assign(vec4(float(PK.DUST), rnd(16), 0.8, A.y));
-            }).ElseIf(kind.lessThan(2.5), () => { // HAZE (flood basalt)
-              const d = dir.mul(sqrt(rr).mul(rad));
-              p0.assign(vec4(A.x.add(d.x), A.y.add(rnd(14).mul(0.12).add(0.03)), A.z.add(d.y), 0));
-              p1.assign(vec4(0, 0, 0, rnd(15).mul(10).add(16)));
-              p2.assign(vec4(float(PK.HAZE), rnd(16), 0.35, A.y));
-            }).Else(() => { // STEAM burst
-              const j = dir.mul(rr.mul(rad));
-              p0.assign(vec4(A.x.add(j.x), A.y.add(0.01), A.z.add(j.y), 0));
-              p1.assign(vec4(0, rnd(14).mul(0.06).add(0.08), 0, rnd(15).mul(2).add(2.5)));
-              p2.assign(vec4(float(PK.STEAM), rnd(16), 1, A.y));
-            });
+            If(kind.lessThan(0.5), () => { emit(float(PK.ASH), A.xyz, float(1), mag, rad, A.y); })
+              .ElseIf(kind.lessThan(1.5), () => { // DUST ring (meteor)
+                const ring = rad.mul(rr.mul(0.3).add(0.15));
+                const col = step(rnd(17), 0.25); // a quarter rise as the impact column
+                p0.assign(vec4(A.x.add(dir.x.mul(ring)), A.y.add(0.01), A.z.add(dir.y.mul(ring)), 0));
+                const out = rnd(14).mul(0.5).add(0.35).mul(mag).mul(float(1).sub(col.mul(0.8)));
+                p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.25).add(0.3), col), dir.y.mul(out), rnd(15).mul(4).add(3.5)));
+                p2.assign(vec4(float(PK.DUST), rnd(16), 0.8, A.y));
+              }).ElseIf(kind.lessThan(2.5), () => { // HAZE (flood basalt)
+                const d = dir.mul(sqrt(rr).mul(rad));
+                p0.assign(vec4(A.x.add(d.x), A.y.add(rnd(14).mul(0.12).add(0.03)), A.z.add(d.y), 0));
+                p1.assign(vec4(0, 0, 0, rnd(15).mul(10).add(16)));
+                p2.assign(vec4(float(PK.HAZE), rnd(16), 0.35, A.y));
+              }).ElseIf(kind.lessThan(3.5), () => { emit(float(PK.STEAM), A.xyz, mag.min(1), float(1), rad, A.y); })
+              .ElseIf(kind.lessThan(4.5), () => { emit(float(PK.FOUNTAIN), A.xyz, float(1), mag, rad, A.y); })
+              .ElseIf(kind.lessThan(5.5), () => { emit(float(PK.BOMB), A.xyz, float(1), mag, rad, A.y); })
+              .Else(() => { emit(float(PK.PDC), A.xyz, float(1), mag, rad, A.y); });
           });
         });
       });
@@ -260,26 +362,30 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const dt = u.dt;
       const kind = p2.x;
       const pos = p0.xyz.toVar(), vel = p1.xyz.toVar();
+      const life = p1.w.toVar();
       const seaY = tWorldY(u.seaLevel);
       const seed = p2.y, heat = p2.z, oy = p2.w;
       const hAbove = pos.y.sub(oy);
       const wind = tWind(pos.z, tWindHF(pos.y)).mul(1.6); // visual exaggeration: the diorama's plumes read as bent
       const turb = vec2(sin(pos.y.mul(9).add(u.time.mul(1.3)).add(seed.mul(20))), cos(pos.x.mul(7).add(u.time.mul(1.1)).add(seed.mul(13)))).mul(0.03);
       const sdir = vec2(cos(seed.mul(TAU)), sin(seed.mul(TAU)));
-      const underwater = step(3.5, kind);
+      const isK = (k: number) => step(abs(kind.sub(k)), 0.5);
+      const underwater = step(3.5, kind).mul(step(kind, 6.5));
+      const ballistic = isK(PK.FOUNTAIN).add(isK(PK.BOMB)).add(isK(PK.TEPHRA));
+      const floating = isK(PK.PUMICE).add(isK(PK.SLICK));
       If(kind.lessThan(0.5), () => {
         // ASH: momentum-driven jet near the vent, buoyant rise that slows toward the neutral-buoyancy
         // height, entrainment bends it downwind as it climbs, then it spreads into a drifting umbrella.
-        const hnb = min(heat.mul(0.3).add(0.22), max(seaY.add(0.95).sub(oy), 0.12));
+        const hnb = min(heat.mul(0.32).add(0.2), max(seaY.add(0.95).sub(oy), 0.12));
         const rise = float(1).sub(smoothstep(hnb.mul(0.55), hnb, hAbove));
         const umb = smoothstep(hnb.mul(0.75), hnb, hAbove);
-        const wUp = heat.mul(0.07).add(0.1).mul(rise).sub(umb.mul(0.008));
+        const wUp = heat.mul(0.08).add(0.1).mul(rise).sub(umb.mul(0.008));
         vel.y.assign(mix(vel.y, wUp, float(1).sub(exp(dt.mul(-1.2)))));
         const entrain = smoothstep(0, hnb, hAbove).mul(1.1).add(0.25);
-        const target = wind.add(turb).add(sdir.mul(umb.mul(0.07)));
+        const target = wind.add(turb).add(sdir.mul(umb.mul(0.08)));
         vel.xz.assign(mix(vel.xz, target, float(1).sub(exp(dt.mul(entrain).negate()))));
-      }).ElseIf(kind.lessThan(1.5), () => { // STEAM: gentle rise, bends early, fades fast
-        vel.y.assign(vel.y.mul(exp(dt.mul(-0.45))));
+      }).ElseIf(kind.lessThan(1.5), () => { // STEAM: rises, bends early, fades fast
+        vel.y.assign(vel.y.mul(exp(dt.mul(-0.6))));
         vel.xz.assign(mix(vel.xz, wind.mul(0.8).add(turb), float(1).sub(exp(dt.mul(-1.2)))));
       }).ElseIf(kind.lessThan(2.5), () => { // DUST: rush out, drag, settle
         vel.xz.assign(vel.xz.mul(exp(dt.mul(-1.3))).add(wind.mul(0.3).mul(dt)));
@@ -289,18 +395,39 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         vel.y.assign(0);
       }).ElseIf(kind.lessThan(4.5), () => { // BUBBLE: steady rise, wobble
         vel.xz.assign(vec2(sin(u.time.mul(7).add(seed.mul(40))), cos(u.time.mul(6).add(seed.mul(31)))).mul(0.012));
-      }).Else(() => { // SMOKER: slows, spreads a little
+      }).ElseIf(kind.lessThan(6.5), () => { // SMOKER / TURBID: slow, spreading, billowing under water
         vel.y.assign(vel.y.mul(exp(dt.mul(-0.15))));
-        vel.xz.assign(turb.mul(0.1));
+        vel.xz.assign(turb.mul(mix(float(0.1), float(0.35), isK(PK.TURBID))));
+      }).ElseIf(ballistic.greaterThan(0.5), () => { // FOUNTAIN / BOMB / TEPHRA: ballistic, a touch of drag; landed bombs rest
+        const flying = step(1e-5, dot(vel, vel));
+        vel.y.subAssign(dt.mul(G).mul(flying));
+        vel.mulAssign(exp(dt.mul(-0.15)));
+      }).ElseIf(floating.greaterThan(0.5), () => { // PUMICE / SLICK: ride the sea surface downwind
+        vel.xz.assign(mix(vel.xz, wind.mul(0.12).add(turb.mul(0.2)), float(1).sub(exp(dt.mul(-0.4)))));
+        vel.y.assign(0);
+        pos.y.assign(p2.w);
+      }).Else(() => { // PDC: hugs the ground, accelerates downhill, drags, spreads
+        const e = 0.05;
+        const gx = groundAt(pos.x.add(e), pos.z).sub(groundAt(pos.x.sub(e), pos.z)).div(2 * e);
+        const gz = groundAt(pos.x, pos.z.add(e)).sub(groundAt(pos.x, pos.z.sub(e))).div(2 * e);
+        vel.xz.assign(vel.xz.sub(vec2(gx, gz).mul(dt.mul(0.25))).mul(exp(dt.mul(-0.8))).add(wind.mul(dt.mul(0.25))).add(turb.mul(dt.mul(3))).add(sdir.mul(dt.mul(0.03))));
+        const g = groundAt(pos.x, pos.z);
+        pos.y.assign(mix(pos.y, g.add(float(0.015).add(p0.w.mul(0.012))), float(1).sub(exp(dt.mul(-5)))));
+        vel.y.assign(0);
       });
       pos.addAssign(vel.mul(dt));
-      const ground = tWorldY((clouds.sampleSummary(pos.x, pos.z) as V4).w).add(0.006);
-      pos.y.assign(mix(max(pos.y, ground), pos.y, underwater));
+      const ground = groundAt(pos.x, pos.z).add(0.004);
       const age = p0.w.add(dt).toVar();
+      // ejecta: fountain spray dies when it falls back; a bomb lands, stops and glows out on the ground
+      If(ballistic.greaterThan(0.5).and(pos.y.lessThan(ground)).and(vel.y.lessThan(0)), () => {
+        pos.y.assign(ground);
+        If(isK(PK.BOMB).lessThan(0.5), () => { age.assign(life); }).Else(() => { vel.assign(vec3(0)); life.assign(age.add(1.4)); });
+      });
+      pos.y.assign(mix(max(pos.y, ground), pos.y, max(underwater, floating)));
       // leaving the block or reaching the water surface: die (the render fades them before that)
-      If(max(abs(pos.x), abs(pos.z)).greaterThan(HALF).or(underwater.greaterThan(0.5).and(pos.y.greaterThan(p2.z))), () => { age.assign(p1.w); });
+      If(max(abs(pos.x), abs(pos.z)).greaterThan(HALF).or(underwater.greaterThan(0.5).and(pos.y.greaterThan(p2.z))), () => { age.assign(life); });
       p0.assign(vec4(pos, age));
-      p1.assign(vec4(vel, p1.w));
+      p1.assign(vec4(vel, life));
     });
     P0.element(id).assign(p0);
     P1.element(id).assign(p1);
@@ -310,6 +437,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
   const partLow = buildPart(ATMO.PARTICLES_LOW);
 
   // ---- render ----
+  const noise = cloudNoiseTexture();
   const buildMaterial = (under: boolean) => {
     const mat = new THREE.SpriteNodeMaterial();
     mat.name = under ? 'plumesUnder' : 'plumes';
@@ -320,56 +448,95 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     mat.alphaTest = 0.01;
     const q0 = P0.element(instanceIndex) as unknown as V4, q1 = P1.element(instanceIndex) as unknown as V4, q2 = P2.element(instanceIndex) as unknown as V4;
     const kind = q2.x;
-    const isUnder = step(3.5, kind);
+    const isK = (k: number) => step(abs(kind.sub(k)), 0.5);
+    const isUnder = step(3.5, kind).mul(step(kind, 6.5));
     const alive = float(q0.w.lessThan(q1.w)).mul(under ? isUnder : float(1).sub(isUnder));
     const tl = saturate(q0.w.div(max(q1.w, 1e-3)));
-    const kA = vec4(step(kind, 0.5), step(abs(kind.sub(1)), 0.5), step(abs(kind.sub(2)), 0.5), step(abs(kind.sub(3)), 0.5));
-    const kB = vec2(step(abs(kind.sub(4)), 0.5), step(4.5, kind));
-    // start size and growth per kind; ash swells again in the umbrella (height above its vent)
+    const kA = vec4(isK(PK.ASH), isK(PK.STEAM), isK(PK.DUST), isK(PK.HAZE));
+    const kB = vec4(isK(PK.BUBBLE), isK(PK.SMOKER), isK(PK.TURBID), isK(PK.PDC));
+    const kC = vec3(isK(PK.FOUNTAIN), isK(PK.BOMB), isK(PK.TEPHRA));
+    const kD = vec2(isK(PK.PUMICE), isK(PK.SLICK));
+    const streak = kC.x.add(kC.y).add(kC.z);
+    // start size and growth per kind; ash widens with height above its (slim) vent
     const hAb = q0.y.sub(q2.w);
-    const size0 = dot(kA, vec4(0.018, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.018)).add(kB.x.mul(hash(q2.y.mul(91)).mul(0.003).add(0.004))).add(kB.y.mul(0.01));
-    const grow = dot(kA, vec4(0.05, 0.13, 0.15, 0.25)).add(dot(kB, vec2(0.002, 0.06)));
-    // ash: narrow near the vent, widening with height, then swelling into the umbrella
-    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.25))).add(kA.x.mul(smoothstep(0.25, 0.55, hAb)).mul(0.1)));
-    mat.positionNode = q0.xyz;
-    mat.scaleNode = vec2(size.mul(alive));
-    mat.rotationNode = q2.y.mul(TAU).add(q0.w.mul(0.15));
+    const size0 = dot(kA, vec4(0.016, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
+      .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.02, 0.035)))
+      .add(dot(kC, vec3(0.007, 0.011, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
+    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB, vec4(0.001, 0.06, 0.09, 0.12))).add(kD.y.mul(0.28));
+    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.3))));
+    // ejecta streak along their screen-space velocity (ember trails)
+    const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
+    const speed = length(q1.xyz);
+    const stretch = float(1).add(speed.mul(mix(float(6), float(9), kC.y)).mul(streak));
+    const back = normalize(q1.xyz.add(vec3(0, 1e-5, 0))).mul(size.mul(stretch.sub(1)).mul(0.42)).mul(streak);
+    // a slick lies on the sea: squash its billboard by the view elevation (reads as a flat patch)
+    const viewY = abs(normalize(q0.xyz.sub(cameraPosition)).y);
+    mat.positionNode = q0.xyz.sub(back);
+    mat.scaleNode = vec2(size.mul(stretch), size.mul(mix(float(1), max(viewY, 0.08), kD.y))).mul(alive);
+    mat.rotationNode = mix(mix(q2.y.mul(TAU).add(q0.w.mul(0.15)), atan(vv.y, vv.x), streak), float(0), kD.y);
     const vKA = varying(kA, 'vPlumeKA');
     const vKB = varying(kB, 'vPlumeKB');
+    const vKC = varying(vec4(kC, 0), 'vPlumeKC');
+    const vKD = varying(kD, 'vPlumeKD');
     const vLife = varying(vec4(tl, q0.w, q2.z, q2.y), 'vPlumeLife');
-    const vH = varying(hAb, 'vPlumeH');
+    const vH = varying(vec2(hAb, speed), 'vPlumeH');
     const vXZ = varying(q0.xz, 'vPlumeXZ');
+    const vPos = varying(q0.xyz, 'vPlumePos');
 
     const shade = Fn(() => {
-      const k = vKA, kb = vKB, t = vLife.x, age = vLife.y, heat = vLife.z, seed = vLife.w;
-      const q = uv().mul(2).sub(1);
+      const k = vKA, kb = vKB, kc = vKC, kd = vKD, t = vLife.x, age = vLife.y, heat = vLife.z, seed = vLife.w;
+      const quv = uv();
+      const q = quv.mul(2).sub(1);
       const rr = length(q);
-      const nse = sin(q.x.mul(4.7).add(seed.mul(17))).mul(sin(q.y.mul(5.3).add(seed.mul(11)))).mul(0.5)
-        .add(sin(q.x.add(q.y).mul(9).add(seed.mul(5))).mul(0.2));
-      const puff = smoothstep(1.0, 0.05, rr.add(nse.mul(0.25))).mul(smoothstep(1.0, 0.6, rr));
+      // billowy puff: Perlin-Worley eats the disc edge, evolving with age (soft, noise-eroded sprites)
+      const n3 = texture3D(noise, vec3(q.mul(0.32).add(seed.mul(5.7)), age.mul(0.03).add(seed.mul(3.1)))).r;
+      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(0.75)).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
       const ring = smoothstep(1.0, 0.75, rr).mul(smoothstep(0.35, 0.8, rr)).add(smoothstep(0.35, 0.0, length(q.sub(vec2(-0.3, 0.3)))).mul(0.8));
-      const shapeA = mix(puff, ring, kb.x);
+      const speck = smoothstep(1.0, 0.4, rr);
+      // ember streak: hot head at +x (direction of motion), trail fading behind
+      const across = smoothstep(0.9, 0.0, abs(q.y));
+      const trail = pow(saturate(quv.x), 1.6).mul(across).mul(smoothstep(1.0, 0.8, quv.x).mul(0.5).add(0.5));
+      const isStreak = kc.x.add(kc.y).add(kc.z);
+      const shapeA = mix(mix(mix(puff, ring, kb.x), trail, isStreak), speck, kd.x);
       const nv = normalize(vec3(q.x, q.y, sqrt(max(float(1).sub(rr.mul(rr)), 0.05))));
       const keyV = cameraViewMatrix.mul(vec4(cloudShadowU.keyDir, 0)).xyz;
       const wrap = saturate(dot(nv, normalize(keyV)).add(0.5).div(1.5));
       const keyCol = tKeyColor();
       const amb = mix(skyU.horizon, skyU.zenith, q.y.mul(0.5).add(0.5)).mul(0.75);
-      const albedo = mix(vec3(0.3, 0.26, 0.22), vec3(0.5, 0.47, 0.43), t).mul(k.x)
+      // ash: near-black at the vent, lighter grey as it rises and thins
+      const ashCol = mix(vec3(0.05, 0.045, 0.04), vec3(0.44, 0.42, 0.4), smoothstep(0.0, 0.3, vH.x));
+      const albedo = ashCol.mul(k.x)
         .add(vec3(0.93, 0.94, 0.96).mul(k.y)).add(vec3(0.56, 0.45, 0.33).mul(k.z)).add(vec3(0.6, 0.55, 0.48).mul(k.w))
-        .add(vec3(0.85, 0.97, 1.0).mul(kb.x.mul(1.6))).add(vec3(0.05, 0.05, 0.06).mul(kb.y));
+        .add(vec3(0.8, 0.92, 1.0).mul(kb.x.mul(1.1))).add(vec3(0.05, 0.05, 0.06).mul(kb.y)).add(vec3(0.11, 0.09, 0.075).mul(kb.z))
+        .add(vec3(0.46, 0.43, 0.4).mul(kb.w)).add(vec3(0.78, 0.74, 0.64).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
       const lit = albedo.mul(amb.add(keyCol.mul(wrap).mul(0.3)));
-      // orange underglow from the lava: young ash / hot ejecta, strongest on the underside
-      const glow = vec3(1.0, 0.33, 0.07).mul(min(heat, 1).mul(exp(vH.mul(-22))).mul(k.x.add(k.z.mul(0.6).mul(exp(age.mul(-1.5))))).mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
+      // orange underglow from the lava: ash just above the crater, turbid clouds at a submarine vent
+      const glow = vec3(1.0, 0.33, 0.07).mul(exp(max(vH.x, 0).mul(-24)).mul(min(heat, 1).mul(k.x).add(kb.z.mul(0.5)))
+        .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1))).mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
+      // incandescent ejecta cooling from yellow to deep red; tephra is black rock with a brief hot head
+      const cool = mix(exp(age.mul(-1.1)), exp(age.mul(-0.3)), kc.y);
+      const ember = mix(vec3(0.8, 0.1, 0.02), vec3(1.0, 0.5, 0.12), cool).mul(mix(float(1.5), float(4.5), cool)).mul(mix(float(0.7), float(1), kc.y));
+      const tephra = mix(vec3(0.035, 0.03, 0.028).mul(amb.add(keyCol.mul(0.2))), vec3(1.0, 0.4, 0.1).mul(2), exp(age.mul(-5)).mul(0.5));
+      const streakCol = mix(ember, tephra, kc.z);
       const shimmer = sin(age.mul(9).add(seed.mul(30))).mul(0.2).add(0.8);
-      const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.34))
-        .add(k.y.mul(pow(float(1).sub(t), 2.2).mul(0.32)).mul(min(heat.add(0.3), 1)))
+      const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.38)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
+        .add(k.y.mul(pow(float(1).sub(t), 2.2).mul(0.36)).mul(min(heat.add(0.3), 1)))
         .add(k.z.mul(pow(float(1).sub(t), 1.5).mul(0.75)))
         .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)))
-        .add(kb.x.mul(0.7).mul(float(1).sub(pow(t, 4))))
-        .add(kb.y.mul(pow(float(1).sub(t), 1.5).mul(0.55)).mul(shimmer));
+        .add(kb.x.mul(0.45).mul(float(1).sub(pow(t, 4))))
+        .add(kb.y.mul(pow(float(1).sub(t), 1.5).mul(0.5)).mul(shimmer))
+        .add(kb.z.mul(pow(float(1).sub(t), 1.3).mul(0.38)))
+        .add(kb.w.mul(pow(float(1).sub(t), 1.2).mul(0.34)))
+        .add(isStreak.mul(mix(float(0.9), float(1), kc.y)).mul(float(1).sub(pow(t, 6))))
+        .add(kd.x.mul(0.85).mul(smoothstep(1, 0.85, t)))
+        .add(kd.y.mul(sin(t.mul(Math.PI)).mul(0.22)));
       const edge = smoothstep(0, 0.2, float(HALF).sub(max(abs(vXZ.x), abs(vXZ.y))));
-      const a = shapeA.mul(alpha).mul(smoothstep(0, 0.25, age)).mul(edge);
-      return vec4(lit.add(glow), a);
+      const fadeIn = mix(smoothstep(0, 0.25, age), float(1), isStreak);
+      // drawn after the cloud composite: hidden by cloud opacity only where the particle is behind the cloud front
+      const occ = under ? float(1) : clouds.occlusion(vPos);
+      const near = smoothstep(0.12, 0.55, length(vPos.sub(cameraPosition))); // no balloon particles in the lens
+      const a = shapeA.mul(alpha).mul(fadeIn).mul(edge).mul(occ).mul(near).mul(tCutHard(vPos));
+      return vec4(mix(lit.add(glow), streakCol, isStreak), a);
     })();
     mat.colorNode = vec4(shade.rgb, 1);
     mat.opacityNode = shade.a;
@@ -377,8 +544,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     sprite.name = mat.name;
     sprite.count = opts.highQuality ? ATMO.PARTICLES_HIGH : ATMO.PARTICLES_LOW;
     sprite.frustumCulled = false;
-    // water.ts draws at renderOrder 2 and refracts what is already in the frame: underwater first, rest after
-    sprite.renderOrder = under ? 1 : 4; // underwater before the water sheet (2) so its refraction shows them; clouds (6) composite over the rest
+    // underwater before the water sheet (2) so its refraction shows them; the rest after the clouds (6),
+    // depth-aware against the cloud front (clouds.occlusion) so plumes in front of clouds stay in front
+    sprite.renderOrder = under ? 1 : 7;
     return { sprite, mat };
   };
   const above = buildMaterial(false), below = buildMaterial(true);
@@ -397,7 +565,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
   const flash = new THREE.Sprite(fmat);
   flash.name = 'impactFlash';
   flash.frustumCulled = false;
-  flash.renderOrder = 7;
+  flash.renderOrder = 8;
 
   let hq = opts.highQuality;
   const syncBursts = (dt: number, time: number) => {

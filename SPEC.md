@@ -143,7 +143,7 @@ T40|x|M7 shadows + GTAO + SSGI \| fallback|V9
 T41|~|M7 volumetric clouds from vapor/precip|V9,V15
 T42|~|M7 weather FX: rain, lightning, ash plumes, fog|V15
 T43|x|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
-T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
+T44|.M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
 T45|x|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
 T46|x|M7 procedural ambient audio from sim stats|V14,V15
 T47|x|M8 debug overlays|I.overlays

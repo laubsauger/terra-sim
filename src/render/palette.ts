@@ -12,18 +12,18 @@ interface MatLook {
 }
 
 export const MAT_LOOK: Record<number, MatLook> = {
-  [Mat.AIR]:        { color: 0xff00ff, rough: 1, band: 0 },
+  [Mat.AIR]:        { color: 0x0c0a09, rough: 1, band: 0 },       // cavities (drained magma chambers) on the cut
   [Mat.BASALT]:     { color: 0x4a5264, rough: 0.8, band: 0.22 },    // dark slate-blue, thin flows
   [Mat.GABBRO]:     { color: 0x46544b, rough: 0.75, band: 0.1 },    // dark green-grey
-  [Mat.GRANITE]:    { color: 0xc49d96, rough: 0.7, band: 0.04 },    // warm pink-grey
+  [Mat.GRANITE]:    { color: 0xae928a, rough: 0.7, band: 0.04 },    // warm pink-grey
   [Mat.ANDESITE]:   { color: 0x7d7388, rough: 0.8, band: 0.06 },    // violet grey
   [Mat.SEDIMENT]:   { color: 0xcfae7c, rough: 0.95, band: 0.05 },   // tan
-  [Mat.SANDSTONE]:  { color: 0xdb9a4c, rough: 0.9, band: 0.12 },    // ochre
-  [Mat.SHALE]:      { color: 0x6b7d96, rough: 0.8, band: 0.14 },    // blue-grey
-  [Mat.LIMESTONE]:  { color: 0xeee0bb, rough: 0.75, band: 0.07 },   // cream
-  [Mat.SCHIST]:     { color: 0x8c948f, rough: 0.55, band: 0.22 },   // silvery banded grey-green
-  [Mat.GNEISS]:     { color: 0xa9a19c, rough: 0.6, band: 0.3 },     // banded warm grey
-  [Mat.MAGMA]:      { color: 0xc8401a, rough: 0.4, band: 0.1, emissive: 0xff4a10, emissiveGain: 4.5 },  // HDR: blooms
+  [Mat.SANDSTONE]:  { color: 0xc3905c, rough: 0.9, band: 0.09 },    // muted ochre
+  [Mat.SHALE]:      { color: 0x676b72, rough: 0.8, band: 0.1 },     // muted blue-grey slate
+  [Mat.LIMESTONE]:  { color: 0xcdbf9f, rough: 0.75, band: 0.06 },   // cream-beige
+  [Mat.SCHIST]:     { color: 0x7f8580, rough: 0.55, band: 0.16 },   // silvery banded grey-green
+  [Mat.GNEISS]:     { color: 0x979089, rough: 0.6, band: 0.2 },     // banded warm grey
+  [Mat.MAGMA]:      { color: 0xc8401a, rough: 0.4, band: 0.1, emissive: 0xff6c14, emissiveGain: 4.5 },  // HDR: incandescent orange, blooms
   [Mat.PERIDOTITE]: { color: 0x3b332c, rough: 0.8, band: 0.04, emissive: 0xff6a20, emissiveGain: 0.65 },  // deep warm grey-brown, glows at depth
 };
 
@@ -95,9 +95,9 @@ export const BIOME_LOOK: Record<number, BiomeLook> = {
   8: { ground: 0x4a3e2a, veg: 0x1d6a2c, forest: 1 },            // RAINFOREST: deep emerald
   9: { ground: 0xcfae78, veg: 0xc4aa74 },                       // BEACH
   10: { ground: 0x8c8578, veg: 0x7a8a4e, snow: 0.35 },          // ALPINE: rock + meadow, patchy snow
-  11: { ground: 0xb49d62, veg: 0xc4a95a, arid: 0.6 },           // STEPPE: golden khaki
-  12: { ground: 0xa8784a, veg: 0x7e8b5a, arid: 0.7 },           // SHRUBLAND: sage over ochre soil
-  13: { ground: 0xb9a98c, veg: 0x9a9272, arid: 0.8 },           // COLD_DESERT: pale grey-tan
+  11: { ground: 0xa8954f, veg: 0xc2a64e, arid: 0.5 },           // STEPPE: golden khaki grass (never bare sand)
+  12: { ground: 0xa27447, veg: 0x77875a, arid: 0.7 },           // SHRUBLAND: sage over ochre soil
+  13: { ground: 0xa9a08c, veg: 0x8f8b70, arid: 0.8 },           // COLD_DESERT: pale grey-tan gravel
 };
 
 /** Canyon-wall palette for arid cliffs, indexed by Mat id (sedimentary layers read as red/ochre bands). */

@@ -2,12 +2,12 @@
 import * as THREE from 'three/webgpu';
 import { GpuFields } from '../../../src/core/gpu';
 import { registerSimFields } from '../../../src/sim/fields';
-import { NZ, colIdx } from '../../../src/sim/layout';
+import { NZ, colIdx, Mat } from '../../../src/sim/layout';
 import { createTerrain } from '../../../src/render/terrain';
 import { createSides } from '../../../src/render/sides';
 import { createWater } from '../../../src/render/water';
 import { createLighting } from '../../../src/render/lighting';
-import { HALF, cellToWorld, voxelToWorldY, updateRenderColumns, Y_RENDER_BOTTOM } from '../../../src/render/space';
+import { HALF, cellToWorld, voxelToWorldY, updateRenderColumns, Y_RENDER_BOTTOM, setRenderMotion } from '../../../src/render/space';
 import { fillSynthWorld, LAND_X, OCEAN_X, SEA } from './synthWorld';
 
 export const BG = 0x151924; // same as stage.ts
@@ -52,7 +52,7 @@ async function main() {
 
   const frame = async () => {
     await new Promise((r) => requestAnimationFrame(r));
-    updateRenderColumns(renderer, fields); // render-only smoothed columns (look.frame does this in the app)
+    updateRenderColumns(renderer, fields, 1e9); // display columns, fully settled (the stage loop eases them in the app)
     renderer.render(scene, camera);
     await device.queue.onSubmittedWorkDone();
     await new Promise((r) => requestAnimationFrame(r));
@@ -97,6 +97,26 @@ async function main() {
       };
     },
     setVoxParity(p: number) { fields.setParity('vox', p); },
+    /** Copy the real world into the decoy buffer too, so both ping-pong halves hold the same voxels. */
+    mirrorVox() {
+      (fields.cpuArray('vox', 0) as Uint32Array).set(fields.cpuArray('vox', 1) as Uint32Array);
+      fields.markDirty('vox');
+    },
+    /** Fill the rows next to the +Z face row (z = NZ-2 and z = 0, across the seam) with MAGMA below the surface. */
+    markNeighbourRows() {
+      const vox = fields.cpuArray('vox', 1) as Uint32Array;
+      for (const z of [NZ - 2, 0]) for (let x = 0; x < 256; x++) for (let y = 0; y < 128; y++) {
+        const i = x + z * 256 + y * 65536;
+        if ((vox[i]! & 0xff) !== 0) vox[i] = (vox[i]! & ~0xff) | Mat.MAGMA;
+      }
+      fields.markDirty('vox');
+    },
+    /** Fake plate motion: every plate at sub-cell offset (ox, oz) cells (the sim's RenderMotion contract). */
+    setPlateOffset(ox: number, oz: number) {
+      setRenderMotion(fields, { runId: 0, plateOffsets(out: Float32Array) { for (let i = 0; i < out.length; i += 2) { out[i] = ox; out[i + 1] = oz; } } });
+    },
+    /** Render one frame (after a parity change) without moving the camera. */
+    async frame() { await frame(); },
     /** Decode a PNG screenshot and sample it (3×3 mean around each point) + global stats. */
     async analyze(b64: string, pts: Pt[]) {
       const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));

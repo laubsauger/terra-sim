@@ -133,18 +133,19 @@ export function childColor(parent: string, k: number): string {
 
 /** Biome colours by Biome id (biomeModel.ts). Names in defs.ts. */
 export const BIOME_COLORS = [
-  '#2d5487', // ocean
-  '#d9e2e6', // ice
-  '#8fa596', // tundra
-  '#3d6b5c', // taiga
-  '#4f9046', // temperate forest
-  '#a8c565', // grassland
-  '#ebc56b', // desert
-  '#d19a42', // savanna
-  '#1f6b3a', // rainforest
-  '#e6d6a8', // beach
-  '#8d8ba6', // alpine
-  '#c1be83', // steppe
-  '#9d7a48', // shrubland
-  '#c3a996', // cold desert
-];
+  '#2f5b8f', // ocean (depth-shaded in the overlay)
+  '#dde7ec', // ice
+  '#9db5a8', // tundra
+  '#2e6e5e', // taiga
+  '#4f9d4a', // temperate forest
+  '#a6cf5b', // grassland
+  '#eccb6a', // desert
+  '#d99a45', // savanna
+  '#1c7446', // rainforest
+  '#ead7a0', // beach
+  '#a79cc8', // alpine
+  '#cdc47c', // steppe
+  '#b5784e', // shrubland
+  '#c4b0a4', // cold desert
+  '#ead7a0', '#ead7a0', // padding to 16 (unfilled cells fall back to beach)
+]
