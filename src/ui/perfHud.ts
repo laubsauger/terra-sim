@@ -1,7 +1,8 @@
 import type * as THREE from 'three/webgpu';
 
 // Frame timing HUD. GPU times come from timestamp queries when the adapter supports them (V9 budget check).
-export function createPerfHud(renderer: THREE.WebGPURenderer, gpuBytes: () => number) {
+/** onGpuSample: compute ms resolved since the previous sample (covers the frames since then). */
+export function createPerfHud(renderer: THREE.WebGPURenderer, gpuBytes: () => number, onGpuSample?: (computeMs: number) => void) {
   const el = document.createElement('div');
   el.className = 'terra-perf';
   document.body.appendChild(el);
@@ -14,13 +15,14 @@ export function createPerfHud(renderer: THREE.WebGPURenderer, gpuBytes: () => nu
     await renderer.resolveTimestampsAsync('render');
     gpuCompute = renderer.info.compute.timestamp;
     gpuRender = renderer.info.render.timestamp;
+    onGpuSample?.(gpuCompute);
   }
 
   return {
     el,
     frame(realDt: number, frameCpuMs: number) {
       frames++; acc += realDt; cpuMs += frameCpuMs;
-      if (frames % 4 === 0) void sample();
+      void sample(); // every frame: the query pool holds only 256 timestamps between resolves
       if (acc < 0.5) return;
       const fps = frames / acc;
       const ts = hasTs ? `gpu sim ${gpuCompute.toFixed(2)}ms · render ${gpuRender.toFixed(2)}ms` : 'gpu timing n/a';

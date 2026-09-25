@@ -146,7 +146,7 @@ T47|~|M8 debug overlays|I.overlays
 T48|.|M8 god tools via event path|V16,I.god tools
 T49|x|M8 ambient mode: hide UI, cinematic auto cam, POI follow (eruptions, impacts)|I.keys
 T50|.|M8 save/load: `.terra` format, gzip, IDB autosave ring, file export/import|V13,V21,I.file,I.idb
-T51|.|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19
+T51|~|M8 perf pass: budget per pass, time-slice tuning, 24h leak run|V9,V10,V19
 
 ## §B BUGS
 id|date|cause|fix

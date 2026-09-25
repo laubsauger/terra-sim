@@ -20,11 +20,10 @@ import { createStatsPane } from './ui/statsPane';
 import { createOverlays } from './overlay/overlays';
 import { createAmbientCam } from './ui/ambientCam';
 import { Ambience } from './audio/ambience';
+import { TickBudget } from './core/tickBudget';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
-/** Ticks per frame the sim may run before speed is capped (refined by perf budget later, V9). */
-const MAX_TICKS_PER_FRAME = 8;
 
 async function main() {
   const gpu = await checkWebGPU();
@@ -71,7 +70,10 @@ async function main() {
 
   const panel = createPanel(params);
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
-  const hud = createPerfHud(stage.renderer, () => fields.bytes());
+  // sim GPU budget per frame (V9): speed beyond this shows as effective < requested (V22)
+  const budget = new TickBudget(5);
+  let ticksSinceSample = 0;
+  const hud = createPerfHud(stage.renderer, () => fields.bytes(), (ms) => { budget.observe(ms, ticksSinceSample); ticksSinceSample = 0; });
   const probe = createProbeUI(stage.renderer, stage.camera, fields);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   const overlays = createOverlays(fields, stage.scene);
@@ -95,8 +97,9 @@ async function main() {
 
   stage.onFrame((dt) => {
     panel.fps.begin();
-    const ticks = clock.frame(dt, MAX_TICKS_PER_FRAME);
+    const ticks = clock.frame(dt, budget.cap);
     const ran = sim.runTicks(ticks);
+    ticksSinceSample += ran;
     if (ran < ticks) clock.unrun(ticks - ran);
     timebar.update();
     probe.update(dt);
