@@ -1,0 +1,46 @@
+/* Overlay legend (bottom-left glass card) + plate tags. Matches .terra-probe (src/style.css). */
+.terra-legend {
+  position: fixed; left: 18px; bottom: 18px; width: 304px; box-sizing: border-box; padding: 12px 14px 11px;
+  border-radius: 14px; background: rgba(18, 20, 28, 0.74); backdrop-filter: blur(12px) saturate(1.15);
+  -webkit-backdrop-filter: blur(12px) saturate(1.15); border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.38); font: 12px/1.4 system-ui, sans-serif; color: #ece6d8; z-index: 4;
+  opacity: 0; transform: translateY(10px) scale(0.985); transform-origin: 0 100%; pointer-events: none;
+  transition: opacity 0.28s ease, transform 0.34s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.terra-legend.show { opacity: 1; transform: none; }
+.terra-legend .tl-body { animation: tl-in 0.32s ease both; }
+@keyframes tl-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.terra-legend .tl-head { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+.terra-legend .tl-key { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 5px; font: 600 11px ui-monospace, monospace;
+  background: rgba(255, 255, 255, 0.08); color: #d9d2c2; border: 1px solid rgba(255, 255, 255, 0.1); }
+.terra-legend .tl-title { font-weight: 600; font-size: 13px; letter-spacing: 0.01em; }
+.terra-legend .tl-blurb { color: #b3ad9e; margin-bottom: 9px; }
+.terra-legend .tl-cap { color: #a39d8e; font-size: 11px; margin: 8px 0 3px; }
+.terra-legend .tl-bar { height: 10px; border-radius: 5px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.07); }
+.terra-legend .tl-scale { position: relative; height: 17px; margin: 0 1px; }
+.terra-legend .tl-scale span { position: absolute; top: 3px; transform: translateX(-50%); font: 10.5px ui-monospace, SFMono-Regular, monospace;
+  color: #cfc8b8; white-space: nowrap; }
+.terra-legend .tl-scale span::before { content: ''; position: absolute; left: 50%; top: -4px; width: 1px; height: 3px; background: rgba(236, 230, 216, 0.45); }
+.terra-legend .tl-scale span.first { transform: none; } .terra-legend .tl-scale span.first::before { left: 0; }
+.terra-legend .tl-scale span.last { transform: translateX(-100%); } .terra-legend .tl-scale span.last::before { left: auto; right: 0; }
+.terra-legend .tl-unit { color: #8f8a7d; font-size: 10.5px; text-align: right; margin-top: -1px; }
+.terra-legend .tl-sw { display: grid; grid-template-columns: 1fr; gap: 3px 10px; margin-top: 2px; }
+.terra-legend .tl-sw.cols { grid-template-columns: 1fr 1fr; }
+.terra-legend .tl-sw div { display: flex; align-items: center; gap: 7px; color: #d6cfbf; min-width: 0; }
+.terra-legend .tl-sw div span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.terra-legend .tl-sw i { flex: none; width: 11px; height: 11px; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12); }
+.terra-legend .tl-sw i.line { height: 4px; width: 16px; border-radius: 2px; box-shadow: 0 0 0 1.5px rgba(10, 11, 16, 0.75); }
+.terra-legend .tl-note { color: #a39d8e; margin-top: 7px; display: flex; gap: 7px; align-items: flex-start; }
+.terra-legend .tl-note svg { flex: none; margin-top: 2px; }
+.terra-legend .tl-read { margin-top: 9px; padding-top: 8px; border-top: 1px solid rgba(255, 255, 255, 0.07); display: flex; gap: 8px; align-items: baseline;
+  min-height: 17px; }
+.terra-legend .tl-read b { font-weight: 600; color: #f3ecdc; }
+.terra-legend .tl-read .muted { color: #8f8a7d; }
+.terra-legend .tl-read .loc { margin-left: auto; color: #8f8a7d; font: 10.5px ui-monospace, monospace; white-space: nowrap; }
+
+.terra-plate-tag { position: fixed; left: 0; top: 0; z-index: 3; pointer-events: none; display: flex; align-items: center; gap: 5px;
+  padding: 2px 8px 2px 4px; border-radius: 999px; background: rgba(18, 20, 28, 0.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.09); font: 11px system-ui, sans-serif; color: #ece6d8; white-space: nowrap; transition: opacity 0.25s ease; }
+.terra-plate-tag b { display: inline-grid; place-items: center; min-width: 16px; height: 16px; border-radius: 999px; font: 600 10px system-ui, sans-serif;
+  color: #14161d; }
+.terra-plate-tag span { color: #cfc8b8; font-variant-numeric: tabular-nums; }
