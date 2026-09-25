@@ -38,6 +38,12 @@ export const RIDGE_MASS = (RIDGE_GABBRO + RIDGE_BASALT) * 255;
 export const OROGENY_MAX = 63;
 /** Crust thicker than this (layers) stops thickening; extra collided mass delaminates into the mantle. */
 export const MAX_CRUST_LAYERS = 100;
+/**
+ * Fraction of oceanic crust consumed under a continent that is scraped off / underplated onto it
+ * (accretionary wedge + arc root). The only steady return path for continental crust that erosion
+ * sends to the sea; without it continents thin and drown within ~400 My (B8).
+ */
+export const ACCRETE_FRAC = 0.9;
 /** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
 export const TEC_EVERY = 4;
 
@@ -62,6 +68,12 @@ export class Tectonics {
   private table = uniformArray(this.tableValues, 'vec4');
   private clearStats: THREE.ComputeNode;
   private ageDt = uniform(0);
+  /**
+   * 0..1 share of collided/accreted crust that may stack onto the winner. Set per window from the
+   * reservoir snapshot: a reservoir in debt means ridges already consumed more than subduction returned,
+   * so colliding crust delaminates back instead (mass constraint, not a param nudge: V3, V5, B10).
+   */
+  readonly stackGate = uniform(1);
   private isoOn = uniform(0);
   private lastRunTick = 0;
   private crustFlow: CrustFlow;
@@ -99,7 +111,7 @@ export class Tectonics {
     const surfY = f.cur('surfY');
     const act = f.cur<'uint'>('tecAct');
     const ctr = f.cur<'int'>('counters');
-    const { ageDt, isoOn } = this;
+    const { ageDt, isoOn, stackGate } = this;
 
     return Fn(() => {
       const d = instanceIndex;
@@ -161,10 +173,19 @@ export class Tectonics {
         // orogeny: continental losers stack onto the winner as crustal root (continents are not destroyed
         // in collisions), limited by max crust thickness and grid top; only the excess delaminates
         const k = uint(0).toVar();
-        If(bestCont.equal(uint(1)).and(contCount.greaterThan(uint(1))), () => {
+        If(bestCont.equal(uint(1)).and(count.greaterThan(uint(1))), () => {
           const room = uint(MAX_CRUST_LAYERS).sub(uMin(bestMass.div(uint(255)), uint(MAX_CRUST_LAYERS)));
           const floorRoom = base.sub(uMin(base, uint(1))); // root must stay above y=0
-          k.assign(uMin(uMin(contMass.sub(bestMass).div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
+          // continental losers stack fully; oceanic losers accrete ACCRETE_FRAC of what they carry beyond
+          // fresh ridge thickness (sediment + aged crust). The ridge share must return to the reservoir:
+          // every gap draws RIDGE_MASS, and gaps pair 1:1 with losers, else the reservoir runs into debt (B10).
+          const oceanMass = massSum.sub(contMass);
+          const oceanLosers = count.sub(uint(1)).sub(contCount.sub(bestCont));
+          const ridgeShare = oceanLosers.mul(uint(RIDGE_MASS));
+          const excess = select(oceanMass.greaterThan(ridgeShare), oceanMass.sub(ridgeShare), uint(0));
+          const gain0 = contMass.sub(bestMass).add(excess.mul(uint(Math.round(ACCRETE_FRAC * 256))).shiftRight(uint(8)));
+          const gain = uint(float(gain0).mul(stackGate));
+          k.assign(uMin(uMin(gain.div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
         });
         // near the ceiling the root still grows, just downward only (isostasy settles it later)
         const up = uMin(rootUp(k), uint(NY - 3).sub(uMin(top, uint(NY - 3)))).toVar();

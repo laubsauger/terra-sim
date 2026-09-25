@@ -31,8 +31,8 @@ export const DEFAULT_PLATES = 7;
 export const MIN_PLATES = 3;
 export const MAX_INIT_PLATES = 12;
 /** Plate speed range, cells per My (1 cell ≈ 20 km → 2..8 cm/yr). */
-export const PLATE_SPEED_MIN = 1;
-export const PLATE_SPEED_MAX = 4;
+export const PLATE_SPEED_MIN = 0.5;
+export const PLATE_SPEED_MAX = 2;
 /** Target continental area fraction range (exact per seed via mask quantile). */
 export const CONT_FRAC_MIN = 0.3;
 export const CONT_FRAC_MAX = 0.4;

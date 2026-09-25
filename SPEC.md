@@ -92,6 +92,9 @@ V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = m
 V24: cont-cont collision → loser crust stacks onto winner (root down, isostatic rise) up to 64 layers; only excess delaminates. arc volcanism ! add FLAG_CONTINENTAL crust from reservoir (continents regrow). colliding continental plates lock (velocities converge); thick roots flow laterally into thinner continental neighbours.
 V25: plate speed drivers ⊥ positive feedback on own speed; slab pull normalised by plate speed.
 V26: water quasi-steady: overdamped flow; neighbour level roughness in open ocean ≤ 0.05 voxel after 40 substeps of perturbation.
+V27: standing water deeper than ~2 voxels ⊥ erosion capacity; sediment settles (deltas, shelves). Σ sedSusp stays ≤ ~2 layers/col.
+V28: thermal talus ≥ 2.5 layers/cell subaerial, ×2 submarine; stretched margins taper via lower-crust flow into oceanic neighbours.
+V29: reservoir debt ⊥ grows unbounded: accretion takes only slab excess over ridge mass; collided crust stacking fades to 0 over 1 layer/col of debt (window snapshot, deterministic).
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
 ## §T TASKS
@@ -154,4 +157,9 @@ B1|2026-09-25|tectonics decide kernel bound 13 storage buffers > adapter limit 1
 B2|2026-09-25|cont-cont collision kept 1 layer of loser, rest → reservoir ∴ continents melted away ~150 My|V24
 B3|2026-09-25|slab pull ∝ subducted cols ∝ own speed → runaway, ∀ plates @ max speed|V25
 B5|2026-09-25|collision front saturates @ crust cap → ∀ further colliding crust deleted; plates ground continents @ full speed|V24
+B6|2026-09-25|deep ocean kept full erosion capacity → sedSusp piled to 136 layers/col, reservoir overflowed int32|V27
+B7|2026-09-25|plates ~2 cells/My on 256-cell world → continents collide constantly, area halves in 50 My|V25
+B8|2026-09-25|no return path for eroded continental crust → continents thin & drown ~400 My|V24
+B9|2026-09-25|talus 1.2 layer/cell (≈0.9° real) + underwater slumping → margins slump into sea forever|V28
+B10|2026-09-25|ridges draw fixed mass per gap while collisions/accretion withhold loser mass → reservoir debt → runaway continents|V29
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

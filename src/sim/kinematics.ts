@@ -5,9 +5,9 @@ import { PCG32 } from '../core/rng';
 import type { Plate } from './worldData';
 import type { TectonicsStats } from './tectonics';
 
-export const BASE_SPEED = 1.2; // cells per My (≈ 2.4 cm/yr at 20 km cells)
-export const MIN_SPEED = 0.4;
-export const MAX_SPEED = 3.5;
+export const BASE_SPEED = 0.8; // cells per My (≈ 1.6 cm/yr at 20 km cells; small world → slower churn, B7)
+export const MIN_SPEED = 0.3;
+export const MAX_SPEED = 2.4;
 export const SLAB_GAIN = 1.2;
 export const CONT_DRAG = 0.7;
 /** Speed factor per unit of continental-collision contact fraction (collisions jam plates). */

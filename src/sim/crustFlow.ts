@@ -1,5 +1,6 @@
-// Lower-crustal flow: thick continental roots spread into thinner continental neighbours, one layer per
-// face per run. Turns collision fronts into wide plateaus instead of saturated walls (B5, V24).
+// Lower-crustal flow: thick continental roots spread into thinner neighbours, one layer per face per run.
+// Into continental neighbours it turns collision fronts into plateaus (B5, V24); into oceanic neighbours it
+// stretches passive margins into thin continental wedges instead of cliffs that slump into the sea (B9).
 // Race-free: an "out" kernel decides per-face transfers from pre-pass data, an "apply" kernel moves whole
 // root layers (GNEISS ↔ PERIDOTITE at the crust base). Mass moves in full layers, exactly (V3).
 import type * as THREE from 'three/webgpu';
@@ -9,10 +10,16 @@ import { NCOL, Mat, FLAG_CONTINENTAL, packVoxel } from './layout';
 import { tColIdx, tColXZ, tMat, tFill, tVoxIdx, uMin } from './tslLayout';
 import { COL_CONTINENTAL } from './derive';
 
-/** Thickness difference (layers) that drives one layer of flow across a face. */
-export const FLOW_DIFF = 6;
-/** Crust never drains below this thickness (layers). */
+/**
+ * Thickness difference (layers) that drives one layer of flow across a face. Isostasy turns a thickness
+ * gradient of FLOW_DIFF into ≈ 0.5·FLOW_DIFF layers of surface slope per cell, kept below the thermal
+ * talus (2.5) so stretched margins stop slumping (B9).
+ */
+export const FLOW_DIFF = 4;
+/** Crust never drains below this thickness into continental neighbours (collision plateaus). */
 export const FLOW_MIN_THICK = 30;
+/** Only continental crust thicker than this stretches into oceanic neighbours, so margin wedges stay a few cells wide. */
+export const FLOW_MIN_THICK_MARGIN = 24;
 /** Receiver never grows past this (layers). */
 export const FLOW_MAX_THICK = 100;
 
@@ -56,7 +63,7 @@ export class CrustFlow {
       const thick = ci.y.div(uint(255)).toVar();
       If(cont, () => {
         // one layer per qualifying face, never more than the verified plain bottom layers or the thickness floor
-        const spare = select(thick.greaterThan(uint(FLOW_MIN_THICK)), thick.sub(uint(FLOW_MIN_THICK)), uint(0));
+        const spare = select(thick.greaterThan(uint(FLOW_MIN_THICK_MARGIN)), thick.sub(uint(FLOW_MIN_THICK_MARGIN)), uint(0));
         const budget = uMin(CrustFlow.givable(vox, x, z, base), spare).toVar();
         for (let d = 0; d < 4; d++) {
           const [dx, dz] = DIRS[d]!;
@@ -64,7 +71,9 @@ export class CrustFlow {
           const ncont = n.x.shiftRight(uint(16)).bitAnd(uint(COL_CONTINENTAL)).equal(uint(1));
           const nthick = n.y.div(uint(255));
           const nbase = n.x.bitAnd(uint(0xff));
-          If(budget.greaterThan(uint(0)).and(ncont).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
+          // oceanic receivers become transitional continental crust, but only from thick margins
+          const minT = select(ncont, uint(FLOW_MIN_THICK), uint(FLOW_MIN_THICK_MARGIN));
+          If(budget.greaterThan(uint(0)).and(thick.greaterThan(minT)).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
             .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4))), () => {
             bits.assign(bits.bitOr(uint(1 << d)));
             budget.subAssign(1);

@@ -37,7 +37,7 @@
 // saturates at high rates: transport-limited), sheet-flow flanks ~6× less; vegetated (veg 1) ≈ 0.4× bare.
 // Steep mountain channels hit maxExchange = 64 fill units per erosion step.
 import type * as THREE from 'three/webgpu';
-import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, floor, instanceIndex, uniform, uniformArray, select, ceil } from 'three/tsl';
+import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, floor, instanceIndex, uniform, uniformArray, select, ceil, exp } from 'three/tsl';
 import { ReaderKernel, type GpuFields } from '../core/gpu';
 import type { Params } from '../core/params';
 import { NCOL, NY, Mat, MAT_COUNT, MAT_ERODIBILITY, FLAG_CONTINENTAL } from './layout';
@@ -51,9 +51,12 @@ export const EROSION_DEFAULTS = {
   minSlope: 0.05,    // voxel/cell floor so flat rivers still carry some load
   maxSlope: 4,
   dMax: 4,           // depth (voxels) above which capacity stops growing (deep water barely moves anyway)
+  submarineTalusMul: 2, // talus multiplier where the sender is under > 1 voxel of water
+  dDeep: 2,          // standing water deeper than this loses capacity: sediment settles in lakes/oceans (deltas, shelves)
+  dDecay: 1.5,       // e-folding depth of that loss
   kDep: 0.5,         // fraction of excess suspended load settling per tick
   maxExchange: 64,   // fill units per column per tick, hydraulic
-  talus: 1.2,        // voxel per cell (≈ 36° at VOXEL_H/CELL = 0.6)
+  talus: 2.5,        // layers per cell before slumping (≈ 7° real at 250 m layers, 20 km cells); 1.2 (≈0.9°) flattened every margin into the sea (B9)
   thermalRate: 0.5,  // fraction of talus excess relaxed per tick (× 'thermalErosion'), clamped to 1
   thermalMaxDir: 63, // fill units per direction per tick (4·63 < 255 → one new voxel max per receiver)
 };
@@ -191,7 +194,10 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const inU = flux.element(tColIdx(x, z.add(int(1)))).w;
     const inD = flux.element(tColIdx(x, z.sub(int(1)))).z;
     const q = vec2(inL.sub(f.y).add(f.x).sub(inR), inD.sub(f.w).add(f.z).sub(inU)).mul(0.5).length();
-    const dEff = clamp(water.element(i), 0, D.dMax);
+    // capacity grows with flow depth in rivers but collapses in deep standing water; without this the
+    // deep ocean kept eroding its floor and suspended sediment piled up forever (B6)
+    const wd = water.element(i).toVar();
+    const dEff = clamp(wd, 0, D.dMax).mul(exp(max(wd.sub(D.dDeep), 0).div(-D.dDecay)));
     const vegF = float(1).sub(clamp(veg.element(i), 0, 1).mul(VEG_ERODIBILITY_K)).toVar();
     const C = kCap.mul(vegF).mul(q.sqrt()).mul(slope).mul(dEff).toVar();
     const s = sed.element(i).toVar();
@@ -227,10 +233,13 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const i = instanceIndex;
     const { x, z } = tColXZ(i);
     const h = surfY.element(i).toVar();
+    // submarine slopes stand steeper (real continental slopes ≈ 4° ≈ 5 layers/cell here); a subaerial talus
+    // underwater slumped every continental margin into the ocean (B9)
+    const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talus).toVar();
     const nbs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     const ex = nbs.map(([dx, dz]) => {
       const hn = surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))));
-      return select(hn.lessThan(NY - 1.01), max(h.sub(hn).sub(talus), 0), float(0)).toVar();
+      return select(hn.lessThan(NY - 1.01), max(h.sub(hn).sub(tal), 0), float(0)).toVar();
     });
     const exSum = ex[0]!.add(ex[1]!).add(ex[2]!).add(ex[3]!).toVar();
     const exMax = max(max(ex[0]!, ex[1]!), max(ex[2]!, ex[3]!));

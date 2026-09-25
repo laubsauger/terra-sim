@@ -36,6 +36,8 @@ export const STATS_WINDOW = 40;
 export const ISO_EVERY = 4;
 /** Pipe-model substeps per geo tick (quasi-steady flow). */
 export const HYDRO_SUBSTEPS = 2;
+/** Reservoir debt (fill units) over which collided crust stacking fades from 1 to 0 (≈ 1 layer/col). */
+export const RES_GATE_UNITS = 255 * 65536;
 /** Erosion runs every N ticks with kGeo scaled by N. */
 export const EROSION_EVERY = 2;
 
@@ -175,6 +177,9 @@ export class Sim {
       this.wilson.update(plates, life, my);
       updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
       this.stats = parseWorldStats(buf);
+      // reservoir snapshot gates crust stacking (see Tectonics.stackGate)
+      // full stacking unless the reservoir is in real debt (magma keeps it near 0 in normal operation)
+      this.tectonics.stackGate.value = Math.min(1, Math.max(0, 1 + this.lastCounters[0]! / RES_GATE_UNITS));
       if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); }
       const op = this.lifecycle.decide(plates, life, my, this.rng, this.godSplit ?? this.wilson.riftRequest);
       this.godSplit = undefined;
@@ -261,6 +266,7 @@ export class Sim {
       lastCounters: this.lastCounters ? [...this.lastCounters] : null,
       uniforms: {
         climateSeaLevel: this.climate.uniforms.seaLevel.value,
+        stackGate: this.tectonics.stackGate.value,
         iceAge: this.climate.uniforms.iceAge.value,
         biomeSeaLevel: this.biome.uniforms.seaLevel.value,
       },
@@ -310,6 +316,7 @@ export class Sim {
     this.climate.setSeaLevel(s.uniforms.climateSeaLevel);
     this.climate.uniforms.iceAge.value = s.uniforms.iceAge;
     this.biome.setSeaLevel(s.uniforms.biomeSeaLevel);
+    this.tectonics.stackGate.value = s.uniforms.stackGate ?? 1;
   }
 }
 
@@ -335,5 +342,5 @@ export interface SimState {
   /** Counters snapshot issued at the last window end, applied at the next one. null before the first window. */
   pendingCounters: number[] | null;
   lastCounters: number[] | null;
-  uniforms: { climateSeaLevel: number; iceAge: number; biomeSeaLevel: number };
+  uniforms: { climateSeaLevel: number; iceAge: number; biomeSeaLevel: number; stackGate?: number };
 }
