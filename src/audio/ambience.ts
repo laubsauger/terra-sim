@@ -38,6 +38,8 @@ export class Ambience {
   private t = 0;
   private nextBird = 4;
   private nextPop = 1;
+  private nextWave = 3;
+  private padGain: GainNode | null = null;
   private levels: AmbienceLevels = { wind: 0.4, ocean: 0.5, rain: 0, volcanic: 0, life: 0.3, closeness: 0.3 };
 
   constructor() {
@@ -76,10 +78,12 @@ export class Ambience {
       src.start(ctx.currentTime + Math.random() * 0.1);
       return { gain, filter };
     };
-    this.layers.wind = loop('pink', 'bandpass', 500, 0.6);
-    this.layers.surf = loop('brown', 'lowpass', 420, 0.5);
-    this.layers.rain = loop('white', 'highpass', 2500, 0.3);
-    this.layers.rumble = loop('brown', 'lowpass', 70, 0.9);
+    // beds are brown/pink noise, heavily low-passed: the earlier white/highpass layers read as hiss
+    this.layers.wind = loop('brown', 'bandpass', 320, 0.8);
+    this.layers.surf = loop('brown', 'lowpass', 260, 0.6);
+    this.layers.rain = loop('pink', 'bandpass', 1400, 0.5);
+    this.layers.rumble = loop('brown', 'lowpass', 55, 0.9);
+    this.startPad();
   }
 
   set(levels: Partial<AmbienceLevels>): void { Object.assign(this.levels, levels); }
@@ -90,14 +94,43 @@ export class Ambience {
     this.t += dt;
     const L = this.levels, now = ctx.currentTime, tc = 0.8;
     const gust = 0.6 + 0.4 * Math.sin(this.t * 0.23) * Math.sin(this.t * 0.071 + 1);
-    this.layers.wind.gain.gain.setTargetAtTime(0.22 * L.wind * gust * (0.6 + 0.4 * (1 - L.closeness)), now, tc);
-    this.layers.wind.filter.frequency.setTargetAtTime(350 + 500 * gust, now, tc);
-    const swell = 0.55 + 0.45 * Math.sin(this.t * 0.9) ** 2; // wave sets ~7 s apart
-    this.layers.surf.gain.gain.setTargetAtTime(0.3 * L.ocean * swell * (0.4 + 0.6 * L.closeness), now, 0.4);
-    this.layers.rain.gain.gain.setTargetAtTime(0.12 * L.rain, now, 1.5);
+    this.layers.wind.gain.gain.setTargetAtTime(0.1 * L.wind * gust * (0.6 + 0.4 * (1 - L.closeness)), now, tc);
+    this.layers.wind.filter.frequency.setTargetAtTime(220 + 260 * gust, now, tc);
+    // surf: a slow swell bed plus separate wave-break swooshes (see wave())
+    const swell = 0.5 + 0.5 * Math.sin(this.t * 0.45) ** 2;
+    this.layers.surf.gain.gain.setTargetAtTime(0.12 * L.ocean * swell * (0.4 + 0.6 * L.closeness), now, 0.6);
+    this.layers.rain.gain.gain.setTargetAtTime(0.06 * L.rain, now, 1.5);
+    if (L.ocean > 0.2 && this.t > this.nextWave) { this.wave(0.5 + 0.5 * L.closeness); this.nextWave = this.t + 5 + Math.random() * 6; }
+    this.padGain?.gain.setTargetAtTime(0.05, now, 3);
     this.layers.rumble.gain.gain.setTargetAtTime(0.5 * L.volcanic, now, 1.2);
     if (L.volcanic > 0.05 && this.t > this.nextPop) { this.pop(); this.nextPop = this.t + 0.3 + Math.random() * 2.5 / (0.2 + L.volcanic); }
     if (L.life > 0.2 && this.t > this.nextBird) { this.chirp(); this.nextBird = this.t + 3 + Math.random() * 14 / L.life; }
+  }
+
+  /** A single wave breaking: band-limited noise swell up and down over ~3 s. */
+  private wave(strength: number): void {
+    const ctx = this.ctx!, t = ctx.currentTime;
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer(ctx, 'pink', 4);
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(300, t); f.frequency.linearRampToValueAtTime(1100, t + 1.1); f.frequency.linearRampToValueAtTime(250, t + 3.2);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.09 * strength, t + 1.0); g.gain.exponentialRampToValueAtTime(0.0001, t + 3.4);
+    const pan = ctx.createStereoPanner(); pan.pan.value = Math.random() * 1.2 - 0.6;
+    src.connect(f).connect(g).connect(pan).connect(this.master); src.start(t); src.stop(t + 3.6);
+  }
+
+  /** Quiet evolving pad (open fifths, slow filter drift) that glues the soundscape into something musical. */
+  private startPad(): void {
+    const ctx = this.ctx!;
+    const g = ctx.createGain(); g.gain.value = 0;
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.3;
+    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.03;
+    const lfoGain = ctx.createGain(); lfoGain.gain.value = 350; lfo.connect(lfoGain).connect(lp.frequency); lfo.start();
+    for (const [f, det] of [[110, -6], [164.8, 4], [220, 7], [329.6, -3]] as const) {
+      const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f; o.detune.value = det;
+      const og = ctx.createGain(); og.gain.value = 0.25;
+      o.connect(og).connect(lp); o.start();
+    }
+    lp.connect(g).connect(this.master);
+    this.padGain = g;
   }
 
   /** Lava bubble: short low sine drop. */
