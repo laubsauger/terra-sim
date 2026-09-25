@@ -136,13 +136,13 @@ T33|x|M6 seeded event scheduler: hotspot, meteor, ice age, flood basalt|V2,V16
 T34|x|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
 T35|x|M6 NaN guard + autosave rollback|V7
 T36|x|M6 soak harness (headless, max speed) asserting bounds|V8
-T37|.|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers|V17
-T38|.|M7 lava/magma emissive + cooling crust|-
-T39|.|M7 sky scattering + day/night + sun/moon on `ambTime`|V17
-T40|.|M7 shadows + GTAO + SSGI \| fallback|V9
+T37|x|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers|V17
+T38|x|M7 lava/magma emissive + cooling crust|-
+T39|x|M7 sky scattering + day/night + sun/moon on `ambTime`|V17
+T40|x|M7 shadows + GTAO + SSGI \| fallback|V9
 T41|.|M7 volumetric clouds from vapor/precip|V9,V15
 T42|.|M7 weather FX: rain, lightning, ash plumes, fog|V15
-T43|.|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
+T43|x|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
 T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
 T45|~|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
 T46|x|M7 procedural ambient audio from sim stats|V14,V15

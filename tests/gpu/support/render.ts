@@ -7,7 +7,7 @@ import { createTerrain } from '../../../src/render/terrain';
 import { createSides } from '../../../src/render/sides';
 import { createWater } from '../../../src/render/water';
 import { createLighting } from '../../../src/render/lighting';
-import { HALF, cellToWorld, voxelToWorldY } from '../../../src/render/space';
+import { HALF, cellToWorld, voxelToWorldY, updateRenderColumns, Y_RENDER_BOTTOM } from '../../../src/render/space';
 import { fillSynthWorld, LAND_X, OCEAN_X, SEA } from './synthWorld';
 
 export const BG = 0x151924; // same as stage.ts
@@ -52,6 +52,7 @@ async function main() {
 
   const frame = async () => {
     await new Promise((r) => requestAnimationFrame(r));
+    updateRenderColumns(renderer, fields); // render-only smoothed columns (look.frame does this in the app)
     renderer.render(scene, camera);
     await device.queue.onSubmittedWorkDone();
     await new Promise((r) => requestAnimationFrame(r));
@@ -87,7 +88,8 @@ async function main() {
       if (name !== 'front') return {};
       const lx = cellToWorld(LAND_X), ox = cellToWorld(OCEAN_X);
       const strata: Pt[] = [];
-      for (let y = 4; y < landSurf - 4; y += 6) strata.push({ ...project(lx, voxelToWorldY(y + 0.5), HALF), y });
+      // the slice is drawn from Y_RENDER_BOTTOM up (render-only crop of the lower asthenosphere)
+      for (let y = Y_RENDER_BOTTOM + 4; y < landSurf - 4; y += 5) strata.push({ ...project(lx, voxelToWorldY(y + 0.5), HALF), y });
       return {
         strata,
         skyOverOcean: project(ox, voxelToWorldY(ySil), HALF),

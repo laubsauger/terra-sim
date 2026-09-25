@@ -62,7 +62,9 @@ test('terrain + side cuts render a strata diorama without GPU errors', async ({ 
 
   // (5) Ping-pong: flipping 'vox' parity must change what the materials read, without rebuilding them.
   // Buffer 0 holds a solid-MAGMA decoy, so after the flip every sample glows orange; before it, most did not.
-  const magmaLike = (c: number[]) => c[0]! > 180 && c[0]! - c[2]! > 120;
+  // Magma is HDR-emissive (it has to bloom), so after tone mapping it nearly clips the red channel
+  // and reads hot orange; lit rock layers stay well below that.
+  const magmaLike = (c: number[]) => c[0]! >= 235 && c[0]! - c[2]! > 90 && c[0]! > c[1]! + 20;
   expect(strataCols.filter(magmaLike).length, 'real world is mostly not magma').toBeLessThan(pts.strata.length / 3);
   await page.evaluate(() => (window as any).rt.setVoxParity(0));
   await page.evaluate(() => (window as any).rt.view('front'));
@@ -72,3 +74,42 @@ test('terrain + side cuts render a strata diorama without GPU errors', async ({ 
   // (1) No WebGPU validation / shader / page errors anywhere along the way.
   expect(problems).toEqual([]);
 });
+
+interface LookAnalysis { samples: number[][]; mean: number; lumStd: number; blackFrac: number; speckles: number }
+const lumOf = (c: number[]) => 0.2126 * c[0]! + 0.7152 * c[1]! + 0.0722 * c[2]!;
+
+// The shipped look: post pipeline (tone map, grade, AO, AA, bloom, DOF on high) over the diorama
+// staging. A broken pass tends to show up as a black / flat frame, a lost backdrop, or NaN specks.
+for (const quality of ['high', 'low'] as const) {
+  test(`post pipeline (${quality}) renders the diorama on its plinth over a studio backdrop, no NaN specks`, async ({ page }) => {
+    mkdirSync(OUT, { recursive: true });
+    const problems: string[] = [];
+    page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+    page.on('console', (m) => {
+      const t = m.type();
+      if (/favicon/.test(m.location().url)) return;
+      if (t === 'error' || (t === 'warning' && GPU_PROBLEM.test(m.text()))) problems.push(`${t}: ${m.text()}`);
+    });
+    await page.goto(`/tests/gpu/support/renderLook.html?quality=${quality}`);
+    await page.waitForFunction(() => (window as any).rl?.ready === true, null, { timeout: 60_000 });
+    await page.evaluate(() => (window as any).rl.frames(40)); // TRAA / SSGI history settles
+    const pts = await page.evaluate(() => (window as any).rl.points());
+    const png = await page.screenshot({ path: `${OUT}/look-${quality}.png` });
+    const a: LookAnalysis = await page.evaluate(([b64, p]) => (window as any).rl.analyze(b64, p),
+      [png.toString('base64'), [pts.plinth, pts.backdrop, { px: pts.backdrop.px, py: 800 - 24 }]] as const);
+    const [plinth, bgTop, bgBottom] = a.samples as [number[], number[], number[]];
+
+    // A lit picture, not a black or flat-filled frame.
+    expect(a.mean, 'mean luminance').toBeGreaterThan(18);
+    expect(a.lumStd, 'luminance spread').toBeGreaterThan(15);
+    // Studio backdrop: never flat black, and a gradient (vignette + sweep), not a single colour.
+    expect(lumOf(bgTop), `backdrop ${bgTop}`).toBeGreaterThan(6);
+    expect(Math.abs(lumOf(bgTop) - lumOf(bgBottom)), `backdrop gradient ${bgTop} vs ${bgBottom}`).toBeGreaterThan(2);
+    // The plinth is there and reads apart from the backdrop.
+    expect(dist(plinth, bgTop), `plinth ${plinth} vs backdrop ${bgTop}`).toBeGreaterThan(12);
+    // NaN/Inf anywhere in the HDR chain leaves dead black pixels (TRAA / bloom / DOF spread them).
+    expect(a.speckles, 'isolated dead pixels').toBeLessThanOrEqual(3);
+    expect(a.blackFrac, 'pure-black fraction').toBeLessThan(0.002);
+    expect(problems).toEqual([]);
+  });
+}

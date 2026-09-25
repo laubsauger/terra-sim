@@ -1,5 +1,6 @@
 // Synthetic CPU-filled world for render tests: sine hills + a mountain on the land half, ocean on
-// the other half, folded continental strata, oceanic basalt, a magma pocket straddling the z seam.
+// the other half, folded continental strata that taper offshore as a wedge over oceanic crust
+// (sediment veneer, basalt, gabbro), a magma pocket straddling the z seam.
 // Fills the fields directly (no worldgen / derive pass needed).
 import { NX, NY, NZ, NCOL, Mat, packVoxel, voxIdx, colIdx, FLAG_CONTINENTAL, Y_SEA_NOMINAL } from '../../../src/sim/layout';
 import type { GpuFields } from '../../../src/core/gpu';
@@ -30,10 +31,11 @@ export function matAt(x: number, y: number, z: number, h: number): number {
   // magma pocket centred on the z seam (z=0 ≡ z=NZ), visible on both ±Z faces
   const mx = (x - 96) / 12, my = (y - 40) / 6, mz = wrapD(z, 0, NZ) / 9;
   if (mx * mx + my * my + mz * mz < 1) return Mat.MAGMA;
-  const continental = 76 + 17 * Math.sin((TAU * x) / NX) > 70;
-  if (!continental) {
+  // Continental wedge: full stack in the core, thinning to nothing offshore (no hard wall).
+  const contThick = 62 * contFrac(x);
+  if (y < h - contThick) {
     if (y < 36) return Mat.GABBRO;
-    return y >= h - 2.5 ? Mat.SEDIMENT : Mat.BASALT;
+    return contThick < 1 && y >= h - 2.5 ? Mat.SEDIMENT : Mat.BASALT;
   }
   if (y >= h - 1.5) return Mat.SEDIMENT;
   const s = y - fold; // folded stack
@@ -48,6 +50,12 @@ export function matAt(x: number, y: number, z: number, h: number): number {
   if (s < 86) return Mat.SANDSTONE;
   if (s < 92) return Mat.LIMESTONE;
   return Mat.ANDESITE;
+}
+
+/** 0 in the deep ocean … 1 in the continental core, smooth across the margin. */
+function contFrac(x: number): number {
+  const base = 76 + 17 * Math.sin((TAU * x) / NX);
+  return Math.max(0, Math.min(1, (base - 62) / 14));
 }
 
 export interface SynthInfo { surf: Float32Array; water: Float32Array }
@@ -68,8 +76,7 @@ export function fillSynthWorld(fields: GpuFields): SynthInfo {
       const h = Math.min(NY - 1, heightAt(x, z));
       const top = Math.floor(h);
       const frac = h - top;
-      const continental = 76 + 17 * Math.sin((TAU * x) / NX) > 70;
-      const flags = continental ? FLAG_CONTINENTAL : 0;
+      const flags = contFrac(x) > 0.5 ? FLAG_CONTINENTAL : 0;
       let topSolid = -1, topFill = 0;
       for (let y = 0; y <= top && y < NY; y++) {
         const fill = y < top ? 255 : Math.round(frac * 255);

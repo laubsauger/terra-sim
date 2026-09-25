@@ -1,27 +1,45 @@
-// T11 side cut render: 4 vertical faces + bottom at the block edges. Each fragment reads the voxel
+// T11 side cut render: 4 vertical faces + bottom at the block edges. Each fragment reads the voxels
 // behind it straight from the 'vox' storage buffer. Above the column surface → discard, so the face
 // silhouette follows the terrain exactly (same bilinear surfY as the terrain mesh edge).
+// Look: polished "cake slice": strata are blended between neighbouring columns/layers with a soft
+// step (organic lines instead of voxel stairs), per-material sheen, micro-normal grooves, glowing
+// magma and a hot, slowly convecting mantle (emissive > 1 → bloom). The water column on the faces
+// is glass-like: refracted scene behind, Beer-Lambert tint by thickness, a meniscus line.
 import * as THREE from 'three/webgpu';
 import {
-  Fn, vec3, vec4, float, int, uniform, positionGeometry, positionWorld, Discard,
-  mix, smoothstep, saturate, sin, floor, min, pow, hash, mx_noise_float, mx_noise_vec3,
+  Fn, vec2, vec3, vec4, float, int, uint, uniform, positionGeometry, positionWorld, normalGeometry, Discard,
+  mix, smoothstep, saturate, sin, cos, floor, fract, min, max, pow, hash, abs, clamp, texture, normalize, step,
+  transformNormalToView, dot, screenUV, positionView, viewportSharedTexture,
 } from 'three/tsl';
-import { NY, CELL, Mat, Y_MANTLE_TOP, Y_SEA_NOMINAL } from '../sim/layout';
+import { NX, NY, CELL, VOXEL_H, Mat, Y_SEA_NOMINAL } from '../sim/layout';
 import { tMat } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
-import { HALF, tWorldY, tVoxelY, tWorldToCell, tWorldToColumn, columnSampler, voxReader, tTopVoxel } from './space';
-import { createPaletteNodes, biomeColor } from './palette';
+import { HALF, tWorldY, tVoxelY, tWorldToCell, tWorldToColumn, columnSampler, voxReader, tTopVoxel, ambTime, Y_RENDER_BOTTOM, vertEx } from './space';
+import { viewDirWorld } from './space';
+import { createPaletteNodes, createBiomeNodes, biomeColor, BIOME_SLOTS } from './palette';
+import { lookTextures } from './textures';
+import { WATER_SCATTER, sceneViewZ, waterTransmit, swell } from './water';
+import { skyColor, skyU } from './sky';
+import { CX, CZ, CY } from '../sim/mantleModel';
+import { shadowProxy } from './lighting';
 
-/** Five quads; y in voxel units (0..NY), mapped to world by positionNode so vertEx applies. */
+type F = THREE.Node<'float'>;
+type I = THREE.Node<'int'>;
+type V3 = THREE.Node<'vec3'>;
+
+/** Voxel layers above the rendered bottom where the mantle glows (narrow, deep, subtle). */
+const HOT_TOP = Y_RENDER_BOTTOM + 14;
+
+/** Five quads; y in voxel units (Y_RENDER_BOTTOM..NY), mapped to world by positionNode so vertEx applies. */
 function createSideGeometry(): THREE.BufferGeometry {
-  const H = NY;
+  const H = NY, B = Y_RENDER_BOTTOM;
   // [corner a, corner b, corner c, corner d] counter-clockwise seen from outside, + outward normal
   const quads: [number[][], number[]][] = [
-    [[[HALF, 0, HALF], [HALF, 0, -HALF], [HALF, H, -HALF], [HALF, H, HALF]], [1, 0, 0]],
-    [[[-HALF, 0, -HALF], [-HALF, 0, HALF], [-HALF, H, HALF], [-HALF, H, -HALF]], [-1, 0, 0]],
-    [[[-HALF, 0, HALF], [HALF, 0, HALF], [HALF, H, HALF], [-HALF, H, HALF]], [0, 0, 1]],
-    [[[HALF, 0, -HALF], [-HALF, 0, -HALF], [-HALF, H, -HALF], [HALF, H, -HALF]], [0, 0, -1]],
-    [[[-HALF, 0, -HALF], [HALF, 0, -HALF], [HALF, 0, HALF], [-HALF, 0, HALF]], [0, -1, 0]],
+    [[[HALF, B, HALF], [HALF, B, -HALF], [HALF, H, -HALF], [HALF, H, HALF]], [1, 0, 0]],
+    [[[-HALF, B, -HALF], [-HALF, B, HALF], [-HALF, H, HALF], [-HALF, H, -HALF]], [-1, 0, 0]],
+    [[[-HALF, B, HALF], [HALF, B, HALF], [HALF, H, HALF], [-HALF, H, HALF]], [0, 0, 1]],
+    [[[HALF, B, -HALF], [-HALF, B, -HALF], [-HALF, H, -HALF], [HALF, H, -HALF]], [0, 0, -1]],
+    [[[-HALF, B, -HALF], [HALF, B, -HALF], [HALF, B, HALF], [-HALF, B, HALF]], [0, -1, 0]],
   ];
   const pos: number[] = [], nrm: number[] = [], idx: number[] = [];
   for (const [corners, n] of quads) {
@@ -40,104 +58,225 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
   const S = columnSampler(fields);
   const vox = voxReader(fields);
   const pal = createPaletteNodes();
+  const bioN = createBiomeNodes();
+  const crustT = fields.names().includes('crustTemp') ? fields.pair('crustTemp')[0] : null;
+  const tex = lookTextures();
   const seaLevel = uniform(opts.seaLevel ?? Y_SEA_NOMINAL);
   const geo = createSideGeometry();
   const positionNode = vec3(positionGeometry.x, tWorldY(positionGeometry.y), positionGeometry.z);
 
-  // ---- rock faces ----
-  // info = (mat, voxel y, depth below silhouette, column water); computed once, used by colour + emissive.
-  const info = Fn(() => {
-    const p = positionWorld;
-    const vy = tVoxelY(p.y).toVar();
-    const surfH = S.height(S.corners(tWorldToCell(p.x), tWorldToCell(p.z))).toVar();
-    Discard(vy.greaterThan(surfH));
-    // Jitter the lookup by ~half a voxel so layer boundaries read as organic wavy lines, not voxel stairs.
-    const j = mx_noise_vec3(vec3(p.x.mul(12), vy.mul(0.3), p.z.mul(12)));
-    const cx = tWorldToColumn(p.x.add(j.x.mul(CELL * 0.35))), cz = tWorldToColumn(p.z.add(j.z.mul(CELL * 0.35)));
-    // Interpolated silhouette can sit above this column's own top voxel: show its top solid layer there.
-    const y = int(min(floor(vy.add(j.y.mul(0.55))), float(tTopVoxel(S.surfAt(cx, cz)))));
-    const m = tMat(vox(cx, y, cz));
-    return vec4(m.toFloat(), vy, surfH.sub(vy), S.waterAt(cx, cz));
-  }).once()().toVar('sideInfo');
-
-  const mId = int(info.x);
-  const vy = info.y, depth = info.z, colWater = info.w;
   const p = positionWorld;
+  const vy = tVoxelY(p.y).toVar('sideVy');
+  const surfH = Fn(() => S.height(S.corners(tWorldToCell(p.x), tWorldToCell(p.z)))).once()().toVar('sideSurfH');
+  const depth = surfH.sub(vy).toVar('sideDepth'); // voxel layers below the silhouette
+  // Face frame: `along` runs horizontally in the face, the perpendicular column is the edge column.
+  // Branch-free throughout (mix by 0/1 masks, no select): see BRANCH-FREE NOTE in space.ts.
+  const onX = step(0.5, abs(normalGeometry.x));
+  const along = mix(p.x, p.z, onX).toVar('sideAlong');
+  const tangent = mix(vec3(1, 0, 0), vec3(0, 0, 1), onX);
+  const pick = (ifX: I, ifZ: I): I => int(mix(float(ifZ), float(ifX), onX)) as I;
+  const edgeCol = pick(tWorldToColumn(p.x), tWorldToColumn(p.z)).toVar('sideEdge');
+
+  // Organic warp so layer boundaries wander instead of following the voxel grid.
+  const warpT = texture(tex.detail, vec2(along.mul(0.55), vy.mul(0.018))).toVar('sideWarp');
+  const u = tWorldToCell(along).add(warpT.r.sub(0.5).mul(1.6));
+  const yF = vy.add(warpT.g.sub(0.5).mul(2.2)).sub(0.5);
+  const u0 = floor(u), yi0 = floor(yF);
+  const fu = fract(u).toVar('sideFu');
+  const fy = fract(yF).toVar('sideFy');
+
+  // Four voxel samples (2 columns × 2 layers), each clamped to its column's top solid voxel.
+  // Discard above the silhouette happens here (the Fn is shared by colour, shadow mask and emissive).
+  const mats = Fn(() => {
+    Discard(vy.greaterThan(surfH));
+    const ids: F[] = [];
+    for (const da of [0, 1]) {
+      const a = int(clamp(u0.add(da), 0, NX - 1));
+      const x = pick(edgeCol, a), z = pick(a, edgeCol);
+      const topV = tTopVoxel(S.surfAt(x, z));
+      for (const dy of [0, 1]) {
+        const y = int(min(yi0.add(dy), float(topV)));
+        ids.push(tMat(vox(x, y, z)).toFloat());
+      }
+    }
+    // order: (a0,y0) (a0,y1) (a1,y0) (a1,y1)
+    return vec4(ids[0]!, ids[1]!, ids[2]!, ids[3]!);
+  }).once()().toVar('sideMats');
+  const mi = [int(mats.x), int(mats.y), int(mats.z), int(mats.w)];
+  // Smooth iso-contours instead of voxel stairs: each sample's material gets the summed bilinear
+  // weight of all samples sharing it (an indicator field); sharpening that (pow) picks the majority
+  // material with a thin anti-aliased edge along the bilinear iso-line → strata boundaries run as
+  // smooth slanted lines through the cells.
+  const bil = [
+    float(1).sub(fu).mul(float(1).sub(fy)), float(1).sub(fu).mul(fy),
+    fu.mul(float(1).sub(fy)), fu.mul(fy),
+  ].map((w, i) => w.toVar(`sideBil${i}`));
+  const mf = [mats.x, mats.y, mats.z, mats.w];
+  const same = (i: number, j: number) => (i === j ? float(1) : float(mf[i]!.equal(mf[j]!)));
+  const q = bil.map((w, i) => {
+    const W = bil.reduce((acc, wj, j) => acc.add(wj.mul(same(i, j))), float(0) as F);
+    return w.mul(pow(W, 6)).add(1e-6);
+  });
+  const qSum = q.reduce((a, b) => a.add(b), float(0) as F);
+  const wts = q.map((w, i) => w.div(qSum).toVar(`sideW${i}`));
+  const blendF = (f: (m: I) => F): F => wts.reduce((acc, w, i) => acc.add(f(mi[i]!).mul(w)), float(0) as F);
+  const blendV = (f: (m: I) => V3): V3 => wts.reduce((acc, w, i) => acc.add(f(mi[i]!).mul(w)), vec3(0) as V3);
+  const isMat = (id: number) => (m: I) => float(m.equal(int(id))) as F;
+
+  const baseCol = blendV(pal.color).toVar('sideBase');
+  const band = blendF(pal.band).toVar('sideBand');
+  const periW = blendF(isMat(Mat.PERIDOTITE)).toVar('sidePeri');
+  const magW = blendF(isMat(Mat.MAGMA)).toVar('sideMag');
+  const a0 = int(clamp(u0, 0, NX - 1));
+  const colWater = S.waterAt(pick(edgeCol, a0), pick(a0, edgeCol)).toVar('sideColWater');
+
+  // Strata grooves: wavy fine bands; their phase also tilts the normal (micro relief on the face).
+  const bandPhase = vy.add(warpT.b.sub(0.5).mul(5)).mul(2.2).toVar('sideBandPhase');
+  const fineN = texture(tex.detail, vec2(along.mul(0.25), vy.mul(0.1))).toVar('sideFine');
+  const grainT = texture(tex.detail, vec2(along.mul(1.6), vy.mul(0.05))).toVar('sideGrain');
+
+  // Slow convection plumes rising through the mantle (ambTime: 0.0025·3600 = 9 texture periods).
+  const flow = texture(tex.detail, vec2(along.mul(0.35), vy.mul(0.01).sub(ambTime.mul(0.0025)))).r.toVar('sideFlow');
 
   const color = Fn(() => {
-    const base = pal.color(mId);
-    const band = pal.band(mId);
-    // Strata: wavy fine bands + streaks + per-layer jitter so stacked layers of one rock still read.
-    const warp = mx_noise_float(vec3(p.x.mul(9), vy.mul(0.08), p.z.mul(9))).toVar();
-    const b1 = sin(vy.add(warp.mul(2.5)).mul(2.2));
-    const b2 = mx_noise_float(vec3(p.x.mul(4), vy.mul(1.7), p.z.mul(4)));
-    const jit = hash(floor(vy).add(mId.toFloat().mul(31.7)));
-    let col = base.mul(float(1).add(band.mul(b1.mul(0.55).add(b2.mul(0.6))))).mul(jit.mul(0.1).add(0.95));
+    const b1 = sin(bandPhase);
+    const b2 = fineN.g.sub(0.5).mul(2);
+    const jit = hash(floor(vy).add(mats.x.mul(31.7)));
+    let col = baseCol.mul(float(1).add(band.mul(b1.mul(0.55).add(b2.mul(0.7))))).mul(jit.mul(0.12).add(0.94)) as V3;
     // Grain speckle, stronger in crystalline rock.
-    col = col.mul(mx_noise_float(vec3(p.x.mul(160), vy.mul(3), p.z.mul(160))).mul(0.06).add(1));
+    col = col.mul(grainT.b.sub(0.5).mul(0.16).add(1));
     // Darken gently with depth (deep crust reads as "inside").
-    col = col.mul(mix(1.0, 0.76, saturate(depth.div(70))));
+    col = col.mul(mix(1.0, 0.8, saturate(depth.div(70))));
     // Diorama cake rim on dry land: grass lip over a soil band; snow when high; wet sediment under water.
-    const dry = colWater.lessThan(0.01);
-    const alt = vy.add(depth).sub(seaLevel);
-    const lip = float(0.55).add(warp.mul(0.25));
-    const soil = float(2.2).add(warp.mul(0.9));
-    const topCol = mix(biomeColor('grassLush'), biomeColor('snow'), smoothstep(27, 32, alt.add(warp.mul(4))));
-    const rimLand = depth.lessThan(lip).select(topCol, mix(biomeColor('soil'), col, smoothstep(soil.sub(0.8), soil, depth)));
+    const warp = warpT.r.sub(0.5).mul(2);
+    const dry = float(1).sub(step(0.01, colWater));
+    const alt = surfH.sub(seaLevel);
+    const lip = float(0.6).add(warp.mul(0.25));
+    const soil = float(2.4).add(warp.mul(0.9));
+    // Turf lip follows the column's biome cover (sand over deserts, dark green under taiga…).
+    const bioV = S.bioAt(pick(edgeCol, a0), pick(a0, edgeCol));
+    const bid = int(clamp(floor(bioV), 0, BIOME_SLOTS - 1));
+    const bioLip = mix(bioN.ground(bid), bioN.veg(bid), smoothstep(0.0, 0.35, fract(max(bioV, 0)).sub(0.1)));
+    const procLip = mix(biomeColor('grassLush'), vec3(0.2, 0.45, 0.08), grainT.g);
+    const grassLip = mix(procLip, bioLip.mul(grainT.g.mul(0.15).add(0.92)), step(0, bioV));
+    const topCol = mix(grassLip, biomeColor('snow'), smoothstep(27, 32, alt.add(warp.mul(4))));
+    const soilCol = mix(biomeColor('soil'), vec3(0.24, 0.13, 0.07), grainT.r);
+    const inLip = step(depth, lip), inSoil = step(depth, soil);
+    const rimLand = mix(mix(soilCol, col, smoothstep(soil.sub(0.8), soil, depth)), topCol, inLip);
     const rimWet = mix(biomeColor('sand'), col, smoothstep(0.6, 1.6, depth.add(warp.mul(0.4))));
-    const beach = alt.lessThan(1.2);
-    col = depth.lessThan(soil).select(dry.and(beach.not()).select(rimLand, rimWet), col);
-    // Peridotite: olive in the mantle top, heating to a deep glow towards the bottom.
-    const hot = mId.equal(int(Mat.PERIDOTITE)).select(pow(saturate(float(1).sub(vy.div(Y_MANTLE_TOP))), 1.6), float(0));
-    return mix(col, col.mul(vec3(1.2, 0.55, 0.3)), hot.mul(0.7));
-  })().toVar('sideColor');
+    const landRim = dry.mul(step(1.2, alt)); // dry and above the beach
+    col = mix(col, mix(rimWet, rimLand, landRim), inSoil);
+    // Soft occlusion under the turf lip and where the slice meets the tray.
+    const under = mix(mix(0.78, 1.0, smoothstep(soil, soil.add(5), depth)), float(1), inSoil);
+    col = col.mul(under).mul(mix(0.55, 1.0, smoothstep(Y_RENDER_BOTTOM, Y_RENDER_BOTTOM + 5, vy)));
+    // Peridotite: deep warm grey-brown rock with broad mottling and faint rising convection
+    // streaks, a gentle warm gradient with depth and a narrow hot band at the very bottom.
+    const streak = flow.sub(0.5).mul(0.35).add(warpT.b.sub(0.5).mul(0.3)).add(1);
+    const warm = smoothstep(Y_RENDER_BOTTOM + 45, Y_RENDER_BOTTOM, vy);
+    col = mix(col, col.mul(streak).mul(mix(vec3(1), vec3(1.18, 0.92, 0.8), warm)), periW);
+    const hot = pow(smoothstep(HOT_TOP, Y_RENDER_BOTTOM, vy), 1.5).mul(periW);
+    return mix(col, col.mul(vec3(1.3, 0.55, 0.3)), hot.mul(0.7));
+  }).once()().toVar('sideColor');
 
+  // Heat in cross-section from the sim's half-res 'crustTemp' (°C; pair[0] is current between mantle
+  // steps): isotherms bulge up under spreading ridges and plumes and halo magma chambers, so the
+  // cut reads "the crust is splitting here". Glow starts dull red ~800 °C, orange-yellow at 1300.
+  const thermal = Fn(() => {
+    if (!crustT) return vec3(0);
+    const uh = u.mul(0.5).sub(0.25), yh = vy.mul(0.5).sub(0.25);
+    const eh = int(float(edgeCol).mul(0.5));
+    const u0h = floor(uh), y0h = floor(yh), fuh = fract(uh), fyh = fract(yh);
+    const at = (du: number, dy: number) => {
+      const a = int(clamp(u0h.add(du), 0, CX - 1));
+      const cx = pick(eh, a), cz = pick(a, eh);
+      const cy = int(clamp(y0h.add(dy), 0, CY - 1));
+      return crustT.element(uint(cx.add(cz.mul(CX)).add(cy.mul(CX * CZ)))) as unknown as F;
+    };
+    const T = mix(mix(at(0, 0), at(1, 0), fuh), mix(at(0, 1), at(1, 1), fuh), fyh);
+    const g = smoothstep(800, 1320, T);
+    const ramp = mix(vec3(0.5, 0.06, 0.01), mix(vec3(1.0, 0.3, 0.05), vec3(1.0, 0.6, 0.18), smoothstep(0.6, 1.0, g)), smoothstep(0.0, 0.5, g));
+    return ramp.mul(g.mul(g)).mul(flow.mul(0.5).add(0.75)).mul(1.5);
+  })();
   const emissive = Fn(() => {
-    const flicker = mx_noise_float(vec3(p.x.mul(14), vy.mul(0.6), p.z.mul(14))).mul(0.35).add(0.9);
-    const hot = mId.equal(int(Mat.PERIDOTITE))
-      .select(pow(saturate(float(1).sub(vy.div(Y_MANTLE_TOP))), 2.2), float(1));
-    // Magma: cartoon lava, bright cells with darker cooling veins.
-    const veins = mix(0.45, 1.0, smoothstep(-0.25, 0.25, mx_noise_float(vec3(p.x.mul(40), vy.mul(1.2), p.z.mul(40)))));
-    const lava = mId.equal(int(Mat.MAGMA)).select(veins, float(1));
-    // Faint display lighting so faces turned away from the sun still read as strata, not black.
-    return pal.emissive(mId).mul(flicker).mul(hot).mul(lava).add(color.mul(0.1));
+    const hot = pow(smoothstep(HOT_TOP, Y_RENDER_BOTTOM, vy), 1.6);
+    const periGlow = mix(float(1), hot.mul(flow.mul(0.9).add(0.3)), periW);
+    // Magma: bright cells with darker cooling veins.
+    const veins = mix(0.35, 1.0, smoothstep(0.25, 0.6, fineN.a)).mul(flow.mul(0.4).add(0.8));
+    const magGlow = mix(float(1), veins, magW);
+    // Display fill so faces turned away from the sun still read as geology, not a black void
+    // (sky-tinted, so it fades with the night).
+    const fill = color.mul(skyU.zenith.mul(0.35).add(0.07));
+    return blendV(pal.emissive).mul(periGlow).mul(magGlow).add(fill).add(thermal);
+  })();
+
+  // Micro normal: groove tilt from the band phase + grain relief, all in the face plane.
+  const faceN = Fn(() => {
+    const groove = cos(bandPhase).mul(band).mul(0.9);
+    const g = vec2(grainT.a.sub(0.5), fineN.a.sub(0.5)).mul(0.35);
+    const lip = smoothstep(0.0, 0.8, depth); // turf lip stays smooth
+    return normalize(normalGeometry.add(vec3(0, groove.add(g.y), 0).mul(lip)).add(tangent.mul(g.x.mul(lip))));
   })();
 
   const rockMat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   rockMat.positionNode = positionNode;
   rockMat.colorNode = color;
-  rockMat.roughnessNode = pal.rough(mId);
+  rockMat.normalNode = transformNormalToView(faceN);
+  // Polished cut: glossier than the terrain, per-material, with grain breaking up the sheen.
+  rockMat.roughnessNode = blendF(pal.rough).mul(mix(0.55, 0.85, grainT.b)).mul(mix(1.0, 0.85, magW));
   rockMat.emissiveNode = emissive;
   const rock = new THREE.Mesh(geo, rockMat);
   rock.name = 'sides';
   rock.frustumCulled = false;
+  rock.receiveShadow = true;
+  // Shadow proxy with the same silhouette as the colour pass (discard above the column surface).
+  const proxy = shadowProxy(geo, positionNode, Fn(() => {
+    const y = tVoxelY(positionWorld.y);
+    return y.lessThanEqual(S.height(S.corners(tWorldToCell(positionWorld.x), tWorldToCell(positionWorld.z))));
+  })());
+  rock.add(proxy);
 
-  // ---- water on the faces: between surfY and the wet water level, translucent ----
+  // ---- water on the faces: glass-like column between surfY and the wet water level ----
   const wInfo = Fn(() => {
     const q = positionWorld;
     const wy = tVoxelY(q.y).toVar();
     const c = S.corners(tWorldToCell(q.x), tWorldToCell(q.z));
     const wl = S.level(c);
-    Discard(wy.lessThan(S.height(c)).or(wy.greaterThan(wl.level)).or(wl.wet.lessThan(0.001)));
-    return wl.level.sub(wy);
+    // same swell as the water sheet, so the meniscus rides the waves at the cut
+    const lvl = wl.level.add(swell(q.xz, wl.level.sub(S.height(c))).x.div(vertEx.mul(VOXEL_H))).toVar();
+    Discard(wy.lessThan(S.height(c)).or(wy.greaterThan(lvl)).or(wl.wet.lessThan(0.001)));
+    return lvl.sub(wy);
   }).once()().toVar('sideWaterDepth');
   const wd = wInfo;
-  const waterMat = new THREE.MeshStandardNodeMaterial({ metalness: 0, roughness: 0.12, transparent: true, depthWrite: false });
+  const waterMat = new THREE.MeshStandardNodeMaterial({ metalness: 0, roughness: 0.04, transparent: true, depthWrite: false });
   waterMat.positionNode = positionNode;
-  const surfLine = float(1).sub(smoothstep(0.0, 0.45, wd));
-  waterMat.colorNode = mix(mix(biomeColor('waterShallow'), biomeColor('waterSide'), saturate(wd.div(6))),
-    biomeColor('waterDeep'), saturate(wd.div(28))).add(surfLine.mul(0.35));
-  waterMat.opacityNode = mix(0.5, 0.88, saturate(wd.div(20))).add(surfLine.mul(0.2));
+  {
+    const fragZ = positionView.z;
+    const rayScale = positionView.length().div(fragZ.negate().max(1e-4));
+    // Thickness to whatever is behind the glass (seabed, or deep into the block), capped.
+    const thick = min(fragZ.sub(sceneViewZ(screenUV)).max(0).mul(rayScale), 0.9).toVar('glassThick');
+    const T = waterTransmit(thick.add(CELL * 0.5)).toVar('glassT');
+    const V = viewDirWorld;
+    const fres = float(0.02).add(pow(float(1).sub(saturate(dot(normalGeometry, V.negate()))), 5).mul(0.98));
+    const refl = skyColor(V.sub(normalGeometry.mul(dot(V, normalGeometry).mul(2))) as V3, false);
+    // Meniscus: bright line right at the surface, a thin darker line just below it.
+    const menBright = float(1).sub(smoothstep(0.0, 0.35, wd));
+    const menDark = smoothstep(0.35, 0.6, wd).mul(float(1).sub(smoothstep(0.6, 1.1, wd)));
+    const scatter = vec3(WATER_SCATTER.r, WATER_SCATTER.g, WATER_SCATTER.b).mul(float(1).sub(T.g)).mul(1.15);
+    waterMat.colorNode = scatter.add(vec3(menBright.mul(0.5)));
+    waterMat.emissiveNode = viewportSharedTexture(screenUV).rgb.mul(T).mul(float(1).sub(fres)).mul(float(1).sub(menDark.mul(0.35)))
+      .add(refl.mul(fres)).add(vec3(0.7, 0.9, 1.0).mul(menBright.mul(0.35)));
+  }
   const water = new THREE.Mesh(geo, waterMat);
   water.name = 'sides-water';
   water.frustumCulled = false;
-  water.renderOrder = 1;
+  water.renderOrder = 3;
+  water.receiveShadow = true;
 
   const group = new THREE.Group();
   group.name = 'sides-group';
   group.add(rock, water);
   return {
     object: group,
-    dispose() { geo.dispose(); rockMat.dispose(); waterMat.dispose(); },
+    dispose() { geo.dispose(); rockMat.dispose(); waterMat.dispose(); (proxy.material as THREE.Material).dispose(); },
   };
 }
