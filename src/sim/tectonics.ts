@@ -10,13 +10,13 @@
 // Isostasy rides along: the winning column shifts ±1 layer toward buoyancy equilibrium.
 // A voxel kernel then rebuilds every column from its action. All mass moves in integer fill units (V3).
 import * as THREE from 'three/webgpu';
-import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore } from 'three/tsl';
+import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, vec2 } from 'three/tsl';
 import { PingPongKernel, type GpuFields } from '../core/gpu';
 import { NCOL, NVOX, NY, Mat, MAT_DENSITY, FLAG_CONTINENTAL, packVoxel } from './layout';
 import { tColIdx, tColXZ, uMin } from './tslLayout';
 import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
-import { CTR_PLATE, CTR_RESERVOIR } from './fields';
+import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE } from './fields';
 
 // Isostasy calibration (voxel-y units). Surface at equilibrium:
 //   eq = Y_COMP + thickness * (1 - ρcrust/ρmantle) * ISO_GAIN - (oceanic ? SUBSIDENCE * sqrt(age) : 0)
@@ -34,9 +34,15 @@ export const RIDGE_GABBRO = 3;
 export const RIDGE_BASALT = 4;
 export const RIDGE_MASS = (RIDGE_GABBRO + RIDGE_BASALT) * 255;
 /** Max layers of crustal root added to the winner per collision event. */
-export const OROGENY_MAX = 3;
+export const OROGENY_MAX = 1;
+/** Crust thicker than this (layers) stops thickening; extra collided mass delaminates into the mantle. */
+export const MAX_CRUST_LAYERS = 64;
+/** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
+export const TEC_EVERY = 4;
 
-const ACT_NEW = 1 << 16;
+/** tecAct bits: 0-15 src col | 16 new ridge crust | 18-19 orogeny k | 20-21 isostasy v+1 | 24 oceanic slab consumed here. */
+export const ACT_NEW = 1 << 16;
+export const ACT_SUBDUCT = 1 << 24;
 
 export interface TectonicsStats { area: number[]; subducted: number[]; created: number[] }
 
@@ -62,16 +68,19 @@ export class Tectonics {
     this.waterGather = [this.buildWaterGather(pid0), this.buildWaterGather(pid1)];
     this.voxel = new PingPongKernel<'uint'>(fields, 'vox', (src, dst) => this.buildVoxel(src, dst));
     const water = fields.cur('water');
-    const waterTmp = fields.cur('waterTmp');
+    const sed = fields.cur('sedSusp');
+    const waterTmp = fields.cur<'vec2'>('waterTmp');
     this.waterBack = Fn(() => {
       If(instanceIndex.greaterThanEqual(uint(NCOL)), () => { Return(); });
-      water.element(instanceIndex).assign(waterTmp.element(instanceIndex));
+      const t = waterTmp.element(instanceIndex).toVar();
+      water.element(instanceIndex).assign(t.x);
+      sed.element(instanceIndex).assign(t.y);
     })().compute(NCOL);
     const ctr = fields.cur<'int'>('counters');
     this.clearStats = Fn(() => {
-      If(instanceIndex.greaterThanEqual(uint(MAX_PLATES * 4)), () => { Return(); });
+      If(instanceIndex.greaterThanEqual(uint(CTR_SIZE - CTR_PLATE)), () => { Return(); });
       atomicStore(ctr.element(instanceIndex.add(CTR_PLATE)), int(0));
-    })().compute(MAX_PLATES * 4);
+    })().compute(CTR_SIZE - CTR_PLATE);
   }
 
   private buildDecide(pidCur: THREE.StorageBufferNode<'uint'>, pidNext: THREE.StorageBufferNode<'uint'>,
@@ -94,6 +103,7 @@ export class Tectonics {
       const massSum = uint(0).toVar();
       const contMass = uint(0).toVar();
       const contCount = uint(0).toVar();
+      const oceanLost = uint(0).toVar();
       const best = uint(0).toVar();
       const bestSrc = uint(0).toVar();
       const bestPlate = uint(0).toVar();
@@ -145,9 +155,12 @@ export class Tectonics {
         const k = uint(0).toVar();
         If(bestCont.equal(uint(1)).and(contCount.greaterThan(uint(1))), () => {
           k.assign(uMin(contMass.sub(bestMass).div(uint(510)), uint(OROGENY_MAX)));
+          k.assign(select(bestMass.greaterThanEqual(uint(MAX_CRUST_LAYERS * 255)), uint(0), k));
           k.assign(select(top.add(k).greaterThanEqual(uint(NY - 2)), uint(NY - 2).sub(uMin(top, uint(NY - 2))), k));
         });
         const loserMass = massSum.sub(bestMass);
+        // an oceanic loser means a slab went down here (arc volcanism input)
+        oceanLost.assign(select(count.sub(uint(1)).greaterThan(contCount.sub(bestCont)), uint(ACT_SUBDUCT), uint(0)));
         If(loserMass.greaterThan(uint(0)).or(k.greaterThan(uint(0))), () => {
           atomicAdd(ctr.element(CTR_RESERVOIR), int(loserMass).sub(int(k.mul(255))));
         });
@@ -177,30 +190,35 @@ export class Tectonics {
 
         pidNext.element(d).assign(bestPlate);
         ageNext.element(d).assign(bestAge.add(ageDt));
-        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(18))).bitOr(uint(v.add(1)).shiftLeft(uint(20))));
+        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(18))).bitOr(uint(v.add(1)).shiftLeft(uint(20))).bitOr(oceanLost));
         atomicAdd(ctr.element(bestPlate.mul(4).add(CTR_PLATE)), int(1));
       });
     })().compute(NCOL);
   }
 
-  /** Water rides with its column; overlapping columns pool their water, gaps start dry (exactly conservative, V4). */
+  /**
+   * Water and suspended sediment ride with their column; overlapping columns pool them, gaps start empty
+   * (exactly conservative, V3/V4).
+   */
   private buildWaterGather(pidCur: THREE.StorageBufferNode<'uint'>): THREE.ComputeNode {
     const water = this.fields.cur('water');
-    const waterTmp = this.fields.cur('waterTmp');
+    const sed = this.fields.cur('sedSusp');
+    const waterTmp = this.fields.cur<'vec2'>('waterTmp');
     const table = this.table;
     return Fn(() => {
       const d = instanceIndex;
       If(d.greaterThanEqual(uint(NCOL)), () => { Return(); });
       const { x, z } = tColXZ(d);
       const sum = float(0).toVar();
+      const sedSum = float(0).toVar();
       Loop(MAX_PLATES, ({ i }) => {
         const pt = table.element(i) as unknown as THREE.Node<'vec4'>;
         If(pt.z.greaterThan(0.5), () => {
-          const src = tColIdx(x.sub(int(pt.x)), z.sub(int(pt.y)));
-          If(pidCur.element(src).equal(uint(i)), () => { sum.addAssign(water.element(src)); });
+          const src = tColIdx(x.sub(int(pt.x)), z.sub(int(pt.y))).toVar();
+          If(pidCur.element(src).equal(uint(i)), () => { sum.addAssign(water.element(src)); sedSum.addAssign(sed.element(src)); });
         });
       });
-      waterTmp.element(d).assign(sum);
+      waterTmp.element(d).assign(vec2(sum, sedSum));
     })().compute(NCOL);
   }
 
@@ -247,8 +265,9 @@ export class Tectonics {
       if (p.alive) {
         p.accum[0] += p.vel[0] * dtGeo * speedMul;
         p.accum[1] += p.vel[1] * dtGeo * speedMul;
-        if (p.accum[0] >= 1) { sx = 1; p.accum[0] -= 1; } else if (p.accum[0] <= -1) { sx = -1; p.accum[0] += 1; }
-        if (p.accum[1] >= 1) { sz = 1; p.accum[1] -= 1; } else if (p.accum[1] <= -1) { sz = -1; p.accum[1] += 1; }
+        // whole cells only; the gather kernel handles any integer shift
+        sx = Math.trunc(p.accum[0]); p.accum[0] -= sx;
+        sz = Math.trunc(p.accum[1]); p.accum[1] -= sz;
         if (sx || sz) any = true;
       }
       shifts.push([sx, sz]);
@@ -265,8 +284,9 @@ export class Tectonics {
    * Caller runs the derive pass afterwards when this returns true.
    */
   tick(renderer: THREE.WebGPURenderer, tick: number, dtGeo: number, opts: { speedMul: number; isoEvery: number }): boolean {
-    const { shifts, any } = this.computeShifts(dtGeo, opts.speedMul);
     for (const p of this.plates) if (p.alive) p.age += dtGeo;
+    if (tick % TEC_EVERY !== 0) return false;
+    const { shifts, any } = this.computeShifts(dtGeo * TEC_EVERY, opts.speedMul);
     const iso = tick % opts.isoEvery === 0;
     if (!any && !iso) return false;
     this.writeTable(shifts);
@@ -285,7 +305,7 @@ export class Tectonics {
     return true;
   }
 
-  /** Zero per-plate counters (call right after issuing a stats readback). */
+  /** Zero all per-window counters (call right after issuing a stats readback). */
   clearPlateStats(renderer: THREE.WebGPURenderer): void { renderer.compute(this.clearStats); }
 
   /** Parse a readback of the whole 'counters' buffer. */

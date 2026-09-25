@@ -1,0 +1,109 @@
+import { test, expect } from '@playwright/test';
+
+test.beforeEach(async ({ page }) => { await page.goto('/tests/gpu/support/blank.html'); });
+
+// V3: erosion only moves crust between voxels and suspension. Σ crust fill + Σ sedSusp must stay put
+// (integer fill-unit exchanges; only f32 rounding of suspended transport may drift).
+test('hydraulic + thermal erosion conserve crust + suspended mass', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const g = (x: number, z: number, cx: number, cz: number, s: number) => Math.exp(-((x - cx) ** 2 + (z - cz) ** 2) / (2 * s * s));
+    const height = (x: number, z: number) => 72 + 40 * g(x, z, 64, 64, 14) + 20 * g(x, z, 170, 60, 6) - 30 * g(x, z, 160, 170, 35) + 2 * Math.sin(x * 0.4);
+    const mats = [L.Mat.BASALT, L.Mat.SEDIMENT, L.Mat.GRANITE, L.Mat.SHALE];
+    const vox = R.voxFromHeights(height, (x, z) => mats[((x >> 5) + (z >> 5)) & 3]!);
+    const water = new Float32Array(R.NCOL);
+    for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) water[R.idx(x, z)] = Math.max(0, 74 - height(x, z));
+    const rig = await R.makeHydroRig(r, vox, water);
+    rig.params.set('erosionRate', 4);
+    rig.params.set('thermalErosion', 2);
+    rig.hydro.uniforms.rain.value = 0.003;
+    const m0 = await rig.mass();
+    const v0 = await rig.readU('vox');
+    for (let t = 0; t < 150; t++) rig.tick(8);
+    const m1 = await rig.mass();
+    const v1 = await rig.readU('vox');
+    let changed = 0; for (let i = 0; i < v0.length; i++) if (v0[i] !== v1[i]) changed++;
+    const susp = R.sum64(await rig.readF('sedSusp'));
+    return { m0, m1, changed, susp };
+  });
+  expect(res.changed).toBeGreaterThan(1000); // erosion/deposition really happened
+  expect(res.susp).toBeGreaterThan(0);
+  // absolute, not relative to the ~1e9 total: losing even one fill unit per 150 ticks would be a bookkeeping bug
+  expect(Math.abs(res.m1 - res.m0)).toBeLessThan(0.5);
+});
+
+// §C pass 8: rivers must carve valleys. Flow concentrates in a shallow trough on a rained-on slope;
+// capacity grows with depth·speed, so the trough must deepen faster than the sheet-flow flanks.
+test('rain on a slope carves a channel along the flow path', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    // z 20→180: ramp 110 → 78 (slope 0.2); z 180..255: ocean floor 60; z 0..20: wall back up (torus)
+    const profile = (z: number) => z < 20 ? 60 + 50 * (z / 20) : z < 180 ? 110 - 0.2 * (z - 20) : z < 190 ? 78 - 1.8 * (z - 180) : 60;
+    const height = (x: number, z: number) => profile(z) - 1.5 * Math.max(0, 1 - Math.abs(x - 128) / 20);
+    const vox = R.voxFromHeights(height, () => L.Mat.SANDSTONE);
+    const water = new Float32Array(R.NCOL);
+    for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) water[R.idx(x, z)] = Math.max(0, 76 - height(x, z));
+    const rig = await R.makeHydroRig(r, vox, water);
+    rig.params.set('erosionRate', 4);
+    rig.params.set('thermalErosion', 0); // isolate hydraulic incision
+    rig.hydro.uniforms.rain.value = 0.002;
+    const s0 = await rig.readF('surfY');
+    for (let t = 0; t < 200; t++) rig.tick(8);
+    const s1 = await rig.readF('surfY');
+    const drop = (x0: number, x1: number) => {
+      let d = 0, n = 0;
+      for (let z = 60; z < 160; z++) for (let x = x0; x <= x1; x++) { d += s0[R.idx(x, z)]! - s1[R.idx(x, z)]!; n++; }
+      return d / n;
+    };
+    return { path: drop(126, 130), off: (drop(60, 80) + drop(176, 196)) / 2 };
+  });
+  expect(res.path).toBeGreaterThan(0.2);          // at least ~50 fill units cut along the trough
+  expect(res.path).toBeGreaterThan(2 * res.off);  // incision localised on the flow path
+});
+
+// Thermal erosion is talus relaxation: slopes above the talus angle slump until they are at talus;
+// slopes below talus must be left exactly alone (otherwise it becomes a diffusion that flattens the world).
+test('thermal erosion relaxes cliffs to talus and leaves gentle slopes untouched', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const E = await import('/src/sim/erosion.ts');
+    const r = await makeRenderer();
+    const step = (z: number) => (z >= 64 && z < 192 ? 86 : 80);        // 6-voxel cliffs at z=64 and z=192
+    const gentle = (z: number) => 80 + 0.25 * Math.min(z, 256 - z) * 0.2; // slope 0.05 ≪ talus
+    const w = (x: number) => Math.min(1, Math.max(0, (Math.abs(x - 64) - 40) / 16)); // 0 in cliff zone, 1 in gentle zone
+    const height = (x: number, z: number) => step(z) * (1 - w(x)) + gentle(z) * w(x);
+    const rig = await R.makeHydroRig(r, R.voxFromHeights(height));
+    const talus = E.EROSION_DEFAULTS.talus;
+    const maxSlope = (s: Float32Array) => {
+      let m = 0;
+      for (let z = 0; z < R.NZ; z++) for (let x = 40; x <= 88; x++) {
+        const h = s[R.idx(x, z)]!;
+        m = Math.max(m, Math.abs(h - s[R.idx(x, z + 1)]!), Math.abs(h - s[R.idx(x + 1, z)]!));
+      }
+      return m;
+    };
+    const s0 = await rig.readF('surfY');
+    const v0 = await rig.readU('vox');
+    const m0 = await rig.mass();
+    for (let t = 0; t < 400; t++) rig.tick(1);
+    const s1 = await rig.readF('surfY');
+    const v1 = await rig.readU('vox');
+    let gentleChanged = 0;
+    for (let y = 0; y < R.NY; y++) for (let z = 0; z < R.NZ; z++) for (let x = 140; x < 245; x++) {
+      const i = R.idx(x, z) + y * R.NCOL;
+      if (v0[i] !== v1[i]) gentleChanged++;
+    }
+    return { before: maxSlope(s0), after: maxSlope(s1), talus, gentleChanged, m0, m1: await rig.mass() };
+  });
+  expect(res.before).toBeGreaterThan(5.9);
+  expect(res.after).toBeLessThan(res.talus + 0.05);
+  expect(res.gentleChanged).toBe(0);
+  expect(res.m1).toBe(res.m0); // thermal alone is pure integer bookkeeping → exact
+});

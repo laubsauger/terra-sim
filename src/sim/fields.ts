@@ -2,6 +2,7 @@
 import type { GpuFields } from '../core/gpu';
 import { NCOL, NVOX } from './layout';
 import { MAX_PLATES } from './worldData';
+import { registerHydroFields } from './hydro';
 import type { WorldData } from './worldData';
 
 export function registerSimFields(f: GpuFields): void {
@@ -16,16 +17,26 @@ export function registerSimFields(f: GpuFields): void {
   f.add('colInfo', 'uvec2', NCOL);
   // tectonics
   f.add('tecAct', 'uint', NCOL);    // per-column action from decide kernel
-  f.add('waterTmp', 'float', NCOL); // scratch for carried water
+  f.add('waterTmp', 'vec2', NCOL);  // scratch for carried (water, sedSusp)
   // integer counters (V2, V3), see CTR_* below
   f.add('counters', 'int', CTR_SIZE, { atomic: true });
+  registerHydroFields(f);
 }
 
 /** counters[CTR_RESERVOIR] = mantle reservoir, fill units. */
 export const CTR_RESERVOIR = 0;
-/** Per-plate counters at CTR_PLATE + p*4 + {0 area, 1 subducted cols, 2 new crust cols}; cleared after each readback. */
+/**
+ * Everything from CTR_PLATE on is per stats window and cleared after each readback.
+ * CTR_PLATE + p*4 + {0 area·runs, 1 subducted cols, 2 new crust cols} — tectonics decide kernel.
+ * CTR_AREA + p — exact plate area (lifecycle stats kernel).
+ * CTR_CENT + p*4 + {Σcos x, Σsin x, Σcos z, Σsin z} ×256 — torus centroid.
+ * CTR_CONTACT + p*16 + q — boundary cells where plate p (continental) touches q (continental).
+ */
 export const CTR_PLATE = 16;
-export const CTR_SIZE = CTR_PLATE + MAX_PLATES * 4;
+export const CTR_AREA = CTR_PLATE + MAX_PLATES * 4;
+export const CTR_CENT = CTR_AREA + MAX_PLATES;
+export const CTR_CONTACT = CTR_CENT + MAX_PLATES * 4;
+export const CTR_SIZE = CTR_CONTACT + MAX_PLATES * MAX_PLATES;
 
 export function uploadWorld(f: GpuFields, w: WorldData): void {
   for (const name of ['vox', 'plateId', 'crustAge'] as const) {

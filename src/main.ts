@@ -7,6 +7,14 @@ import { DualClock } from './core/clock';
 import { createPanel } from './ui/panel';
 import { createTimebar, type ClockLike } from './ui/timebar';
 import { bindKeys } from './ui/keys';
+import { registerSimFields, uploadWorld } from './sim/fields';
+import { generateWorld } from './sim/worldgen';
+import { Sim } from './sim/sim';
+import { createTerrain } from './render/terrain';
+import { createSides } from './render/sides';
+import { createWater } from './render/water';
+import { createLighting } from './render/lighting';
+import { setVertEx } from './render/space';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -45,7 +53,16 @@ async function main() {
   };
 
   const fields = new GpuFields();
+  registerSimFields(fields);
   fields.freeze();
+  const world = generateWorld(params.get('seed') as number, { plates: params.get('initialPlates') as number });
+  uploadWorld(fields, world);
+  const sim = new Sim(stage.renderer, fields, world, params, DT_GEO);
+
+  createLighting(stage.scene);
+  stage.scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
+  setVertEx(params.get('verticalExaggeration') as number);
+  params.onChange((key, v) => { if (key === 'verticalExaggeration') setVertEx(v as number); });
 
   const panel = createPanel(params);
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
@@ -64,14 +81,15 @@ async function main() {
   stage.onFrame((dt) => {
     panel.fps.begin();
     const ticks = clock.frame(dt, MAX_TICKS_PER_FRAME);
-    void ticks; // sim passes hook in here (M2+)
+    const ran = sim.runTicks(ticks);
+    if (ran < ticks) clock.unrun(ticks - ran);
     timebar.update();
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage };
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
 

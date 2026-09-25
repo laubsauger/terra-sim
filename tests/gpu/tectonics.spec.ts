@@ -106,7 +106,7 @@ test('isostasy lifts thick continent toward equilibrium and sinks old ocean', as
     const tec = new T.Tectonics(f, w.plates);
     const massOf = async () => { const ci = new Uint32Array(await f.read(r, 'colInfo')); let m = 0; for (let i = 1; i < ci.length; i += 2) m += ci[i]!; return m; };
     const m0 = await massOf();
-    for (let t = 1; t <= 40; t++) if (tec.tick(r, t, 0.001, { speedMul: 1, isoEvery: 1 })) derive.run(r);
+    for (let t = 1; t <= 120; t++) if (tec.tick(r, t, 0.001, { speedMul: 1, isoEvery: 1 })) derive.run(r);
     const s = new Float32Array(await f.read(r, 'surfY'));
     return { cont: s[L.colIdx(200, 5)]!, ocean: s[L.colIdx(50, 5)]!, m0, m1: await massOf() };
   });
