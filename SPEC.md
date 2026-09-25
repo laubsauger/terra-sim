@@ -140,8 +140,8 @@ T37|x|M7 water shading: absorption, refraction, caustics, foam, Gerstner, rivers
 T38|x|M7 lava/magma emissive + cooling crust|-
 T39|x|M7 sky scattering + day/night + sun/moon on `ambTime`|V17
 T40|x|M7 shadows + GTAO + SSGI \| fallback|V9
-T41|.|M7 volumetric clouds from vapor/precip|V9,V15
-T42|.|M7 weather FX: rain, lightning, ash plumes, fog|V15
+T41|~|M7 volumetric clouds from vapor/precip|V9,V15
+T42|~|M7 weather FX: rain, lightning, ash plumes, fog|V15
 T43|x|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
 T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
 T45|x|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
