@@ -17,6 +17,7 @@ import { createLighting } from './render/lighting';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
+import { createOverlays } from './overlay/overlays';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -71,15 +72,17 @@ async function main() {
   const hud = createPerfHud(stage.renderer, () => fields.bytes());
   const probe = createProbeUI(stage.renderer, stage.camera, fields);
   const statsPane = createStatsPane(panel.folders.Stats, sim);
+  const overlays = createOverlays(fields, stage.scene);
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); };
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); };
   applyUi();
   bindKeys({
     toggleUI: () => { uiVisible = !uiVisible; applyUi(); },
     togglePause: () => clock.togglePause(),
     faster: () => params.set('speed', (params.get('speed') as number) * 2),
     slower: () => params.set('speed', (params.get('speed') as number) / 2),
+    overlay: (n) => { overlays.set(n); },
   });
 
   stage.onFrame((dt) => {
@@ -95,7 +98,7 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe };
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
 

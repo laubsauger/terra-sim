@@ -17,3 +17,5 @@ canvas { display: block; }
 .terra-probe .rows b { font-weight: 500; }
 .terra-probe .spark { margin-top: 6px; display: block; }
 .terra-probe .close { position: absolute; top: 4px; right: 6px; background: none; border: 0; color: #a39d8e; font-size: 16px; cursor: pointer; }
+.terra-overlay-label { position: fixed; top: 10px; left: 50%; transform: translateX(-50%); padding: 5px 12px; border-radius: 999px;
+  background: rgba(18,20,28,0.72); backdrop-filter: blur(8px); font: 12px system-ui, sans-serif; color: #ece6d8; letter-spacing: 0.02em; pointer-events: none; }
