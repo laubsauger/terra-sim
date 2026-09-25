@@ -25,7 +25,8 @@ export function createPerfHud(renderer: THREE.WebGPURenderer, gpuBytes: () => nu
       void sample(); // every frame: the query pool holds only 256 timestamps between resolves
       if (acc < 0.5) return;
       const fps = frames / acc;
-      const ts = hasTs ? `gpu sim ${gpuCompute.toFixed(2)}ms · render ${gpuRender.toFixed(2)}ms` : 'gpu timing n/a';
+      // render timestamps sum overlapping pass intervals on tile-based GPUs (Apple) → shown as Σpass, not frame time
+      const ts = hasTs ? `gpu sim ${gpuCompute.toFixed(2)}ms · render Σpass ${gpuRender.toFixed(1)}ms` : 'gpu timing n/a';
       const text = `${fps.toFixed(0)} fps · cpu ${(cpuMs / frames).toFixed(2)}ms · ${ts} · ${(gpuBytes() / 1048576).toFixed(0)} MB`;
       if (text !== lastText) { el.textContent = text; lastText = text; }
       frames = 0; acc = 0; cpuMs = 0;

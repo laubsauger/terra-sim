@@ -13,10 +13,8 @@ import { Sim, STATS_WINDOW } from './sim/sim';
 import { SaveManager, SaveStore, SAVE_EXCLUDE } from './core/save';
 import { NanGuard } from './core/nanGuard';
 import { createSavePanel, showToast } from './ui/savePanel';
-import { createTerrain } from './render/terrain';
-import { createSides } from './render/sides';
-import { createWater } from './render/water';
-import { createLighting } from './render/lighting';
+import { createLook } from './render/look';
+import { createLife } from './life/life';
 import { setVertEx } from './render/space';
 import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
@@ -76,8 +74,9 @@ async function main() {
   const loadSlot = new URLSearchParams(location.search).get('load'); // ?load=<slot key>|latest
   if (loadSlot) await saves.loadSlot(loadSlot).catch(() => {}); // failure is toasted; the fresh world keeps running
 
-  createLighting(stage.scene);
-  stage.scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
+  const look = createLook(stage, fields, { highQuality: params.get('highQuality') as boolean });
+  const life = createLife(fields, stage.renderer, stage.scene, { highQuality: params.get('highQuality') as boolean, seed: params.get('seed') as number });
+  params.onChange((k, v) => { if (k === 'highQuality') { look.setHighQuality(v as boolean); life.setHighQuality(v as boolean); } });
   setVertEx(params.get('verticalExaggeration') as number);
   params.onChange((key, v) => { if (key === 'verticalExaggeration') setVertEx(v as number); });
 
@@ -98,7 +97,8 @@ async function main() {
 
   let uiVisible = !(params.get('ambientMode') as boolean);
   const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible);
-    ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean)); };
+    ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean));
+    look.setDayLength((params.get('ambientMode') as boolean) ? 600 : 0); };
   params.onChange((key) => { if (key === 'ambientMode') applyUi(); });
   applyUi();
   bindKeys({
@@ -116,6 +116,10 @@ async function main() {
     const ran = sim.runTicks(ticks);
     ticksSinceSample += ran;
     if (ran < ticks) clock.unrun(ticks - ran);
+    look.frame(clock.ambTime);
+    life.setSeaLevel(sim.stats?.seaLevel ?? 76);
+    if (ran > 0) life.invalidate();
+    life.update(dt, clock.ambTime);
     saves.frame();
     savePanel.update();
     timebar.update();
@@ -136,7 +140,7 @@ async function main() {
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves,
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life,
     save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
