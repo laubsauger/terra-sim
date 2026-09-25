@@ -19,7 +19,7 @@ whimsical AAA-look WebGPU vivarium: torus-wrapped planet slice block, voxel crus
 ### data layout
 - axes: X,Z horizontal (wrap, torus), Y up. voxel grid 256×256×128 (X×Z×Y).
 - voxel u32 pack: `mat:8 | fill:8 | age:8 | flags:8`. `fill` = solid fraction 0-255 (smooth surface, sub-voxel erosion). `age` = log-scale code.
-- voxel storage: 2× storage buffer ping-pong (~64MB). also sampled as 3D texture for side render.
+- voxel storage: 2× storage buffer ping-pong (~64MB). render reads storage buffers directly (both, parity uniform); ⊥ 3D texture copy.
 - `mat` ids: AIR, BASALT, GABBRO, GRANITE, ANDESITE, SEDIMENT(loose), SANDSTONE, SHALE, LIMESTONE, SCHIST, GNEISS, MAGMA, PERIDOTITE(mantle). list append-only (save compat).
 - column fields 2D 256² f32 (storage buffers): `plateId`(u8 packed), `surfY`(derived), `crustThick`, `crustAge`, `stress`, `water`, `flux`(4 pipes), `waterVel`(vec2), `sedSusp`, `lava`, `lavaTemp`, `surfTemp`, `vapor`, `precip`, `ice`, `veg`, `biome`(u8), `heatFlow`.
 - crust temp 3D 128×128×64 f16. mantle 3D 64×64×32 (temp + velocity), lies below voxel grid.
@@ -43,7 +43,7 @@ whimsical AAA-look WebGPU vivarium: torus-wrapped planet slice block, voxel crus
 ### render pipeline
 - terrain: phase 1 heightfield mesh displaced by `surfY`, seamless wrap; phase 2 GPU surface-nets mesher on `fill`, chunks 32³, dirty remesh, indirect draw (caves, overhangs, lava tubes).
 - materials: triplanar stylized PBR, splat by `mat` + biome + snow + wetness.
-- side cuts: 4 faces + bottom sample voxel 3D tex & mantle field: strata colors, magma glow, convection flow, crust temp tint.
+- side cuts: 4 faces + bottom read voxel storage buffer & mantle field: strata colors, magma glow, convection flow, crust temp tint.
 - water: depth absorption, screen-space refraction, caustics on seabed (`ambTime`), shore foam, small Gerstner waves, rivers from `flux`.
 - lava: emissive + cooling crust noise → bloom.
 - sky: atmospheric scattering LUT, sun/moon, day/night on `ambTime`.
@@ -102,8 +102,8 @@ T6|x|M0 param schema + Tweakpane shell + url params + time ctl bar|V20,V22,I.url
 T7|x|M1 voxel pack/unpack TSL helpers + CPU mirror, wrap index helpers|V1,V21
 T8|x|M1 worldgen from seed: torus voronoi plates, cont|ocean crust stacks, strata|V2,V6
 T9|x|M1 derived pass: `surfY` from `fill`, normals|V1
-T10|.|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wrap|V1
-T11|.|M1 side cut render: faces + bottom sample voxel 3D tex, strata colors|-
+T10|x|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wrap|V1
+T11|x|M1 side cut render: faces + bottom read voxel buffer, strata colors|V23
 T12|.|M1 inspect probe: raycast + small readback panel|I.probe
 T13|x|M2 plate table + kinematics (slab pull, ridge push, drag)|V12
 T14|x|M2 plate advect: sub-cell accum, column gather shift w/ wrap, time-sliced|V1,V19
