@@ -15,8 +15,8 @@ export const WILSON = {
   disperseMy: 90,     // pushed apart after the rift
   /** Assembled when continental mass sits within this RMS torus distance of its centroid (cells). */
   assembledRms: 42,
-  assembleStrength: 0.08, // heading bias per My
-  disperseStrength: 0.1,
+  assembleStrength: 0.012, // heading bias per My: gentle course corrections over ~100 My (0.08 flipped plates around)
+  disperseStrength: 0.015,
 } as const;
 
 export interface WilsonState { phase: WilsonPhase; since: number; cycles: number; rms: number }

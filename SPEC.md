@@ -167,4 +167,5 @@ B11|2026-09-25|crustFlow treated crust-less neighbour (base=NY) as receiver → 
 B12|2026-09-25|oceanic subsidence √age uncapped; stripped old continental columns (age 3000 My) sank through mantle|V30
 B13|2026-09-25|tectonic water carry re-roughened ocean faster than local pipe model levels it → lumpy sea surface (level std ~2 voxels)|V26
 B14|2026-09-25|overlapping columns pooled all candidates' water onto winner → continents overriding sea threw up water mounds|V26
+B15|2026-09-26|margin crust flow let each new margin column become a sender → continents pancaked to ~24 layers, floating at sea level (world flattened just under water)|V28
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

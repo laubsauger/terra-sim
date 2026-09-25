@@ -9,9 +9,9 @@ import { tColIdx, tColXZ } from './tslLayout';
 import { tDither, quantize, scanTop, removeTop } from './erosion';
 
 export const GLACIAL = {
-  kScour: 90,     // fill units per tick per (voxel of ice-water-eq × voxel/cell slope)
+  kScour: 8,     // fill units per tick per (voxel of ice-water-eq × voxel/cell slope)
   minIce: 0.15,   // below this, snowpack not glacier
-  maxPerTick: 24, // fill units
+  maxPerTick: 6,  // fill units (≈0.5 layer/My max; 90/24 over-scoured)
 };
 
 export class GlacialErosion {

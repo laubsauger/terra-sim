@@ -18,8 +18,14 @@ import { COL_CONTINENTAL } from './derive';
 export const FLOW_DIFF = 4;
 /** Crust never drains below this thickness into continental neighbours (collision plateaus). */
 export const FLOW_MIN_THICK = 30;
-/** Only continental crust thicker than this stretches into oceanic neighbours, so margin wedges stay a few cells wide. */
+/** Only continental crust thicker than this stretches into oceanic neighbours. */
 export const FLOW_MIN_THICK_MARGIN = 24;
+/**
+ * Oceanic receivers only accept margin crust while thinner than this. Without the cap every new margin column
+ * grew into a sender and continents pancaked over the oceans to ~24 layers, which isostasy floats right at sea
+ * level: the whole world flattened to just below the water surface (B15).
+ */
+export const MARGIN_RECEIVER_MAX = 14;
 /** Receiver never grows past this (layers). */
 export const FLOW_MAX_THICK = 100;
 
@@ -73,7 +79,8 @@ export class CrustFlow {
           const nbase = n.x.bitAnd(uint(0xff));
           // oceanic receivers become transitional continental crust, but only from thick margins
           const minT = select(ncont, uint(FLOW_MIN_THICK), uint(FLOW_MIN_THICK_MARGIN));
-          If(budget.greaterThan(uint(0)).and(thick.greaterThan(minT)).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
+          const recvOk = ncont.or(nthick.lessThan(uint(MARGIN_RECEIVER_MAX)));
+          If(budget.greaterThan(uint(0)).and(recvOk).and(thick.greaterThan(minT)).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
             .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4))).and(nbase.lessThan(uint(NY))), () => {
             // nbase = NY means the neighbour has no crust at all: never a receiver (B11, root would land at the ceiling)
             bits.assign(bits.bitOr(uint(1 << d)));

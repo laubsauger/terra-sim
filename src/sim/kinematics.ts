@@ -15,8 +15,8 @@ export const COLLISION_BRAKE = 2.5;
 /** Continental contact cells above which two plates start locking (velocities converge). */
 export const LOCK_CONTACT = 8;
 /** Time for a fully engaged collision to match plate velocities. */
-export const LOCK_MY = 4;
-export const RELAX_MY = 10; // velocity relaxes toward target over this time
+export const LOCK_MY = 15;
+export const RELAX_MY = 40; // speed changes play out over tens of My (10 read as random speed changes)
 export const HEADING_SIGMA = 0.04; // rad / sqrt(My): plates keep a direction for ~100s of My
 
 export interface Bias { heading?: number; strength: number } // per plate, from controller

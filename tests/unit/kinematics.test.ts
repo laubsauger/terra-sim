@@ -55,7 +55,7 @@ describe('collision locking (B5)', () => {
     const contact = Array.from({ length: 16 }, () => new Array(16).fill(0));
     contact[0]![1] = contact[1]![0] = 200;
     const rng = new PCG32(6);
-    for (let i = 0; i < 10; i++) updateKinematics(plates, stats, 40, 2, rng, undefined, contact);
+    for (let i = 0; i < 30; i++) updateKinematics(plates, stats, 40, 2, rng, undefined, contact); // 60 My of contact
     const rel = Math.hypot(plates[0]!.vel[0] - plates[1]!.vel[0], plates[0]!.vel[1] - plates[1]!.vel[1]);
     expect(rel).toBeLessThan(0.5);
   });
