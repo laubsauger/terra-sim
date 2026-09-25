@@ -141,7 +141,7 @@ T42|.|M7 weather FX: rain, lightning, ash plumes, fog|V15
 T43|.|M7 post: TRAA, bloom, tilt-shift DOF, grade LUT, vignette|V9
 T44|.|M7 terrain phase 2: surface-nets mesher, chunked dirty remesh, indirect draw|V9,V19
 T45|.|M7 tiny life: instanced flora per biome, boids, critters, fish|V15
-T46|.|M7 procedural ambient audio from sim stats|V14,V15
+T46|x|M7 procedural ambient audio from sim stats|V14,V15
 T47|~|M8 debug overlays|I.overlays
 T48|.|M8 god tools via event path|V16,I.god tools
 T49|x|M8 ambient mode: hide UI, cinematic auto cam, POI follow (eruptions, impacts)|I.keys

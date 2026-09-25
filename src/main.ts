@@ -19,6 +19,7 @@ import { createProbeUI } from './ui/probe';
 import { createStatsPane } from './ui/statsPane';
 import { createOverlays } from './overlay/overlays';
 import { createAmbientCam } from './ui/ambientCam';
+import { Ambience } from './audio/ambience';
 
 /** My per sim tick. Fixed for the life of a world (V12, V22). */
 export const DT_GEO = 0.05;
@@ -75,6 +76,8 @@ async function main() {
   const statsPane = createStatsPane(panel.folders.Stats, sim);
   const overlays = createOverlays(fields, stage.scene);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
+  const audio = new Ambience();
+  let volcanic = 0, seenEvents = 0;
 
   let uiVisible = !(params.get('ambientMode') as boolean);
   const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible);
@@ -87,6 +90,7 @@ async function main() {
     faster: () => params.set('speed', (params.get('speed') as number) * 2),
     slower: () => params.set('speed', (params.get('speed') as number) / 2),
     overlay: (n) => { overlays.set(n); },
+    mute: () => audio.toggleMute(),
   });
 
   stage.onFrame((dt) => {
@@ -99,12 +103,20 @@ async function main() {
     statsPane.update();
     ambientCam.notice(sim.events.log, () => sim.stats?.seaLevel ?? 76);
     ambientCam.update(dt);
+    // audio levels from sim state only (V15)
+    const log = sim.events.log;
+    for (; seenEvents < log.length; seenEvents++) if (log[seenEvents]!.kind !== 'iceAge') volcanic = Math.min(1, volcanic + 0.5);
+    volcanic *= Math.exp(-dt / 20);
+    const land = sim.stats?.landFrac ?? 0.3;
+    const camH = stage.camera.position.y;
+    audio.set({ ocean: 1 - land, wind: 0.35 + 0.3 * Math.min(1, camH / 6), volcanic, life: land * 1.2, closeness: Math.max(0, 1 - (camH - 0.3) / 4) });
+    audio.update(dt);
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
   stage.start();
 
-  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays };
+  (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio };
   (window as unknown as { terraReady: boolean }).terraReady = true;
 }
 
