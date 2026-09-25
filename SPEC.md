@@ -100,7 +100,7 @@ T4|x|M0 dual clock: `geoTime` f64, `ambTime` wrapped, pause geo only, speed → 
 T5|x|M0 GPU buffer registry: fixed alloc, named fields, ping-pong, timestamp-query perf HUD|V10,V9
 T6|x|M0 param schema + Tweakpane shell + url params + time ctl bar|V20,V22,I.url,I.ui,I.time ctl
 T7|x|M1 voxel pack/unpack TSL helpers + CPU mirror, wrap index helpers|V1,V21
-T8|.|M1 worldgen from seed: torus voronoi plates, cont|ocean crust stacks, strata|V2,V6
+T8|x|M1 worldgen from seed: torus voronoi plates, cont|ocean crust stacks, strata|V2,V6
 T9|x|M1 derived pass: `surfY` from `fill`, normals|V1
 T10|.|M1 terrain render phase 1: heightfield mesh, triplanar splat, seamless wrap|V1
 T11|.|M1 side cut render: faces + bottom sample voxel 3D tex, strata colors|-
