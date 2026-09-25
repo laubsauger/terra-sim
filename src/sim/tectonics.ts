@@ -17,6 +17,7 @@ import { tColIdx, tColXZ, uMin } from './tslLayout';
 import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
 import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE } from './fields';
+import { CrustFlow } from './crustFlow';
 
 // Isostasy calibration (voxel-y units). Surface at equilibrium:
 //   eq = Y_COMP + thickness * (1 - ρcrust/ρmantle) * ISO_GAIN - (oceanic ? SUBSIDENCE * sqrt(age) : 0)
@@ -36,14 +37,14 @@ export const RIDGE_MASS = (RIDGE_GABBRO + RIDGE_BASALT) * 255;
 /** Max layers of crustal root added to the winner per collision event (6-bit field). */
 export const OROGENY_MAX = 63;
 /** Crust thicker than this (layers) stops thickening; extra collided mass delaminates into the mantle. */
-export const MAX_CRUST_LAYERS = 64;
+export const MAX_CRUST_LAYERS = 100;
 /** Tectonics runs every N ticks with N·dtGeo of motion (cost control, V9/V19). */
 export const TEC_EVERY = 4;
 
-/** tecAct bits: 0-15 src col | 16 new ridge crust | 17-18 isostasy v+1 | 19-24 orogeny k | 25 oceanic slab consumed here. */
+/** tecAct bits: 0-15 src col | 16 new ridge crust | 17-18 isostasy v+1 | 19-24 orogeny k | 25 oceanic slab consumed here | 26-31 root uplift. */
 export const ACT_NEW = 1 << 16;
 export const ACT_SUBDUCT = 1 << 25;
-const V_SHIFT = 17, K_SHIFT = 19;
+const V_SHIFT = 17, K_SHIFT = 19, UP_SHIFT = 26;
 /** Root of k layers grows downward; the column rises only by its isostatic share, up = round(k·ROOT_UP/256). */
 const ROOT_UP = Math.round(256 * (1 - RHO_CONT / RHO_MANTLE) * ISO_GAIN);
 const rootUp = (k: THREE.Node<'uint'>) => k.mul(uint(ROOT_UP)).add(uint(128)).shiftRight(uint(8));
@@ -63,6 +64,7 @@ export class Tectonics {
   private ageDt = uniform(0);
   private isoOn = uniform(0);
   private lastRunTick = 0;
+  private crustFlow: CrustFlow;
 
   constructor(private fields: GpuFields, plates: Plate[]) {
     this.plates = plates.map((p) => ({ ...p, vel: [...p.vel] as [number, number], accum: [...p.accum] as [number, number] }));
@@ -71,6 +73,7 @@ export class Tectonics {
     this.decide = [this.buildDecide(pid0, pid1, age0, age1), this.buildDecide(pid1, pid0, age1, age0)];
     this.waterGather = [this.buildWaterGather(pid0), this.buildWaterGather(pid1)];
     this.voxel = new PingPongKernel<'uint'>(fields, 'vox', (src, dst) => this.buildVoxel(src, dst));
+    this.crustFlow = new CrustFlow(fields);
     const water = fields.cur('water');
     const sed = fields.cur('sedSusp');
     const waterTmp = fields.cur<'vec2'>('waterTmp');
@@ -162,9 +165,9 @@ export class Tectonics {
           const room = uint(MAX_CRUST_LAYERS).sub(uMin(bestMass.div(uint(255)), uint(MAX_CRUST_LAYERS)));
           const floorRoom = base.sub(uMin(base, uint(1))); // root must stay above y=0
           k.assign(uMin(uMin(contMass.sub(bestMass).div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
-          // shrink until the risen top fits under the ceiling
-          Loop(8, () => { If(top.add(rootUp(k)).greaterThanEqual(uint(NY - 3)).and(k.greaterThan(uint(0))), () => { k.assign(k.div(2)); }); });
         });
+        // near the ceiling the root still grows, just downward only (isostasy settles it later)
+        const up = uMin(rootUp(k), uint(NY - 3).sub(uMin(top, uint(NY - 3)))).toVar();
         const loserMass = massSum.sub(bestMass);
         // an oceanic loser means a slab went down here (arc volcanism input)
         oceanLost.assign(select(count.sub(uint(1)).greaterThan(contCount.sub(bestCont)), uint(ACT_SUBDUCT), uint(0)));
@@ -190,14 +193,16 @@ export class Tectonics {
           const rho = select(isCont, float(RHO_CONT), float(RHO_OCEAN));
           const sub = select(isCont, float(0), sqrt(bestAge.max(0)).mul(SUBSIDENCE));
           const eq = float(Y_COMP).add(thick.mul(float(1).sub(rho.div(RHO_MANTLE))).mul(ISO_GAIN)).sub(sub);
-          const diff = eq.sub(bestSurf.add(float(rootUp(k))));
-          If(diff.greaterThan(0.75).and(top.add(rootUp(k)).add(uint(1)).lessThan(uint(NY - 1))), () => { v.assign(1); });
-          If(diff.lessThan(-0.75).and(base.greaterThan(uint(1))).and(base.lessThan(uint(NY))), () => { v.assign(-1); });
+          const diff = eq.sub(bestSurf.add(float(up)));
+          If(diff.greaterThan(0.75).and(top.add(up).add(uint(1)).lessThan(uint(NY - 1))), () => { v.assign(1); });
+          // sinking must keep the (possibly deepened) root above y=0
+          If(diff.lessThan(-0.75).and(base.add(up).greaterThan(k.add(uint(1)))).and(base.lessThan(uint(NY))), () => { v.assign(-1); });
         });
 
         pidNext.element(d).assign(bestPlate);
         ageNext.element(d).assign(bestAge.add(ageDt));
-        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(K_SHIFT))).bitOr(uint(v.add(1)).shiftLeft(uint(V_SHIFT))).bitOr(oceanLost));
+        act.element(d).assign(bestSrc.bitOr(k.shiftLeft(uint(K_SHIFT))).bitOr(uint(v.add(1)).shiftLeft(uint(V_SHIFT))).bitOr(oceanLost)
+          .bitOr(up.shiftLeft(uint(UP_SHIFT))));
         atomicAdd(ctr.element(bestPlate.mul(4).add(CTR_PLATE)), int(1));
       });
     })().compute(NCOL);
@@ -252,7 +257,7 @@ export class Tectonics {
         const k = int(a.shiftRight(uint(K_SHIFT)).bitAnd(uint(63)));
         const v = int(a.shiftRight(uint(V_SHIFT)).bitAnd(uint(3))).sub(1);
         const base = int(colInfo.element(s).x.bitAnd(uint(0xff)));
-        const up = int(rootUp(uint(k)));
+        const up = int(a.shiftRight(uint(UP_SHIFT)).bitAnd(uint(63)));
         const sy = y.sub(v).sub(up);
         const rootTop = base.add(v).add(up); // old base lands here
         const root = k.greaterThan(int(0)).and(y.greaterThanEqual(rootTop.sub(k))).and(y.lessThan(rootTop));
@@ -291,6 +296,7 @@ export class Tectonics {
   /**
    * One geo tick. Runs GPU kernels only when some plate crosses a cell or on isostasy ticks.
    * Caller runs the derive pass afterwards when this returns true.
+   * Precondition: colInfo fresh (derive ran after the last voxel edit).
    */
   tick(renderer: THREE.WebGPURenderer, tick: number, dtGeo: number, opts: { speedMul: number; isoEvery: number }): boolean {
     for (const p of this.plates) if (p.alive) p.age += dtGeo;
@@ -313,6 +319,9 @@ export class Tectonics {
     f.swap('crustAge');
     return true;
   }
+
+  /** Lower-crust flow. Needs fresh colInfo: call after the post-tectonics derive, then derive again. */
+  flow(renderer: THREE.WebGPURenderer): void { this.crustFlow.run(renderer); }
 
   /** Zero all per-window counters (call right after issuing a stats readback). */
   clearPlateStats(renderer: THREE.WebGPURenderer): void { renderer.compute(this.clearStats); }

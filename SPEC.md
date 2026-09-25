@@ -89,7 +89,7 @@ V19: heavy passes (plate shift, remesh, mantle) time-sliced; sim ⊥ adds frame 
 V20: params single schema {default, range, unit, persist}. UI, url, save, soak read same schema.
 V21: `mat` id list append-only; saves from older version keep valid materials.
 V22: speed change ⊥ changes `dtGeo`; only ticks per frame. effective speed = min(requested, sim budget V9); UI shows both.
-V24: cont-cont collision → loser crust stacks onto winner (root down, isostatic rise) up to 64 layers; only excess delaminates. arc volcanism ! add FLAG_CONTINENTAL crust from reservoir (continents regrow).
+V24: cont-cont collision → loser crust stacks onto winner (root down, isostatic rise) up to 64 layers; only excess delaminates. arc volcanism ! add FLAG_CONTINENTAL crust from reservoir (continents regrow). colliding continental plates lock (velocities converge); thick roots flow laterally into thinner continental neighbours.
 V25: plate speed drivers ⊥ positive feedback on own speed; slab pull normalised by plate speed.
 V26: water quasi-steady: overdamped flow; neighbour level roughness in open ocean ≤ 0.05 voxel after 40 substeps of perturbation.
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
@@ -123,10 +123,10 @@ T24|x|M4 shallow water pipe model, torus wrap, quasi-steady substeps|V1,V4
 T25|x|M4 hydraulic erosion/deposit (`kGeo`) + thermal erosion|V3
 T26|.|M4 sediment layering into voxels, diagenesis, metamorphism|V21
 T27|.|M4 water budget: ocean+surface+vapor+ice, numeric renormalize|V4
-T28|.|M5 surfTemp: latitude cos, lapse, ice-age offset|-
-T29|.|M5 wind bands, vapor advect, orographic precip, rain shadow|V4
-T30|.|M5 snow/ice accumulation, glaciers|V4
-T31|.|M5 biome classify + veg; veg lowers erodibility|-
+T28|x|M5 surfTemp: latitude cos, lapse, ice-age offset|-
+T29|x|M5 wind bands, vapor advect, orographic precip, rain shadow|V4
+T30|x|M5 snow/ice accumulation, glaciers|V4
+T31|x|M5 biome classify + veg; veg lowers erodibility|-
 T32|.|M6 Wilson cycle controller (disperse→drift→assemble→super→rift)|V5,V8
 T33|.|M6 seeded event scheduler: hotspot, meteor, ice age, flood basalt|V2,V16
 T34|.|M6 stats reduction fixed-point + async readback + Stats pane|V2,V3,V4
@@ -153,4 +153,5 @@ id|date|cause|fix
 B1|2026-09-25|tectonics decide kernel bound 13 storage buffers > adapter limit 10 ∴ pipeline invalid|V23
 B2|2026-09-25|cont-cont collision kept 1 layer of loser, rest → reservoir ∴ continents melted away ~150 My|V24
 B3|2026-09-25|slab pull ∝ subducted cols ∝ own speed → runaway, ∀ plates @ max speed|V25
+B5|2026-09-25|collision front saturates @ crust cap → ∀ further colliding crust deleted; plates ground continents @ full speed|V24
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

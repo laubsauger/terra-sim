@@ -150,3 +150,40 @@ test('continent-continent collision thickens crust and keeps continental mass', 
   expect(res.top1).toBeGreaterThan(res.top0 + 3);       // mountains rise
   expect(res.top1).toBeLessThan(126);                   // never hit the grid ceiling
 });
+
+// B5: saturated collision fronts deleted all further colliding crust. Lower-crust flow must drain thick
+// roots into thinner continental neighbours, conserving mass exactly.
+test('lower-crust flow spreads a thick root into neighbours without mass change', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const L = await import('/src/sim/layout.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { createDerivePass } = await import('/src/sim/derive.ts');
+    const { Tectonics } = await import('/src/sim/tectonics.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields();
+    registerSimFields(f);
+    f.freeze();
+    const w = twoPlateWorld([0, 0], [0, 0], { bothContinental: true });
+    // one 90-layer column (base 4) in a 40-layer continent
+    const cx = 64, cz = 64;
+    for (let y = 0; y < L.NY; y++) {
+      const mat = y < 4 ? L.Mat.PERIDOTITE : y < 94 ? L.Mat.GRANITE : L.Mat.AIR;
+      w.vox[L.voxIdx(cx, y, cz)] = mat === L.Mat.AIR ? 0 : L.packVoxel(mat, 255, 0, mat === L.Mat.GRANITE ? L.FLAG_CONTINENTAL : 0);
+    }
+    uploadWorld(f, w);
+    const derive = createDerivePass(f);
+    derive.run(r);
+    const tec = new Tectonics(f, w.plates);
+    const read = async () => { const ci = new Uint32Array(await f.read(r, 'colInfo')); let m = 0; for (let i = 1; i < ci.length; i += 2) m += ci[i]!; return { m, peak: ci[L.colIdx(cx, cz) * 2 + 1]! / 255, nb: ci[L.colIdx(cx + 1, cz) * 2 + 1]! / 255 }; };
+    const a = await read();
+    for (let i = 0; i < 20; i++) { tec.flow(r); derive.run(r); }
+    const b = await read();
+    return { a, b };
+  });
+  expect(res.b.m).toBe(res.a.m);
+  expect(res.b.peak).toBeLessThan(res.a.peak - 20);
+  expect(res.b.nb).toBeGreaterThan(res.a.nb);
+});

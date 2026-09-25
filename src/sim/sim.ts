@@ -9,6 +9,9 @@ import { updateKinematics } from './kinematics';
 import { Lifecycle } from './lifecycle';
 import { createHydroPass, type HydroPass } from './hydro';
 import { createErosionPass, type ErosionPass } from './erosion';
+import { createClimatePass, type ClimatePass } from './climate';
+import { createBiomePass, type BiomePass } from './biome';
+import { createWorldStats, parseWorldStats, type WorldStats } from './worldStats';
 import type { WorldData } from './worldData';
 
 /** Ticks per stats window. Readback issued at window end must land before the next window ends (V2). */
@@ -26,6 +29,10 @@ export class Sim {
   readonly lifecycle: Lifecycle;
   readonly hydro: HydroPass;
   readonly erosion: ErosionPass;
+  readonly climate: ClimatePass;
+  readonly biome: BiomePass;
+  private worldStats: THREE.ComputeNode;
+  stats: WorldStats | null = null;
   private derive;
   private rng: PCG32;
   private pending: Promise<ArrayBuffer> | null = null;
@@ -43,6 +50,9 @@ export class Sim {
     this.lifecycle = new Lifecycle(fields);
     this.hydro = createHydroPass(fields, params);
     this.erosion = createErosionPass(fields, params);
+    this.climate = createClimatePass(fields, params);
+    this.biome = createBiomePass(fields);
+    this.worldStats = createWorldStats(fields);
     this.kGeoBase = this.erosion.uniforms.kGeo.value;
     this.erosion.uniforms.kGeo.value = this.kGeoBase * EROSION_EVERY;
     this.rng = new PCG32(world.seed, 0x7ec70);
@@ -71,14 +81,19 @@ export class Sim {
     if (this.tectonics.tick(r, t, this.dtGeo, { speedMul: this.params.get('plateSpeed') as number, isoEvery: ISO_EVERY })) {
       this.runsInWindow++;
       this.derive.run(r);
+      this.tectonics.flow(r);
+      this.derive.run(r);
     }
-    // 8 hydrology + erosion (erosion needs fresh surfY; derive again after its voxel edits)
+    // 7 climate (evap/precip/ice into water), 8 hydrology + erosion (erosion needs fresh surfY)
+    this.climate.step(r);
     this.hydro.step(r, HYDRO_SUBSTEPS);
     if (t % EROSION_EVERY === 0) {
       this.erosion.uniforms.tick.value = t;
       this.erosion.step(r);
       this.derive.run(r);
     }
+    // 10 derived: biome + vegetation
+    this.biome.step(r);
     this.tick = t;
     if (t % STATS_WINDOW === 0) this.windowEnd();
   }
@@ -91,14 +106,16 @@ export class Sim {
       const buf = this.pendingResult;
       this.lastCounters = new Int32Array(buf);
       const life = Lifecycle.parseStats(buf);
-      const contact = life.contact.map((row) => row.reduce((a, b) => a + b, 0));
-      updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, STATS_WINDOW * this.dtGeo, this.rng, undefined, contact);
+      updateKinematics(plates, Tectonics.parseStats(buf), this.prevRuns, STATS_WINDOW * this.dtGeo, this.rng, undefined, life.contact);
+      this.stats = parseWorldStats(buf);
+      if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); }
       const op = this.lifecycle.decide(plates, life, this.geoMy, this.rng);
       if (op) this.lifecycle.apply(r, plates, op, this.geoMy);
       this.pendingResult = null;
     }
     // snapshot this window, then clear per-window counters (queue order keeps the copy before the clear)
     this.lifecycle.gatherStats(r);
+    r.compute(this.worldStats);
     const p = this.fields.read(r, 'counters');
     this.pending = p;
     p.then((b) => { if (this.pending === p) this.pendingResult = b; });
