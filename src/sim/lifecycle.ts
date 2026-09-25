@@ -15,10 +15,10 @@ import type { PCG32 } from '../core/rng';
 export const MIN_PLATES = 3;
 export const MAX_ALIVE = 12;
 export const ABSORB_AREA = Math.round(NCOL * 0.012);
-export const SPLIT_AREA = Math.round(NCOL * 0.3);
-export const SPLIT_COOLDOWN_MY = 40;
+export const SPLIT_AREA = Math.round(NCOL * 0.18); // big plates rift; 0.3 left the world at 3-4 plates
+export const SPLIT_COOLDOWN_MY = 25;
 export const SUTURE_CONTACT = 48;     // continental boundary cells
-export const SUTURE_WINDOWS = 5;      // sustained this many windows
+export const SUTURE_WINDOWS = 10;     // sustained this many windows
 export const RIFT_SPEED = 0.8;        // cells/My each side after a split
 export const SUTURE_MIN_AGE = 30;     // My; young rift plates never re-suture
 
