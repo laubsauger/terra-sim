@@ -14,7 +14,7 @@ import { createSides } from './sides';
 import { createWater } from './water';
 import { createBackdrop, installAtmosphere, type Backdrop } from './backdrop';
 import { createPost, type Post, type PostFeatures } from './post';
-import { GOLDEN_HOUR } from './sky';
+import { GOLDEN_HOUR, cycleToTod, todToCycle } from './sky';
 import { setAmbTime, voxelToWorldY, HALF, setRenderMotion, type RenderMotion } from './space';
 import { NY } from '../sim/layout';
 
@@ -69,9 +69,9 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
   const post = createPost(renderer, scene, camera, { highQuality: hq, features: opts.postFeatures, toneMapping: opts.toneMapping });
   stage.setRender(() => post.render());
 
-  let tod0 = opts.timeOfDay ?? GOLDEN_HOUR;
   let dayLength = opts.dayLength ?? 0;
-  let tod = tod0;
+  let tod = opts.timeOfDay ?? GOLDEN_HOUR;
+  let tod0 = dayLength > 0 ? todToCycle(tod) : tod;
   let lastAmb = 0;
   let lastTod = -1;
   const applyTod = (t: number) => {
@@ -80,15 +80,16 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
     lastTod = tod;
     lighting.setTimeOfDay(tod);
   };
-  applyTod(tod0);
+  applyTod(tod);
 
   const keepOut = new THREE.Box3();
   return {
     lighting, post, backdrop, terrain: terrain.object, sides: sides.object, water: water.object,
     get timeOfDay() { return tod; },
-    // tod0 is the phase at ambTime 0 while cycling: keep the current sun where it is when either changes
-    setTimeOfDay(t) { tod0 = dayLength > 0 ? t - lastAmb / dayLength : t; applyTod(t); },
-    setDayLength(s) { tod0 = s > 0 ? tod - lastAmb / s : tod; dayLength = s; },
+    // while cycling, tod0 is the cycle phase at ambTime 0 (night compressed, sky.ts cycleToTod); keep the
+    // current sun where it is when either changes
+    setTimeOfDay(t) { tod0 = dayLength > 0 ? todToCycle(t) - lastAmb / dayLength : t; applyTod(t); },
+    setDayLength(s) { tod0 = s > 0 ? todToCycle(tod) - lastAmb / s : tod; dayLength = s; },
     get dayLength() { return dayLength; },
     setHighQuality(v) {
       post.setHighQuality(v);
@@ -99,7 +100,7 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
     frame(ambTime) {
       setAmbTime(ambTime);
       lastAmb = ambTime;
-      if (dayLength > 0) applyTod(tod0 + ambTime / dayLength);
+      if (dayLength > 0) applyTod(cycleToTod(tod0 + ambTime / dayLength));
       backdrop.update();
       // Camera keep-out: the slice volume (grid top) + plinth, and the floor.
       keepOut.min.set(-HALF - 0.45, backdrop.floorY - 1, -HALF - 0.45);

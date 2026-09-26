@@ -89,13 +89,17 @@ export function createDayPill(day: DayControl) {
     if (c !== lastClock) clock.textContent = lastClock = c;
     if (!dragging) range.value = String(Math.round(tod * RES));
   }
-  // sit just left of the time bar (its width changes with the speed text)
+  // sit just left of the time bar (its width changes with the speed text); on narrow windows there is no room
+  // there, so stack above it instead of sliding off-screen
   const place = () => {
     const tb = document.querySelector('.tb') as HTMLElement | null;
     const r = tb && !tb.hidden ? tb.getBoundingClientRect() : null;
     if (r && r.width > 0) {
-      el.style.left = `${Math.round(r.left - 10 - el.getBoundingClientRect().width)}px`;
-      el.style.bottom = `${Math.round(window.innerHeight - r.bottom)}px`;
+      const w = el.getBoundingClientRect().width;
+      const left = r.left - 10 - w;
+      const fits = left >= 12;
+      el.style.left = `${Math.round(fits ? left : r.left)}px`;
+      el.style.bottom = `${Math.round(window.innerHeight - r.bottom + (fits ? 0 : r.height + 8))}px`;
       el.style.height = `${Math.round(r.height)}px`;
     }
   };

@@ -11,6 +11,24 @@ type V3 = THREE.Node<'vec3'>;
 /** Default look: late golden hour, sun ~14° high. */
 export const GOLDEN_HOUR = 0.705;
 
+/**
+ * Share of a running day cycle spent at night (sun below the horizon: tod ∉ [0.25, 0.75]). A linear cycle
+ * spent half its time in the dark: ambient mode (600 s days) looked always dark.
+ */
+export const NIGHT_SHARE = 0.2;
+const DAY_SHARE = 1 - NIGHT_SHARE;
+/** Day-cycle phase (0..1, linear in time) → time of day; night passes in NIGHT_SHARE of the cycle. */
+export function cycleToTod(c: number): number {
+  const f = ((c % 1) + 1) % 1;
+  return f < DAY_SHARE ? 0.25 + (f / DAY_SHARE) * 0.5 : (0.75 + ((f - DAY_SHARE) / NIGHT_SHARE) * 0.5) % 1;
+}
+/** Inverse of cycleToTod. */
+export function todToCycle(tod: number): number {
+  const t = ((tod % 1) + 1) % 1;
+  if (t >= 0.25 && t < 0.75) return ((t - 0.25) / 0.5) * DAY_SHARE;
+  return DAY_SHARE + ((((t - 0.75) % 1) + 1) % 1 / 0.5) * NIGHT_SHARE;
+}
+
 /** Horizontal compass of the sun path (world xz). Sunset lands at the camera's left in the hero view. */
 const WEST = new THREE.Vector2(-0.75, 0.66).normalize();
 const SOUTH = new THREE.Vector2(-0.66, -0.75).normalize(); // noon sun comes from behind the hero view

@@ -7,6 +7,9 @@ import { DualClock } from './core/clock';
 import { createPanel } from './ui/panel';
 import { createTimebar, type ClockLike } from './ui/timebar';
 import { createDayPill } from './ui/dayPill';
+
+/** Time of day an ambient session opens at (0.5 = noon). */
+const AMBIENT_START_TOD = 0.34;
 import { bindKeys } from './ui/keys';
 import { registerSimFields, uploadWorld } from './sim/fields';
 import { generateWorld } from './sim/worldgen';
@@ -122,6 +125,8 @@ async function main() {
   const applyAmbientDay = () => look.setDayLength((params.get('ambientMode') as boolean) ? 600 : 0);
   params.onChange((key) => { if (key === 'ambientMode') { applyUi(); applyAmbientDay(); } });
   applyUi();
+  // ambient sessions open in the morning (golden hour slid into a long night within a minute)
+  if (params.get('ambientMode') as boolean) look.setTimeOfDay(AMBIENT_START_TOD);
   applyAmbientDay();
   bindKeys({
     toggleUI: () => { uiVisible = !uiVisible; applyUi(); },
