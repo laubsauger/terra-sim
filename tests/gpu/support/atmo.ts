@@ -231,10 +231,60 @@ async function main() {
       const v = new THREE.Vector3(x, y, z).project(camera), r = renderer.domElement.getBoundingClientRect();
       return [(v.x * 0.5 + 0.5) * r.width, (0.5 - v.y * 0.5) * r.height];
     },
+    /** Surface height per column (voxel y). */
+    surf: async () => fields.read(renderer, 'surfY'),
     /** Water depth per column (voxel layers). */
     water: async () => Array.from(new Float32Array(await fields.read(renderer, 'water'))),
     NCOL, NX,
   };
+  // ---- weather / cloud diagnostics (clouds.ts): weather-map and density probes, relief edits, uniform air ----
+  const { texture3D, vec2: tv2, vec4: tv4, float: tf, int: ti } = THREE.TSL;
+  const am = await import('../../../src/atmo/atmoModel');
+  const { GodTools } = await import('../../../src/sim/godTools');
+  const god = new GodTools(fields), derive = createDerivePass(fields);
+  const WXN = 128;
+  const wxOut = instancedArray(WXN * WXN, 'vec4');
+  const wxArg = uniformArray([new THREE.Vector4(0, 0, 4, 64), new THREE.Vector4()], 'vec4'); // (x0, z0, size, n), (y)
+  const arg = (i: number) => wxArg.element(i) as unknown as THREE.Node<'vec4'>;
+  const gridXZ = () => {
+    const a = arg(0), n = a.w;
+    const ix = tf(instanceIndex).mod(n), iz = tf(instanceIndex).div(n).floor();
+    return tv2(a.x.add(ix.add(0.5).div(n).mul(a.z)), a.y.add(iz.add(0.5).div(n).mul(a.z)));
+  };
+  const weatherK = Fn(() => { const p = gridXZ(); wxOut.element(instanceIndex).assign(atmo.clouds.weatherAt(p.x, p.y)); })().compute(WXN * WXN);
+  const cu = atmo.clouds.uniforms;
+  const densK = Fn(() => {
+    const p = gridXZ(), y = arg(1).x;
+    const d = texture3D(atmo.clouds.density, vec3(p.x.add(2).div(4), y.sub(cu.yLo).div(cu.yHi.sub(cu.yLo)), p.y.add(2).div(4))).level(ti(0));
+    wxOut.element(instanceIndex).assign(tv4(d.r, d.g, d.b, 0));
+  })().compute(WXN * WXN);
+  const runGrid = async (k: THREE.ComputeNode, x0: number, z0: number, size: number, n: number, y = 0) => {
+    (wxArg.array[0] as THREE.Vector4).set(x0, z0, size, n); (wxArg.array[1] as THREE.Vector4).set(y, 0, 0, 0);
+    renderer.compute(k);
+    return Array.from(new Float32Array(await renderer.getArrayBufferAsync(wxOut.value as unknown as THREE.StorageBufferAttribute))).slice(0, n * n * 4);
+  };
+  Object.assign(w.at as Record<string, unknown>, {
+    /** Weather map (coverage, storm, stratus − congestus, base world y) on an n×n grid (n ≤ 128) over a world square. */
+    weatherGrid: (n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(weatherK, x0, z0, size, Math.min(n, WXN)),
+    /** Cloud density volume (density, storm, ash share) on an n×n grid at world height y. */
+    densityGrid: (y: number, n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(densK, x0, z0, size, Math.min(n, WXN), y),
+    /** Slab bounds (world y). */
+    slab: () => [cu.yLo.value, cu.yHi.value],
+    /** God-tool uplift (voxel columns, immediate) + derive: a real new mountain under the clouds. */
+    uplift: (x: number, z: number, radius: number, layers: number) => { god.uplift(renderer, x, z, radius, layers); derive.run(renderer); updateRenderColumns(renderer, fields, 10); },
+    /** Uniform air everywhere: relative humidity, surface temperature (°C), precip per tick. */
+    paintAir: (a: { rh: number; t: number; precip?: number }) => {
+      const cap = am.capacity(a.t);
+      (fields.cpuArray('vapor') as Float32Array).fill(a.rh * cap);
+      (fields.cpuArray('precip') as Float32Array).fill(a.precip ?? 0);
+      (fields.cpuArray('surfTemp') as Float32Array).fill(a.t);
+      for (const n of ['vapor', 'precip', 'surfTemp']) fields.markDirty(n);
+    },
+    /** Set the page's ambience clock (s): replay the same cloud noise over a changed terrain / weather. */
+    setClock: (v: number) => { t = v; },
+    /** Drift velocities (world/s) per wind band: the low cloud layer and the cirrus layer. */
+    bands: () => ({ low: am.bandSpeeds(), high: am.cirrusBands() }),
+  });
   w.atReady = true;
 }
 

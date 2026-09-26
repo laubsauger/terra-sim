@@ -84,7 +84,7 @@ export interface Plumes {
   dispose(): void;
 }
 
-const BURST_RATE: Record<number, number> = { [BURST.ASH]: 260, [BURST.DUST]: 900, [BURST.HAZE]: 70, [BURST.STEAM]: 160, [BURST.FOUNTAIN]: 170, [BURST.BOMB]: 22, [BURST.PDC]: 110 };
+const BURST_RATE: Record<number, number> = { [BURST.ASH]: 260, [BURST.DUST]: 900, [BURST.HAZE]: 70, [BURST.STEAM]: 160, [BURST.FOUNTAIN]: 170, [BURST.BOMB]: 22, [BURST.PDC]: 110, [BURST.TEPHRA]: 120 };
 
 export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQuality: boolean; renderer: THREE.WebGPURenderer }): Plumes {
   const N = ATMO.PARTICLES_HIGH;
@@ -224,15 +224,15 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         p0.assign(vec4(o.x.add(j.x), o.y.add(0.003), o.z.add(j.y), 0));
         p1.assign(vec4(0, up, 0, min(surf.sub(o.y).mul(0.92).div(up), 9)));
         p2.assign(vec4(float(PK.TURBID), seed, surf, o.y));
-      }).ElseIf(is(PK.FOUNTAIN), () => { // FOUNTAIN: bright spray arcing just above the vent
-        const out = dir.mul(rr.mul(0.18).add(0.04)).mul(sqrt(heat));
+      }).ElseIf(is(PK.FOUNTAIN), () => { // FOUNTAIN: bright spray arcing just above the vent, falling back around it
+        const out = dir.mul(rr.mul(0.1).add(0.03)).mul(sqrt(heat));
         p0.assign(vec4(o.x.add(dir.x.mul(0.004)), o.y.add(0.004), o.z.add(dir.y.mul(0.004)), 0));
-        p1.assign(vec4(out.x, rnd(14).mul(0.22).add(0.2).mul(sqrt(heat)).mul(mag.min(1.2)), out.y, 3));
+        p1.assign(vec4(out.x, rnd(14).mul(0.18).add(0.16).mul(sqrt(heat)).mul(mag.min(1.2)), out.y, 3));
         p2.assign(vec4(float(PK.FOUNTAIN), seed, heat, o.y));
-      }).ElseIf(is(PK.BOMB), () => { // BOMB: glowing lava bomb on a ballistic arc
-        const out = dir.mul(rr.mul(0.24).add(0.1)).mul(mag.min(1.2));
+      }).ElseIf(is(PK.BOMB), () => { // BOMB: glowing lava bomb on a heavy, slow ballistic arc down onto the flanks
+        const out = dir.mul(rr.mul(0.1).add(0.04)).mul(mag.min(1.2));
         p0.assign(vec4(o.x, o.y.add(0.01), o.z, 0));
-        p1.assign(vec4(out.x, rnd(14).mul(0.25).add(0.35).mul(mag.min(1.2)), out.y, 6));
+        p1.assign(vec4(out.x, rnd(14).mul(0.12).add(0.16).mul(mag.min(1.2)), out.y, 6));
         p2.assign(vec4(float(PK.BOMB), seed, heat, o.y));
       }).ElseIf(is(PK.TEPHRA), () => { // TEPHRA: black cock's-tail jets fanning out of a shallow sea vent
         const out = dir.mul(rr.mul(0.22).add(0.06)).mul(heat.add(0.3).min(1));
@@ -290,12 +290,12 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
             const floorY = v.y.sub(wdep.mul(VOXEL_H).mul(vertEx)).toVar();
             const active = step(1.5, pc).mul(step(pc, 2.5)).toVar();
             If(wdep.greaterThan(VENT_DEEP), () => { // deep submarine: smoker column + bubbles below, slick + pumice on top
-              If(r.lessThan(0.07), () => { kind.assign(PK.PUMICE); })
+              If(r.lessThan(0.025), () => { kind.assign(PK.PUMICE); })
                 .ElseIf(r.lessThan(0.16), () => { kind.assign(PK.SLICK); })
                 .ElseIf(r.lessThan(0.4), () => { kind.assign(PK.BUBBLE); origin.y.assign(floorY); })
                 .Else(() => { kind.assign(PK.TURBID); origin.y.assign(floorY); });
             }).ElseIf(wdep.greaterThan(VENT_SHALLOW), () => { // boiling sea: steam, a discoloured patch, pumice
-              If(r.lessThan(0.12), () => { kind.assign(PK.SLICK); }).ElseIf(r.lessThan(0.18), () => { kind.assign(PK.PUMICE); }).Else(() => { kind.assign(PK.STEAM); });
+              If(r.lessThan(0.12), () => { kind.assign(PK.SLICK); }).ElseIf(r.lessThan(0.14), () => { kind.assign(PK.PUMICE); }).Else(() => { kind.assign(PK.STEAM); });
             })
               .ElseIf(wdep.greaterThan(ATMO.STEAM_WET), () => { // Surtseyan: cock's-tail tephra jets + steam billows
                 If(r.lessThan(0.4), () => { kind.assign(PK.TEPHRA); }).ElseIf(r.lessThan(0.8), () => { kind.assign(PK.STEAM); });
@@ -303,8 +303,10 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
               .Else(() => {
                 If(r.lessThan(coast.mul(0.7)), () => { kind.assign(PK.STEAM); }) // lava hitting the sea
                   .ElseIf(pc.lessThan(1.5), () => { kind.assign(PK.STEAM); }) // pools / build-up: degassing wisps only
-                  .ElseIf(active.greaterThan(0.5).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE))), () => { kind.assign(PK.FOUNTAIN); })
-                  .ElseIf(active.greaterThan(0.5).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE).add(heat.mul(heat).mul(ATMO.BOMB_SHARE)))).and(heat.greaterThan(0.4)), () => { kind.assign(PK.BOMB); });
+                  // incandescent ejecta only from vents on land (a vent cell that is mostly sea throws none:
+                  // its bombs would all come down on the water)
+                  .ElseIf(active.greaterThan(0.5).and(coast.lessThan(0.5)).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE))), () => { kind.assign(PK.FOUNTAIN); })
+                  .ElseIf(active.greaterThan(0.5).and(coast.lessThan(0.5)).and(r2.lessThan(heat.mul(ATMO.FOUNTAIN_SHARE).add(heat.mul(heat).mul(ATMO.BOMB_SHARE)))).and(heat.greaterThan(0.4)), () => { kind.assign(PK.BOMB); });
               });
             emit(kind, origin, heat, float(1), float(0.03), v.y);
           });
@@ -352,12 +354,12 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
             const a = rnd(12).mul(TAU).toVar(), rr = rnd(13).toVar();
             const dir = vec2(cos(a), sin(a)).toVar();
             If(kind.lessThan(0.5), () => { emit(float(PK.ASH), A.xyz, float(1), mag, rad, A.y); })
-              .ElseIf(kind.lessThan(1.5), () => { // DUST ring (meteor)
+              .ElseIf(kind.lessThan(1.5), () => { // DUST ring: the base surge of an explosive opening
                 const ring = rad.mul(rr.mul(0.3).add(0.15));
-                const col = step(rnd(17), 0.25); // a quarter rise as the impact column
+                const col = step(rnd(17), 0.1); // a few puffs billow up off the ring
                 p0.assign(vec4(A.x.add(dir.x.mul(ring)), A.y.add(0.01), A.z.add(dir.y.mul(ring)), 0));
                 const out = rnd(14).mul(0.5).add(0.35).mul(mag).mul(float(1).sub(col.mul(0.8)));
-                p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.25).add(0.3), col), dir.y.mul(out), rnd(15).mul(4).add(3.5)));
+                p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.12).add(0.1), col), dir.y.mul(out), rnd(15).mul(2).add(2.2)));
                 p2.assign(vec4(float(PK.DUST), rnd(16), 0.8, A.y));
               }).ElseIf(kind.lessThan(2.5), () => { // HAZE (flood basalt)
                 const d = dir.mul(sqrt(rr).mul(rad));
@@ -367,7 +369,8 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
               }).ElseIf(kind.lessThan(3.5), () => { emit(float(PK.STEAM), A.xyz, mag.min(1), float(1), rad, A.y); })
               .ElseIf(kind.lessThan(4.5), () => { emit(float(PK.FOUNTAIN), A.xyz, float(1), mag, rad, A.y); })
               .ElseIf(kind.lessThan(5.5), () => { emit(float(PK.BOMB), A.xyz, float(1), mag, rad, A.y); })
-              .Else(() => { emit(float(PK.PDC), A.xyz, float(1), mag, rad, A.y); });
+              .ElseIf(kind.lessThan(6.5), () => { emit(float(PK.PDC), A.xyz, float(1), mag, rad, A.y); })
+              .Else(() => { emit(float(PK.TEPHRA), A.xyz, mag.min(1), float(1), rad, A.y); });
           });
         });
       });
@@ -417,8 +420,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         vel.xz.assign(turb.mul(0.05).add(wind.mul(frac.mul(0.06))));
       }).ElseIf(ballistic.greaterThan(0.5), () => { // FOUNTAIN / BOMB / TEPHRA: ballistic, a touch of drag; landed bombs rest
         const flying = step(1e-5, dot(vel, vel));
-        vel.y.subAssign(dt.mul(G).mul(flying));
-        vel.mulAssign(exp(dt.mul(-0.15)));
+        const bomb = isK(PK.BOMB);
+        vel.y.subAssign(dt.mul(mix(float(G), float(ATMO.BOMB_GRAVITY), bomb)).mul(flying));
+        vel.mulAssign(exp(dt.mul(mix(float(-0.15), float(-ATMO.BOMB_DRAG), bomb))));
       }).ElseIf(floating.greaterThan(0.5), () => { // PUMICE / SLICK: ride the sea surface downwind
         vel.xz.assign(mix(vel.xz, wind.mul(0.12).add(turb.mul(0.2)), float(1).sub(exp(dt.mul(-0.4)))));
         vel.y.assign(0);
@@ -489,14 +493,15 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     const pdcLoft = step(1.5, q2.z);
     const size0 = dot(kA, vec4(0.02, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
       .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.01, mix(float(0.04), float(0.05), pdcLoft))))
-      .add(dot(kC, vec3(0.007, 0.011, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
+      .add(dot(kC, vec3(0.007, 0.014, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
     // a PDC widens as it runs out (base) and billows up as it lofts
     const grow = dot(kA, vec4(0.07, 0.11, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.16));
     const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.45))));
     // ejecta streak along their screen-space velocity (ember trails)
     const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
     const speed = length(q1.xyz);
-    const stretch = float(1).add(speed.mul(mix(float(6), float(9), kC.y)).mul(streak));
+    // short trails: bombs are glowing clots with a brief tail, not tracer lines
+    const stretch = float(1).add(speed.mul(mix(float(4), float(5), kC.y)).mul(streak));
     const back = normalize(q1.xyz.add(vec3(0, 1e-5, 0))).mul(size.mul(stretch.sub(1)).mul(0.42)).mul(streak);
     // a slick lies on the sea: squash its billboard by the view elevation (reads as a flat patch)
     const viewY = abs(normalize(q0.xyz.sub(cameraPosition)).y);
@@ -542,9 +547,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       // ash: near-black at the vent, lighter grey as it rises and thins
       const ashCol = mix(vec3(0.05, 0.045, 0.04), vec3(0.44, 0.42, 0.4), smoothstep(0.0, 0.3, vH.x));
       const albedo = ashCol.mul(k.x)
-        .add(vec3(0.93, 0.94, 0.96).mul(k.y)).add(vec3(0.56, 0.45, 0.33).mul(k.z)).add(vec3(0.6, 0.55, 0.48).mul(k.w))
+        .add(vec3(0.93, 0.94, 0.96).mul(k.y)).add(vec3(0.4, 0.37, 0.34).mul(k.z)).add(vec3(0.6, 0.55, 0.48).mul(k.w))
         .add(vec3(0.8, 0.92, 1.0).mul(kb.x.mul(1.1))).add(vec3(0.05, 0.05, 0.06).mul(kb.y)).add(mix(vec3(0.035, 0.03, 0.026), vec3(0.24, 0.215, 0.19), smoothstep(0, 0.9, colFrac)).mul(kb.z))
-        .add(mix(vec3(0.19, 0.17, 0.155), vec3(0.44, 0.41, 0.38), loftF).mul(kb.w)).add(vec3(0.78, 0.74, 0.64).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
+        .add(mix(vec3(0.19, 0.17, 0.155), vec3(0.44, 0.41, 0.38), loftF).mul(kb.w)).add(vec3(0.5, 0.47, 0.42).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
       const litC = albedo.mul(amb.add(keyCol.mul(wrap).mul(0.3)));
       // a PDC keeps its ash grey: a third of the warm sky / low-sun tint is taken out (no pink tubes)
       const lit = mix(litC, vec3(dot(litC, vec3(0.3, 0.55, 0.15))), kb.w.mul(0.35));
@@ -553,13 +558,18 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         // (smoker foot: only a faint warm tint in the puff core; a brighter glow read as flat orange discs
         // through the water, the seafloor's own vent glow carries the heat)
         .add(exp(max(vH.x, 0).mul(-60)).mul(kb.z.mul(0.05)).mul(smoothstep(0.8, 0.0, rr)))
-        .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1)))
+        .add(k.z.mul(0.12).mul(exp(age.mul(-2))).mul(min(heat, 1))) // base surge: a hint of heat as it leaves the crater
         .add(kb.w.mul(float(1).sub(loftF)).mul(0.06).mul(exp(age.mul(-1.4))).mul(min(heat, 1))) // PDC base: faint heat near the vent
         .mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
       // incandescent ejecta cooling from yellow to deep red; tephra is black rock with a brief hot head
-      const cool = mix(exp(age.mul(-1.1)), exp(age.mul(-0.3)), kc.y);
-      const ember = mix(vec3(0.8, 0.1, 0.02), vec3(1.0, 0.5, 0.12), cool).mul(mix(float(1.5), float(4.5), cool)).mul(mix(float(0.7), float(1), kc.y));
-      const tephra = mix(vec3(0.035, 0.03, 0.028).mul(amb.add(keyCol.mul(0.2))), vec3(1.0, 0.4, 0.1).mul(2), exp(age.mul(-5)).mul(0.5));
+      // incandescent ejecta: yellow-orange out of the vent, deep orange-red in flight, dark rock by the time
+      // a bomb has come down (landed bombs keep a dull red glow while they rest)
+      const cool = mix(exp(age.mul(-1.1)), exp(age.mul(-0.75)), kc.y);
+      const hotC = mix(vec3(1.0, 0.36, 0.06), vec3(1.0, 0.72, 0.3), smoothstep(0.55, 1, cool));
+      const ember = mix(mix(vec3(0.06, 0.04, 0.035), vec3(0.75, 0.12, 0.02).mul(1.6), smoothstep(0.04, 0.3, cool)), hotC.mul(mix(float(2.5), float(6), cool)), smoothstep(0.25, 0.8, cool))
+        .mul(mix(float(0.8), float(1), kc.y));
+      // tephra: black wet rock, quenched at once (no glow)
+      const tephra = vec3(0.035, 0.03, 0.028).mul(amb.add(keyCol.mul(0.2)));
       const streakCol = mix(ember, tephra, kc.z);
       const shimmer = sin(age.mul(9).add(seed.mul(30))).mul(0.2).add(0.8);
       const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.32)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
@@ -571,7 +581,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         .add(kb.z.mul(float(1).sub(smoothstep(0.65, 1, colFrac)).mul(0.7)))
         .add(kb.w.mul(mix(pow(float(1).sub(t), 1.4).mul(0.4), smoothstep(0, 0.2, t).mul(pow(float(1).sub(t), 1.2)).mul(0.3), loftF)))
         .add(isStreak.mul(mix(float(0.9), float(1), kc.y)).mul(float(1).sub(pow(t, 6))))
-        .add(kd.x.mul(0.85).mul(smoothstep(1, 0.85, t)))
+        .add(kd.x.mul(0.5).mul(smoothstep(1, 0.85, t))) // pumice: dull grey specks, not points of light
         // a slick is a patch on the sea: it fades out toward grazing views instead of stacking into
         // squashed horizontal slabs (the 'pancake' layers seen from low cameras)
         .add(kd.y.mul(sin(t.mul(Math.PI)).mul(0.22)).mul(smoothstep(0.12, 0.4, abs(normalize(vPos.sub(cameraPosition)).y))));

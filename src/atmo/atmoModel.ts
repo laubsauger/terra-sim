@@ -4,8 +4,9 @@
 //
 // World mapping (space.ts): the block spans x,z ∈ [-HALF, HALF], one column = CELL world units.
 // Wind (climateModel.ts) is in cells per geo tick; FX turn it into world units per second with
-// WIND_SCALE, and strengthen it with height (windProfile): surface bands below, a mid-latitude
-// westerly jet at the top of the troposphere slab.
+// WIND_SCALE, and strengthen it with height (windProfile): surface bands below, and aloft a
+// westerly regime (thermal-wind shear, return flow of the meridional cells, a mid-latitude jet) at
+// the top of the troposphere slab, so high cloud drifts across the low layer.
 import { NZ, CELL, BLOCK_SIZE } from '../sim/layout';
 import { CLIMATE, windU, windV } from '../sim/climateModel';
 
@@ -26,6 +27,20 @@ export const ATMO = {
   CURL: 0.55,
   /** Height fraction (of WIND_H) the cumulus layer steers with. */
   CLOUD_HF: 0.4,
+  /**
+   * Upper-level regime (above hf ALOFT_HF0, full at hf 1): the surface bands weaken (ALOFT_DAMP of
+   * them is lost at the top), the meridional cells reverse (return flow, ALOFT_RETURN) and a westerly
+   * thermal-wind shear (ALOFT_SHEAR world/s) is added at every latitude. Below ALOFT_HF0 the profile
+   * is the plain surface bands (plumes, rain, low clouds unchanged); aloft the flow turns westerly,
+   * so high cloud moves faster and in a different direction than the low layer (tropics: opposite).
+   */
+  ALOFT_HF0: 0.5,
+  ALOFT_DAMP: 0.8,
+  ALOFT_RETURN: 2,
+  ALOFT_SHEAR: 0.07,
+  /** Height fraction the cirrus layer steers with, and its turning (opposite sign to CURL's per band). */
+  CIRRUS_HF: 1,
+  CIRRUS_CURL: 0.3,
 
   // ---- climate summary (coarse grid over the columns) ----
   /** Summary grid: SUM × SUM cells of SUM_STEP² columns. */
@@ -51,13 +66,41 @@ export const ATMO = {
   DRIFT_TILE: 4.8,
   /** Towers lean downwind: the height-dependent part of the wind is applied over this many seconds. */
   TILT_S: 5,
+  /** Upper bound of that lean (world): the westerlies aloft would otherwise topple tropical towers. */
+  TILT_MAX: 0.12,
   /** Global coverage scale: noise survives where it exceeds 1 - blurredCover·COVERAGE (≤ ~35 % sky). */
   COVERAGE: 0.75,
-  /** Coverage noise evolves through the 3D noise's third axis: cycles per ambTime period. */
-  EVOLVE: 5,
+  /** Extra coverage threshold under full storm precip (may exceed 1: storm cores stay filled, only rims fray). */
+  STORM_FILL: 0.35,
+  /**
+   * Coverage noise evolves through the 3D noise's third axis, in cycles per ambTime period (whole numbers:
+   * seamless when ambTime wraps). EVOLVE: the large-scale pattern (regional cloudiness drifts slowly; even,
+   * the domain warp runs at half rate). LIFE: the cell-scale octave, so single clouds form, grow and
+   * dissolve over ~20-40 s while the region's cloud amount stays steady (cirrus morphs at LIFE / 2).
+   */
+  EVOLVE: 6,
+  LIFE: 30,
   /** Cloud base above the tallest ground nearby (voxels) and absolute floor above sea (voxels). */
   BASE_CLEAR: 9,
   BASE_ABOVE_SEA: 22,
+
+  // ---- terrain coupling (weather map; reads surfY / water directly, so it follows new relief at once) ----
+  /** Upwind look-back distances (world) along the low-level drift for slope and rain-shadow tests. */
+  OROG_UP: [0.09, 0.2, 0.34],
+  /** Terrain rise (voxels) over OROG_UP[0] for full windward lift; upwind excess height (voxels) for a full rain shadow. */
+  OROG_RISE: 6,
+  LEE_H0: 2, LEE_H1: 10,
+  /** Height above sea (voxels) where peaks start to wear cap clouds / wear them fully, and their prominence over the ~12-column mean ground. */
+  CAP_H0: 18, CAP_H1: 34, CAP_PROM0: 1, CAP_PROM1: 6,
+  /** Relative humidity where lifted air starts / fully condenses (orographic + cap cloud). */
+  OROG_RH0: 0.4, OROG_RH1: 0.8,
+  /** Cover added by windward lift, peak caps, warm humid land convection, cold-ocean stratus; lee cut; desert damping. */
+  OROG_GAIN: 0.75, CAP_GAIN: 0.6, CONV_GAIN: 0.45, STRAT_GAIN: 0.35, LEE_CUT: 0.85, DESERT_CUT: 0.9,
+  /** Convection: warm land (°C) from / full, humid (rh) from / full. Cold ocean stratus: sea colder than (°C) from / full. */
+  CONV_T0: 12, CONV_T1: 24, CONV_RH0: 0.5, CONV_RH1: 0.85,
+  STRAT_T0: 8, STRAT_T1: 2,
+  /** Hugging cloud base on lifted flanks / caps: voxels above the local mean ground (caps swallow the summit). */
+  HUG_CLEAR: 1, CAP_SINK: 4,
   /** Lightning / test probe grid over the weather map. */
   CELLS: 32,
   /** Wet-haze curtain sprites per side. */
@@ -86,8 +129,15 @@ export const ATMO = {
   NEAR_FADE0: 0.25,
   NEAR_FADE1: 1.1,
   /** Cirrus: sparse high streaks, share of the sky and peak density. */
-  CIRRUS_COVER: 0.28,
-  CIRRUS_DENS: 0.16,
+  CIRRUS_COVER: 0.34,
+  CIRRUS_DENS: 0.5,
+  /** Cirrus noise tile along the upper wind (world): long streaks. */
+  CIRRUS_TILE: 4.8,
+  /** Share of the march's detail erosion cirrus gets (wispy edges, but the veil survives), and its step length (× in-cloud step). */
+  CIRRUS_ERO: 0.35,
+  CIRRUS_STEP: 2.5,
+  /** Cirrus share of the cloud shadow (a thin ice veil barely dims the sun). */
+  CIRRUS_SHADOW: 0.15,
 
   // ---- cloud shadow texture ----
   SHADOW_RES: 128,
@@ -107,10 +157,17 @@ export const ATMO = {
   VENT_RATE: 34,
   VENTS_EMIT: 14,
   /** Share of a vent's spawns that are lava-fountain spray / ballistic bombs (× vent heat, × heat² for bombs). */
-  FOUNTAIN_SHARE: 0.22,
-  BOMB_SHARE: 0.08,
+  FOUNTAIN_SHARE: 0.26,
+  BOMB_SHARE: 0.14,
   /** Gravity for ejecta (world/s², diorama scale: a fast fountain reaches ~0.15 world). */
   GRAVITY: 1.1,
+  /**
+   * Lava bombs fly in slow motion (slower launch, lower gravity, more drag): heavy arcs that hang ~1 s and
+   * come down on the flanks a few cells out, instead of streaking off.
+   */
+  BOMB_GRAVITY: 0.5, BOMB_DRAG: 0.45,
+  /** Explosive openings (natural BUILD → ACTIVE): at most one blast per BLAST_GAP s; vents within BLAST_NEAR (world) are the same vent. */
+  BLAST_GAP: 3, BLAST_NEAR: 0.1,
   /** Pyroclastic density currents: mean episodes per second at a full-heat vent. */
   PDC_RATE: 1 / 30,
   /** Volcanic lightning inside big ash columns: flashes/s at a full-heat vent at night (day × 0.15). */
@@ -147,7 +204,7 @@ export const ATMO = {
 } as const;
 
 /** Burst kinds (event-driven emitters); order is the GPU code. */
-export const BURST = { ASH: 0, DUST: 1, HAZE: 2, STEAM: 3, FOUNTAIN: 4, BOMB: 5, PDC: 6 } as const;
+export const BURST = { ASH: 0, DUST: 1, HAZE: 2, STEAM: 3, FOUNTAIN: 4, BOMB: 5, PDC: 6, TEPHRA: 7 } as const;
 /** Particle kinds: ash/steam/fountain spray/bombs/tephra jets from vents, pyroclastic currents, dust/haze from impacts and flood basalts, bubble/smoker/turbid clouds underwater, floating pumice. */
 export const PK = { ASH: 0, STEAM: 1, DUST: 2, HAZE: 3, BUBBLE: 4, SMOKER: 5, TURBID: 6, FOUNTAIN: 7, BOMB: 8, PDC: 9, PUMICE: 10, TEPHRA: 11, SLICK: 12 } as const;
 /** Underwater kinds (drawn before the water sheet): BUBBLE..TURBID. */
@@ -178,7 +235,11 @@ export function windProfile(z: number, hf: number): { u: number; v: number } {
   const c = zToCell(z);
   const k = ATMO.WIND_SCALE * CELL * (1 + (ATMO.WIND_TOP - 1) * hf);
   const jet = ATMO.JET * Math.sin(2 * phiAt(z)) ** 2 * hf * hf;
-  return { u: windU(c) * k + jet, v: windV(((c % NZ) + NZ) % NZ) * k };
+  const a = smooth(ATMO.ALOFT_HF0, 1, hf); // upper-level regime (0 below ALOFT_HF0)
+  return {
+    u: windU(c) * k * (1 - ATMO.ALOFT_DAMP * a) + jet + ATMO.ALOFT_SHEAR * a,
+    v: windV(((c % NZ) + NZ) % NZ) * k * (1 - ATMO.ALOFT_RETURN * a),
+  };
 }
 
 /** Wind bands of the analytic model across the torus: centred on cells 0 (trades), 64 (westerlies), 128 (polar), 192 (westerlies). */
@@ -192,24 +253,36 @@ export const BANDS = 4;
  */
 export function bandSpeeds(): { u: number; v: number }[] {
   const q = ATMO.DRIFT_TILE / AMB_PERIOD;
+  return bandMean(ATMO.CLOUD_HF, ATMO.CURL).map((w) => ({ u: Math.round(w.u / q) * q, v: Math.round(w.v / q) * q }));
+}
+
+/** Band-average wind at height fraction hf, turned by curl × |u| (alternating sign per band). */
+function bandMean(hf: number, curl: number): { u: number; v: number }[] {
   return Array.from({ length: BANDS }, (_, i) => {
     let su = 0, sv = 0;
     const n = 32;
     for (let k = 0; k < n; k++) {
       const cell = i * (NZ / BANDS) - NZ / (2 * BANDS) + ((k + 0.5) / n) * (NZ / BANDS);
-      const w = windProfile((cell + 0.5) * CELL - HALF, ATMO.CLOUD_HF);
+      const w = windProfile((cell + 0.5) * CELL - HALF, hf);
       su += w.u; sv += w.v;
     }
     su /= n; sv /= n;
-    const turn = ATMO.CURL * Math.abs(su) * (i % 2 === 0 ? 1 : -1);
-    return { u: Math.round(su / q) * q, v: Math.round((sv + turn) / q) * q };
+    return { u: su, v: sv + curl * Math.abs(su) * (i % 2 === 0 ? 1 : -1) };
   });
 }
 
-/** Cirrus drift (world/s along +x): uniform so the streaks never shear apart; quantised so the noise tile wraps seamlessly with ambTime. */
-export function cirrusSpeed(): number {
-  const q = ATMO.DRIFT_TILE / AMB_PERIOD;
-  return Math.round((ATMO.JET * 0.9 + ATMO.WIND_SCALE * CELL * CLIMATE.U0) / q) * q;
+/**
+ * Cirrus drift per band (world/s, x and z) at the top of the profile (CIRRUS_HF), turned the other way
+ * from the low layer: the streaks translate rigidly along their own wind (no shear inside a band) and
+ * are stretched along it. The speed is quantised so one ambTime period moves the streak noise by a
+ * whole number of tiles along the wind (CIRRUS_TILE): seamless when ambTime wraps.
+ */
+export function cirrusBands(): { u: number; v: number }[] {
+  const q = ATMO.CIRRUS_TILE / AMB_PERIOD;
+  return bandMean(ATMO.CIRRUS_HF, -ATMO.CIRRUS_CURL).map((w) => {
+    const s = Math.hypot(w.u, w.v), sq = Math.max(1, Math.round(s / q)) * q;
+    return { u: (w.u / s) * sq, v: (w.v / s) * sq };
+  });
 }
 
 /** Saturation vapor capacity (same as climateModel.vaporCapacity). */

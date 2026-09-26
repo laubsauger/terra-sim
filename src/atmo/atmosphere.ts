@@ -12,7 +12,7 @@ import type { GeoEvent } from '../sim/events';
 import { CELL, BLOCK_SIZE, Y_SEA_NOMINAL } from '../sim/layout';
 import { cellToWorld, voxelToWorldY, vertEx } from '../render/space';
 import { skyU } from '../render/sky';
-import { ATMO, AMB_PERIOD, BURST, VENT_PHASE, VENT_SHALLOW, windProfile, decodeVent } from './atmoModel';
+import { ATMO, AMB_PERIOD, BURST, HALF, VENT_PHASE, VENT_SHALLOW, windProfile, decodeVent } from './atmoModel';
 import { createClouds, cloudShadowU, type Clouds } from './clouds';
 import { atmoSeaLevel, atmoCut } from './atmoTsl';
 import { createPlumes, type Plumes } from './plumes';
@@ -50,7 +50,7 @@ export interface Atmosphere {
   /** Fire an event's FX directly (tests, god tools preview). */
   trigger(e: Pick<GeoEvent, 'kind' | 'x' | 'z' | 'magnitude'> & { radius?: number }): void;
   /** Debug counters. */
-  readonly stats: { flashes: number; bursts: number; lightning: number; volcanicLightning: number; pdc: number };
+  readonly stats: { flashes: number; bursts: number; lightning: number; volcanicLightning: number; pdc: number; blasts: number };
   dispose(): void;
 }
 
@@ -94,7 +94,7 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
   scene.add(object);
 
   // ---- state ----
-  const stats = { flashes: 0, bursts: 0, lightning: 0, volcanicLightning: 0, pdc: 0 };
+  const stats = { flashes: 0, bursts: 0, lightning: 0, volcanicLightning: 0, pdc: 0, blasts: 0 };
   let fxTime = 0;
   let first = true;
   let seaLevel = Y_SEA_NOMINAL;
@@ -102,13 +102,37 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
   let impact: { t0: number; pos: THREE.Vector3; mag: number } | null = null;
   let strike: { t0: number; dur: number; idx: number; mid: THREE.Vector3; volcanic: boolean } | null = null;
   // lava vents (small readback, throttled): drive pyroclastic-current episodes and volcanic lightning
-  let vents: { x: number; y: number; z: number; heat: number; wet: boolean; phase: number; depth: number }[] = [];
+  let vents: { x: number; y: number; z: number; heat: number; wet: boolean; phase: number; depth: number; coast: number }[] = [];
+  // explosive openings waiting to play (a few at most; one blast per BLAST_GAP s so none drowns another)
+  const openings: { x: number; y: number; z: number; heat: number; t: number; wet: boolean }[] = [];
+  let readOnce = false, lastBlast = -1e9;
   // cloudlet readback for lightning (small, throttled)
   let cells: Float32Array | null = null;
   let sinceRead = 0, reading = false;
   const key = new THREE.Vector3();
 
   const groundY = () => voxelToWorldY(seaLevel);
+  /**
+   * Explosive opening of an eruption (the sim's BUILD → ACTIVE: the vent blasts its summit crater open): a
+   * crater flash, a burst of incandescent bombs and spray, a fast dark ash jet and a ring of ash rushing out
+   * over the flanks (base surge). y = vent surface (bursts never start below the local ground).
+   */
+  function blast(x: number, y: number, z: number, mag: number, wet = false): void {
+    const add = (kind: number, dur: number, radius: number, m: number, rate?: number) => { plumes.addBurst({ x, y, z, kind, t0: fxTime, dur, mag: m, radius, rate }); stats.bursts++; };
+    if (wet) {
+      // shallow submarine (Surtseyan) opening: black tephra jets and a steam burst, nothing incandescent
+      add(BURST.TEPHRA, 1.5, 0.02, 0.8 + 0.2 * mag, 90);
+      add(BURST.STEAM, 3, 0.03, 1, 220);
+      stats.blasts++;
+      return;
+    }
+    add(BURST.ASH, 2.5, 0.02, 1.2 + 0.4 * mag, 300);
+    add(BURST.BOMB, 1.4, 0.02, 0.9 + 0.3 * mag, 160);
+    add(BURST.FOUNTAIN, 1.6, 0.02, 0.9 + 0.3 * mag, 250);
+    add(BURST.DUST, 1.2, 0.03 + 0.02 * mag, 0.3 + 0.1 * mag);
+    impact = { t0: fxTime, pos: new THREE.Vector3(x, y + 0.03, z), mag: 0.6 + 0.4 * mag };
+    stats.blasts++;
+  }
   function trigger(e: Pick<GeoEvent, 'kind' | 'x' | 'z' | 'magnitude'> & { radius?: number }): void {
     const x = cellToWorld(e.x), z = cellToWorld(e.z), mag = e.magnitude;
     const y = groundY();
@@ -116,11 +140,12 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
     switch (e.kind) {
       case 'volcano': {
         // eruption: ash column, lava fountain, ballistic bombs, a crater flash, then a pyroclastic current
+        blast(x, y, z, mag);
+        impact!.pos.y = y + 0.08; // y is sea level here (the GPU lifts the bursts onto the ground)
         add(BURST.ASH, 14 + 8 * mag, 0.05);
         add(BURST.FOUNTAIN, 6 + 4 * mag, 0.02);
         add(BURST.BOMB, 8 + 4 * mag, 0.02);
         plumes.addBurst({ x, y, z, kind: BURST.PDC, t0: fxTime + 2.5, dur: 3, mag: 0.7 + 0.4 * mag, radius: 0.03 }); stats.bursts++;
-        impact = { t0: fxTime, pos: new THREE.Vector3(x, y + 0.08, z), mag: 0.35 * mag };
         break;
       }
       case 'meteor': {
@@ -148,12 +173,28 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
     ]).then(([a, v, c]) => {
       cells = new Float32Array(a);
       const vf = new Float32Array(v), n = Math.min(new Int32Array(c)[0]!, ATMO.VENTS_MAX);
+      const prev = vents;
       vents = [];
       for (let i = 0; i < n; i++) {
         const d = decodeVent(vf[i * 4 + 3]!);
         // 'wet' = no subaerial ash column: submarine deeper than the Surtseyan range
-        vents.push({ x: vf[i * 4]!, y: vf[i * 4 + 1]!, z: vf[i * 4 + 2]!, heat: d.heat, wet: d.depth > VENT_SHALLOW, phase: d.phase, depth: d.depth });
+        vents.push({ x: vf[i * 4]!, y: vf[i * 4 + 1]!, z: vf[i * 4 + 2]!, heat: d.heat, wet: d.depth > VENT_SHALLOW, phase: d.phase, depth: d.depth, coast: d.coast });
       }
+      // explosive openings: a dry vent erupting now that was not erupting at the last readback (~1 s ago)
+      if (readOnce) {
+        const erupting = (v: { phase: number }) => v.phase === VENT_PHASE.ACTIVE || v.phase === VENT_PHASE.WANING;
+        for (const v of vents) {
+          if (v.wet || v.phase !== VENT_PHASE.ACTIVE || v.heat < 0.5) continue;
+          if (prev.some((q) => erupting(q) && Math.hypot(q.x - v.x, q.z - v.z) < ATMO.BLAST_NEAR)) continue;
+          if (!openings.some((q) => Math.hypot(q.x - v.x, q.z - v.z) < ATMO.BLAST_NEAR)) openings.push({ x: v.x, y: v.y, z: v.z, heat: v.heat, t: fxTime, wet: v.depth > ATMO.STEAM_WET || v.coast >= 2 }); // mostly-sea cell: no bombs over the water
+        }
+        // openings are common (the budget, not the sim, limits them): play fresh ones, strongest first, and
+        // prefer vents inside the block (a blast at the cut face is half hidden)
+        const score = (o: { x: number; z: number; heat: number }) => o.heat - 2 * Math.max(0, 0.25 - (HALF - Math.max(Math.abs(o.x), Math.abs(o.z))));
+        for (let i = openings.length - 1; i >= 0; i--) if (fxTime - openings[i]!.t > 2.5) openings.splice(i, 1);
+        openings.sort((a, b) => score(b) - score(a)).splice(4);
+      }
+      readOnce = true;
     })
       .catch((err) => console.error('atmosphere: cloud readback failed: ' + (err as Error).message))
       .finally(() => { reading = false; });
@@ -267,8 +308,8 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
         const env = Math.exp(-t * 5) * Math.min(1, t * 30);
         plumes.uniforms.flashAmt.value = env * (0.6 + 0.4 * impact.mag);
         plumes.uniforms.flashPos.value.copy(impact.pos);
-        plumes.uniforms.flashSize.value = 0.25 + t * 0.9;
-        if (env * 6 > light) { light = env * 6; flashLight.position.copy(impact.pos); flashLight.color.setRGB(1, 0.75, 0.5); }
+        plumes.uniforms.flashSize.value = (0.12 + t * 0.6) * (0.6 + 0.4 * impact.mag);
+        if (env * 6 > light) { light = env * 6 * impact.mag; flashLight.position.copy(impact.pos); flashLight.color.setRGB(1, 0.62, 0.35); }
       }
     }
     flashLight.intensity = light;
@@ -308,6 +349,10 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
       if (!reading && sinceRead >= 1) { sinceRead = 0; readClouds(); }
       updateLightning(dt);
       updatePlumes(dt);
+      if (openings.length && fxTime - lastBlast >= ATMO.BLAST_GAP) {
+        const o = openings.shift()!;
+        if (o.x <= atmoCut.value.x && o.z <= atmoCut.value.y) { blast(o.x, o.y, o.z, o.heat, o.wet); lastBlast = fxTime; }
+      }
       // pyroclastic density currents: occasional episodes at strong, dry vents (≤ 2 at a time)
       let livePdc = plumes.bursts.filter((b) => b.kind === BURST.PDC && fxTime - b.t0 < b.dur).length;
       for (const v of vents) {

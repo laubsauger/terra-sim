@@ -322,6 +322,89 @@ test('lava bombs that fall into the sea go out instead of resting on it as glowi
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('a vent that starts erupting opens with a blast; bombs fly slow, heavy arcs onto the flanks', async ({ page }) => {
+  // user: 'ejecta a bit too fast, arcs weird, not orange enough; never seeing explosive eruptions'
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  await page.evaluate(() => (window as any).at.frames(45, 1 / 30)); // a vent readback with no eruption anywhere
+  expect((await page.evaluate(() => (window as any).at.stats())).blasts).toBe(0);
+  const vent = { x: 200, z: 60 };
+  await page.evaluate((v) => (window as any).at.paint({ lava: v }), vent); // the vent goes straight to ACTIVE
+  await page.evaluate(() => (window as any).at.frames(45, 1 / 30));
+  const s1 = await page.evaluate(() => (window as any).at.stats());
+  expect(s1.blasts, 'the opening plays one blast').toBe(1);
+  // blast ejecta and the steady fountain: bombs rise a little and come down near the vent (no streaking off)
+  const vx = cellW(vent.x), vz = cellW(vent.z);
+  let bombs = 0, top = 0, far = 0, fast = 0, surge = 0;
+  const vy = (await page.evaluate(() => (window as any).at.particles())).vents[1];
+  for (let i = 0; i < 10; i++) {
+    await page.evaluate(() => (window as any).at.frames(6, 1 / 30));
+    for (const p of (await page.evaluate(() => (window as any).at.particles())).live) {
+      if (Math.abs(p.kind - 2) < 0.5 && Math.hypot(p.x - vx, p.z - vz) < 0.3) surge++;
+      if (Math.abs(p.kind - 8) > 0.5) continue;
+      bombs++;
+      top = Math.max(top, p.y - vy);
+      far = Math.max(far, Math.hypot(p.x - vx, p.z - vz));
+      if (Math.hypot(p.vx, p.vy, p.vz) > 0.45) fast++;
+    }
+  }
+  console.log(`blast: ${bombs} bomb samples, highest ${top.toFixed(3)} above the vent, farthest ${far.toFixed(3)}, ${fast} faster than 0.45 world/s; ${surge} base-surge puff samples`);
+  expect(bombs, 'a shower of bombs').toBeGreaterThan(40);
+  expect(surge, 'an ash ring at the base').toBeGreaterThan(40);
+  expect(top, 'low arcs, not tracer lines into the sky').toBeLessThan(0.12);
+  expect(far, 'they land on the flanks, a few cells out').toBeLessThan(0.25);
+  expect(fast).toBe(0);
+  // the vent keeps erupting: no second blast
+  await page.evaluate(() => (window as any).at.frames(120, 1 / 30));
+  expect((await page.evaluate(() => (window as any).at.stats())).blasts).toBe(1);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
+test('submarine vents throw no incandescent ejecta: a shallow one opens with dark tephra and steam only', async ({ page }) => {
+  // user: 'underwater vents are throwing too many bombs and cause a silly amount of floating little lights'
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  const site = (lo: number, hi: number) => {
+    for (let z = 20; z < 236; z++) for (let x = 20; x < 236; x++) {
+      let ok = true;
+      for (let dz = -2; dz <= 2 && ok; dz++) for (let dx = -2; dx <= 2 && ok; dx++) { const w = water[(z + dz) * 256 + x + dx]!; ok = w > lo && w < hi; }
+      if (ok) return { x, z };
+    }
+    return null;
+  };
+  await page.evaluate(() => (window as any).at.frames(45, 1 / 30));
+  const counts: Record<string, number> = {};
+  let blasts = 0;
+  for (const [name, lo, hi] of [['surtseyan', 0.15, 0.9], ['boiling', 1.3, 3.6], ['deep', 6, 60]] as const) {
+    const s = site(lo, hi);
+    expect(s, `a ${name} sea patch`).not.toBeNull();
+    const b0 = (await page.evaluate(() => (window as any).at.stats())).blasts;
+    await page.evaluate((v) => (window as any).at.paint({ lava: v }), s); // straight to ACTIVE: an opening
+    for (let i = 0; i < 10; i++) {
+      await page.evaluate(() => (window as any).at.frames(9, 1 / 30));
+      for (const p of (await page.evaluate(() => (window as any).at.particles())).live) {
+        const k = Math.round(p.kind);
+        const key = `${name}:${k === 7 ? 'fountain' : k === 8 ? 'bomb' : k === 11 ? 'tephra' : k === 10 ? 'pumice' : 'other'}`;
+        counts[key] = (counts[key] ?? 0) + 1;
+      }
+    }
+    if (name === 'surtseyan') blasts = (await page.evaluate(() => (window as any).at.stats())).blasts - b0;
+  }
+  console.log(`submarine vents, particle samples by kind: ${JSON.stringify(counts)}; surtseyan openings ${blasts}`);
+  for (const n of ['surtseyan', 'boiling', 'deep']) {
+    expect(counts[`${n}:bomb`] ?? 0, `${n}: no lava bombs`).toBe(0);
+    expect(counts[`${n}:fountain`] ?? 0, `${n}: no lava fountain`).toBe(0);
+  }
+  expect(counts['surtseyan:tephra'] ?? 0, 'a shallow vent throws dark tephra jets').toBeGreaterThan(10);
+  expect(blasts, 'and opens with a (wet) blast').toBe(1);
+  // (10 samples: ≲ 30 live pumice specks at the two vents together; the old 7 % share floated ~3× as many)
+  expect((counts['deep:pumice'] ?? 0) + (counts['boiling:pumice'] ?? 0), 'a few pumice specks, not a field of them').toBeLessThan(300);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');
@@ -431,3 +514,162 @@ test('perf (1440p) and screenshots on a warmed-up sim world', async ({ page }) =
 });
 
 function avg(a: number[]): number { return a.reduce((s, v) => s + v, 0) / Math.max(1, a.length); }
+
+// ---- weather follows the terrain; layered wind (clouds.ts, atmoModel wind profile) ----
+
+/** World units at the painted page (vertEx 1): voxel y → world y, column → world. */
+const vWorldY = (v: number) => (v - 64) * (4 / 256) * 0.6;
+
+/** A land column in the middle of wind band 1 (westerlies), dry for 20 columns around. */
+async function landSite(page: Page) {
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  let site = { x: 0, z: 0 }, best = -Infinity;
+  for (let z = 50; z <= 80; z += 2) for (let x = 40; x < 216; x += 2) {
+    let dry = 0;
+    for (let dz = -20; dz <= 20; dz += 4) for (let dx = -20; dx <= 20; dx += 4) if (water[((z + dz + 256) % 256) * 256 + ((x + dx + 256) % 256)]! < 0.05) dry++;
+    const score = dry * 1000 - Math.abs(z - 66) * 4 - Math.abs(x - 128);
+    if (score > best) { best = score; site = { x, z }; }
+  }
+  return site;
+}
+
+/** Mean weather map (128², vec4 per texel) over `secs` of ambience time from clock t0, sampled every 0.5 s. */
+async function meanWeather(page: Page, t0: number, secs: number): Promise<number[]> {
+  await page.evaluate((t) => (window as any).at.setClock(t - 2 / 30), t0);
+  await page.evaluate(() => (window as any).at.frames(2, 1 / 30));
+  const n = Math.round(secs * 2), acc = new Array(128 * 128 * 4).fill(0);
+  for (let i = 0; i < n; i++) {
+    const g: number[] = await page.evaluate(() => (window as any).at.weatherGrid(128));
+    for (let k = 0; k < g.length; k++) acc[k] += g[k]! / n;
+    await page.evaluate(() => (window as any).at.frames(15, 1 / 30));
+  }
+  return acc;
+}
+
+/** Mean of channel ch over weather texels within r (world) of (x, z); optional per-texel filter. */
+function patch(m: number[], x: number, z: number, r: number, ch = 0, keep?: (k: number) => boolean) {
+  let s = 0, n = 0;
+  for (let j = 0; j < 128; j++) for (let i = 0; i < 128; i++) {
+    const wx = (i + 0.5) / 128 * 4 - 2, wz = (j + 0.5) / 128 * 4 - 2, k = j * 128 + i;
+    if (Math.hypot(wx - x, wz - z) < r && (!keep || keep(k))) { s += m[k * 4 + ch]!; n++; }
+  }
+  return n ? s / n : NaN;
+}
+
+test('clouds follow new relief within seconds: windward banks hugging the flank, a clear lee', async ({ page }) => {
+  // user: 'we just drag the same clouds over an ever changing geology'. Uniform moist air over real terrain; a god-tool
+  // uplift raises a mountain in the westerlies. The same ambience-clock window is replayed before and after the uplift,
+  // so the drifting cloud noise is identical and only the relief under it differs.
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paintAir({ rh: 0.9, t: 16 }));
+  await page.evaluate(() => (window as any).at.frames(4, 1 / 30));
+  const site = await landSite(page);
+  const sx = cellW(site.x), sz = cellW(site.z);
+  const { low } = await page.evaluate(() => (window as any).at.bands());
+  const sp = Math.hypot(low[1].u, low[1].v), d = [low[1].u / sp, low[1].v / sp] as const; // low-level drift in band 1
+  const at = (k: number) => [sx + d[0] * k, sz + d[1] * k] as const;
+  const T0 = 100;
+  const surfNow = async () => new Float32Array(await page.evaluate(async () => Array.from(new Float32Array(await (window as any).at.surf()))));
+  const surf0 = await surfNow();
+  const quick0 = await meanWeather(page, T0, 2), before = await meanWeather(page, T0, 20);
+  await page.evaluate(([x, z]) => (window as any).at.uplift(x, z, 26, 32), [site.x, site.z]);
+  const surf1 = await surfNow();
+  const quick1 = await meanWeather(page, T0, 2), after = await meanWeather(page, T0, 20);
+  const cov = (m: number[], k: number, r = 0.1) => patch(m, at(k)[0], at(k)[1], r);
+  const lee = (m: number[]) => (cov(m, 0.25) + cov(m, 0.5)) / 2;
+  const r3 = (v: number) => v.toFixed(3);
+  console.log(`relief: site ${site.x},${site.z}, drift (${r3(d[0])}, ${r3(d[1])}); cover windward ${r3(cov(before, -0.2))} → ${r3(cov(after, -0.2))} (first 2 s ${r3(cov(quick0, -0.2))} → ${r3(cov(quick1, -0.2))}), summit ${r3(cov(before, 0))} → ${r3(cov(after, 0))}, lee ${r3(lee(before))} → ${r3(lee(after))}`);
+  expect(cov(after, -0.2), 'moist air lifted up the windward slope condenses').toBeGreaterThan(cov(before, -0.2) + 0.12);
+  expect(cov(quick1, -0.2), 'within 2 s of the uplift').toBeGreaterThan(cov(quick0, -0.2) + 0.1);
+  expect(lee(before), 'the lee was cloudy before (the test means something)').toBeGreaterThan(0.05);
+  expect(lee(after), 'rain shadow: descending air in the lee clears').toBeLessThan(0.5 * lee(before));
+  expect(cov(after, -0.2), 'windward is cloudier than the lee').toBeGreaterThan(3 * lee(after) + 0.05);
+  // hugging: windward cloud bases sit close above the flank, far closer than the free cloud base over flat land
+  const ground = (surf: Float32Array, k: number) => vWorldY(surf[Math.floor(k / 128) * 2 * 256 + (k % 128) * 2]!);
+  const clearance = (m: number[], surf: Float32Array, kk: number) => {
+    let s = 0, n = 0;
+    for (let k = 0; k < 128 * 128; k++) {
+      const wx = (k % 128 + 0.5) / 32 - 2, wz = (Math.floor(k / 128) + 0.5) / 32 - 2;
+      if (Math.hypot(wx - at(kk)[0], wz - at(kk)[1]) < 0.1 && m[k * 4]! > 0.05) { s += m[k * 4 + 3]! - ground(surf, k); n++; }
+    }
+    return s / Math.max(1, n);
+  };
+  console.log(`cloud base above ground at the windward patch: before the uplift (flat) ${r3(clearance(before, surf0, -0.2))}, after (flank) ${r3(clearance(after, surf1, -0.2))}`);
+  expect(clearance(after, surf1, -0.2), 'windward banks hug the flank').toBeLessThan(0.5 * clearance(before, surf0, -0.2));
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
+test('warm humid land grows cumulus, cold humid sea a stratus deck, dry air stays clear', async ({ page }) => {
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.setTime(0.55)); // afternoon convection
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  // weather texel k covers columns 2i..2i+1, 2j..2j+1
+  const wet = (k: number) => water[Math.floor(k / 128) * 2 * 256 + (k % 128) * 2]! > 0.5;
+  const air = async (rh: number, t: number) => {
+    await page.evaluate(([rh, t]) => (window as any).at.paintAir({ rh, t }), [rh, t]);
+    return meanWeather(page, 200, 10);
+  };
+  const whole = (m: number[], ch: number, land: boolean) => patch(m, 0, 0, 1.6, ch, (k) => wet(k) !== land);
+  const warm = await air(0.85, 24), cold = await air(0.85, 3), dry = await air(0.3, 24);
+  const r3 = (v: number) => v.toFixed(3);
+  console.log(`warm humid: land cover ${r3(whole(warm, 0, true))} type ${r3(whole(warm, 2, true))} | sea cover ${r3(whole(warm, 0, false))}`);
+  console.log(`cold humid: sea cover ${r3(whole(cold, 0, false))} type ${r3(whole(cold, 2, false))} | dry: land ${r3(whole(dry, 0, true))} sea ${r3(whole(dry, 0, false))}`);
+  expect(whole(warm, 0, true), 'afternoon convection: more cumulus over warm humid land than over the sea').toBeGreaterThan(whole(warm, 0, false) * 1.3);
+  expect(whole(warm, 2, true), 'and taller (congestus: type < 0)').toBeLessThan(-0.05);
+  expect(whole(cold, 2, false), 'cold humid sea: flat stratus (type > 0)').toBeGreaterThan(0.3);
+  expect(whole(cold, 0, false), 'as a deck').toBeGreaterThan(whole(warm, 0, false));
+  expect(Math.max(whole(dry, 0, true), whole(dry, 0, false)), 'dry air: (almost) clear').toBeLessThan(0.01);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
+test('layered wind: high cirrus drifts faster and in another direction than the low cumulus', async ({ page }) => {
+  // user: 'taking wind into account at different heights'. The motion of the density volume between two snapshots
+  // (cross-correlation) at the cumulus level and at the cirrus level, inside wind band 1, against the model winds.
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paintAir({ rh: 0.95, t: 16 })); // moist everywhere, no storms: cumulus
+  await page.evaluate(() => (window as any).at.frames(30, 1 / 30));
+  const { low, high } = await page.evaluate(() => (window as any).at.bands());
+  const [yLo, yHi]: number[] = await page.evaluate(() => (window as any).at.slab());
+  const N = 96, X0 = -0.8, Z0 = -1.28, SIZE = 0.56, px = SIZE / N; // inside band 1, clear of its cross-fades
+  const w = await page.evaluate(([x0, z0, s]) => (window as any).at.weatherGrid(32, x0, z0, s), [X0, Z0, SIZE]);
+  const bases = w.filter((_: number, i: number) => i % 4 === 3 && w[i - 3] > 0.1).sort((a: number, b: number) => a - b);
+  const yCu = bases[bases.length >> 1] + 0.06, yCi = yHi! - 0.1;
+  expect(bases.length, 'cumulus in the probe square').toBeGreaterThan(20);
+  // an even frame count (the density volume is rebuilt on even frames in the high tier); long enough that the
+  // cirrus moves well over a streak width (streaks are stretched along the wind: short shifts are ambiguous along them)
+  const FR = 48, dt = FR / 30;
+  const snap = (y: number) => page.evaluate(([y, x0, z0, s, n]) => (window as any).at.densityGrid(y, n, x0, z0, s), [y, X0, Z0, SIZE, N]);
+  const a = [await snap(yCu), await snap(yCi)];
+  await page.evaluate((n) => (window as any).at.frames(n, 1 / 30), FR);
+  const b = [await snap(yCu), await snap(yCi)];
+  const shift = (A: number[], B: number[]) => {
+    const R = 46; let best = -2, bx = 0, bz = 0;
+    for (let sz = -R; sz <= R; sz++) for (let sx = -R; sx <= R; sx++) {
+      let sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0, n = 0;
+      for (let j = Math.max(0, -sz); j < Math.min(N, N - sz); j++) for (let i = Math.max(0, -sx); i < Math.min(N, N - sx); i++) {
+        const va = A[(j * N + i) * 4]!, vb = B[((j + sz) * N + i + sx) * 4]!;
+        sa += va; sb += vb; saa += va * va; sbb += vb * vb; sab += va * vb; n++;
+      }
+      const c = (sab - sa * sb / n) / Math.sqrt(Math.max(1e-12, (saa - sa * sa / n) * (sbb - sb * sb / n)));
+      if (c > best) { best = c; bx = sx; bz = sz; }
+    }
+    return { u: bx * px / dt, v: bz * px / dt, c: best };
+  };
+  const lo = shift(a[0]!, b[0]!), hi = shift(a[1]!, b[1]!);
+  const mag = (q: { u: number; v: number }) => Math.hypot(q.u, q.v);
+  const ang = (p: { u: number; v: number }, q: { u: number; v: number }) => Math.acos(Math.max(-1, Math.min(1, (p.u * q.u + p.v * q.v) / (mag(p) * mag(q))))) * 180 / Math.PI;
+  const f = (q: { u: number; v: number }) => `(${q.u.toFixed(3)}, ${q.v.toFixed(3)})`;
+  console.log(`drift at y ${yCu.toFixed(2)}: ${f(lo)} corr ${lo.c.toFixed(2)} (model ${f(low[1])}); at y ${yCi.toFixed(2)}: ${f(hi)} corr ${hi.c.toFixed(2)} (model ${f(high[1])}); ${(mag(hi) / mag(lo)).toFixed(2)}× faster, ${ang(lo, hi).toFixed(0)}° apart (slab ${yLo!.toFixed(2)}..${yHi!.toFixed(2)})`);
+  expect(lo.c, 'the cumulus pattern is tracked').toBeGreaterThan(0.6);
+  expect(hi.c, 'the cirrus pattern is tracked').toBeGreaterThan(0.6);
+  // each layer moves with its own wind (± one probe pixel per snapshot interval)
+  const tol = 1.5 * px / dt;
+  expect(Math.hypot(lo.u - low[1].u, lo.v - low[1].v), 'low clouds ride the low-level wind').toBeLessThan(tol + 0.15 * mag(low[1]));
+  expect(Math.hypot(hi.u - high[1].u, hi.v - high[1].v), 'cirrus rides the upper wind').toBeLessThan(tol + 0.15 * mag(high[1]));
+  expect(mag(hi), 'high cloud is faster').toBeGreaterThan(1.5 * mag(lo));
+  expect(ang(lo, hi), 'and heads another way (shear)').toBeGreaterThan(25);
+  expect(problems, problems.join('\n')).toEqual([]);
+});

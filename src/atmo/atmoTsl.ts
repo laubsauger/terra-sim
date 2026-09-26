@@ -33,8 +33,11 @@ export function tWind(z: F, hf: F): V2 {
   const hemi = select(q.lessThan(float(NZ / 2)), float(1), float(-1));
   const k = hf.mul((ATMO.WIND_TOP - 1) * ATMO.WIND_SCALE * CELL).add(ATMO.WIND_SCALE * CELL);
   const s2 = sin(phi.mul(2));
-  const u = cos(phi.mul(4)).mul(-CLIMATE.U0).mul(k).add(s2.mul(s2).mul(hf).mul(hf).mul(ATMO.JET));
-  const v = sin(phi.mul(6)).mul(-CLIMATE.V0).mul(hemi).mul(k);
+  // upper-level regime: surface bands weaken, meridional cells reverse, westerly shear (atmoModel ALOFT_*)
+  const a = smoothstep(ATMO.ALOFT_HF0, 1, hf);
+  const u = cos(phi.mul(4)).mul(-CLIMATE.U0).mul(k).mul(float(1).sub(a.mul(ATMO.ALOFT_DAMP)))
+    .add(s2.mul(s2).mul(hf).mul(hf).mul(ATMO.JET)).add(a.mul(ATMO.ALOFT_SHEAR));
+  const v = sin(phi.mul(6)).mul(-CLIMATE.V0).mul(hemi).mul(k).mul(float(1).sub(a.mul(ATMO.ALOFT_RETURN)));
   return vec2(u, v);
 }
 
