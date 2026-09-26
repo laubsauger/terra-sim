@@ -68,6 +68,9 @@ export function swell(xz: V2, depth: F): V3 {
  * with magma: seams, submarine lava, vents (0..1). Where it does, water passes the light neutrally
  * (see createWater); the glass water on the cut faces does the same.
  */
+/** Strength of the seam halo glowing in the water column above young seafloor (emissive). */
+const SEAM_WATER_HALO = 0.22;
+
 export function seabedGlowK(fields: GpuFields, bed: V3): F {
   const heat = heatSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
   const volc = volcanoSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
@@ -155,8 +158,12 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   const Tg = mix(T, vec3(tN), glowK);
   const refrG = mix(refr, vec3(dot(refr, vec3(0.3, 0.59, 0.11))), float(1).sub(tN).mul(0.15).mul(glowK));
   const thin = float(1).sub(glowK.mul(0.9)); // less cyan body in front of the glow
-  // faint warm scatter in the water column, from the bed below (dies out with depth)
-  const warmScatter = vec3(...MAGMA_ORANGE).mul(glowK.mul(tN).mul(0.12));
+  // faint warm scatter in the water column, from the bed below (dies out with depth). The seam halo adds a
+  // soft glow here, in the water, not on the bed: lighting the bed (or letting it through unabsorbed) showed
+  // the pale seabed as a sandy road in warm low sun.
+  const bedC = p.add(V.mul(thick));
+  const haloK = smoothstep(0.08, 0.7, volcanoSampler(fields)(tWorldToCell(bedC.x), tWorldToCell(bedC.z)).w);
+  const warmScatter = vec3(...MAGMA_ORANGE).mul(glowK.mul(0.12).add(haloK.mul(SEAM_WATER_HALO)).mul(tN));
   const waterEm = refrG.mul(Tg).mul(float(1).sub(fres)).add(glow.mul(thin)).add(warmScatter).add(refl.mul(fres).mul(0.8));
   mat.emissiveNode = waterEm.mul(float(1).sub(foam));
   mat.colorNode = mix(scatter.mul(thin), vec3(0.92, 0.95, 0.97), foam);

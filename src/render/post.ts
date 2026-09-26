@@ -110,7 +110,7 @@ export function createPost(renderer: THREE.WebGPURenderer, scene: THREE.Scene, c
   const u = {
     exposure: uniform(1.1),
     bloomStrength: uniform(0.32),
-    tilt: uniform(1.0),
+    tilt: uniform(0.5),
     vignette: uniform(0.42),
     grain: uniform(0.022),
     saturation: uniform(1.08),
@@ -204,7 +204,9 @@ export function createPost(renderer: THREE.WebGPURenderer, scene: THREE.Scene, c
       // real depth (sharp block), top and bottom of frame are pushed away from the focal plane.
       const viewZ = scenePass.getViewZNode();
       const dy = uv().y.sub(0.5);
-      const band = smoothstep(0.16, 0.5, abs(dy)).mul(u.tilt);
+      // sharp zone widened and the push halved: thin detail (rift cracks, rivers) near the frame edges
+      // smeared into soft stripes
+      const band = smoothstep(0.24, 0.5, abs(dy)).mul(u.tilt);
       const tiltViewZ = viewZ.sub(sign(dy).mul(band).mul(focus).mul(0.6));
       const d = dof(hdr, tiltViewZ, focus, focalRange, 2.2);
       disposables.push(d);
