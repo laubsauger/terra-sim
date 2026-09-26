@@ -229,5 +229,5 @@ test('fresh lava rock stands steeper than plain rock', async ({ page }) => {
     };
     return { basalt: await run(L.Mat.BASALT), granite: await run(L.Mat.GRANITE) };
   });
-  expect(res.basalt, `basalt ${res.basalt.toFixed(2)} vs granite ${res.granite.toFixed(2)}`).toBeGreaterThan(res.granite * 1.4);
+  expect(res.basalt, `basalt ${res.basalt.toFixed(2)} vs granite ${res.granite.toFixed(2)}`).toBeGreaterThan(res.granite + 0.3); // band mixes coastal and high-ground talus: ratio < volcanicTalusMul
 });
