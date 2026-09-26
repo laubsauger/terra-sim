@@ -10,9 +10,9 @@ import {
   viewportSharedTexture, viewportDepthTexture, perspectiveDepthToViewZ, cameraNear, cameraFar, screenUV, color,
 } from 'three/tsl';
 import type { GpuFields } from '../core/gpu';
-import { tWorldY, tWorldToCell, columnSampler, ambTime, heatSampler, ridgeGlow } from './space';
+import { tWorldY, tWorldToCell, columnSampler, ambTime, heatSampler, seamGlow, volcanoSampler } from './space';
 import { viewDirWorld } from './space';
-import { createColumnGrid } from './terrain';
+import { createColumnGrid, MAGMA_ORANGE } from './terrain';
 import { lookTextures } from './textures';
 import { skyColor, skyU } from './sky';
 import { cloudShadowAt } from '../atmo/atmosphere';
@@ -21,8 +21,8 @@ type F = THREE.Node<'float'>;
 type V2 = THREE.Node<'vec2'>;
 type V3 = THREE.Node<'vec3'>;
 
-/** Underwater spreading-ridge halo strength (0 = off). */
-export const RIDGE_HALO = 0;
+/** Seafloor magma glow let through the sea (spreading ridges, submarine lava and vents; 0 = plain absorption). */
+export const RIDGE_HALO = 1;
 
 /** Absorption per world unit (red goes first): shallow turquoise → deep sapphire. */
 export const WATER_SIGMA = new THREE.Vector3(13, 1.9, 1.05);
@@ -132,22 +132,26 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   const scatter = body.mul(lum).mul(float(1).sub(fres));
   // A little self-lit body colour keeps the sea luminous on the shadow side and at dusk.
   const glow = body.mul(lum).mul(skyU.sunIntensity.mul(0.03).add(0.02));
-  // Glowing seam halo in the water column above young crust (spreading ridges): stylised, mostly
-  // unabsorbed, soft (bilinear age, no crack pattern here), so the ridge network reads through the sea.
-  const heat = heatSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
-  const seamN = texture(tex.detail, p.xz.mul(1.7).add(vec2(0, t.mul(0.0025)))).a; // same crack field as the seabed
-  const seamW = texture(tex.detail, p.xz.mul(1.1)).g;
-  const rg = ridgeGlow(heat.x, p.xz, seamW, seamN);
-  // Replaces (not adds to) the cyan body where it glows: added on top it would sum to peach-white.
-  // Slightly dimmed and tinted with depth, but it still reads red.
-  const depthFade = exp(d.mul(-0.02)).mul(0.5).add(0.5);
-  const haloK = saturate(rg.x.add(rg.y).mul(depthFade)).toVar('wHalo');
-  const haloCol = mix(vec3(0.55, 0.08, 0.03), vec3(1.0, 0.26, 0.05), saturate(rg.x.mul(1.5))).mul(1.6).mul(depthFade);
-  const waterEm = refr.mul(T).mul(float(1).sub(fres)).add(refl.mul(fres).mul(0.8)).add(glow);
-  // Underwater ridge halo is OFF (RIDGE_HALO = 0): it did not read convincingly through the sea.
-  const haloOn = haloK.mul(RIDGE_HALO);
-  mat.emissiveNode = mix(waterEm, haloCol, haloOn.mul(0.85)).mul(float(1).sub(foam));
-  mat.colorNode = mix(scatter, vec3(0.92, 0.95, 0.97), foam).mul(float(1).sub(haloOn.mul(0.85)));
+  // Magma glow on the seafloor (terrain.ts: spreading ridges, submarine lava and vents) seen through
+  // the sea. Real absorption takes red first, so orange would arrive green: where the bed glows, its
+  // light is attenuated neutrally with the path length instead (darker and a little greyer with depth,
+  // never green), and the cyan body in front of it thins out so the vent does not read blue. The glow
+  // is looked up where the view ray meets the bed (parallax-correct), so nothing floats on the surface.
+  const bed = p.add(V.mul(thick)).toVar('wBed');
+  const heat = heatSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
+  const volc = volcanoSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
+  const rg = seamGlow(volc.zw, float(1)); // the seafloor seam it lets through (at full pulse: covers it)
+  const lavaK = smoothstep(0.005, 0.2, heat.y).mul(smoothstep(600, 950, heat.z));
+  const glowK = saturate(rg.x.mul(1.2).add(rg.y.mul(3)).add(lavaK).add(smoothstep(0.02, 0.4, volc.x))).mul(RIDGE_HALO).toVar('wGlowK');
+  const tN = exp(thick.mul(-3.0)); // neutral transmittance of the glow's light
+  const Tg = mix(T, vec3(tN), glowK);
+  const refrG = mix(refr, vec3(dot(refr, vec3(0.3, 0.59, 0.11))), float(1).sub(tN).mul(0.15).mul(glowK));
+  const thin = float(1).sub(glowK.mul(0.9)); // less cyan body in front of the glow
+  // faint warm scatter in the water column, from the bed below (dies out with depth)
+  const warmScatter = vec3(...MAGMA_ORANGE).mul(glowK.mul(tN).mul(0.12));
+  const waterEm = refrG.mul(Tg).mul(float(1).sub(fres)).add(glow.mul(thin)).add(warmScatter).add(refl.mul(fres).mul(0.8));
+  mat.emissiveNode = waterEm.mul(float(1).sub(foam));
+  mat.colorNode = mix(scatter.mul(thin), vec3(0.92, 0.95, 0.97), foam);
   mat.roughnessNode = mix(float(0.13), float(0.85), foam); // not glassier: the sun glint would blow out into glare
   mat.normalNode = transformNormalToView(nW);
   mat.receivedShadowNode = Fn(([s]: [F]) => s.mul(cloudShadowAt(positionWorld))) as unknown as () => THREE.Node;

@@ -106,6 +106,36 @@ async function main() {
       void NCOL;
       return { peaks, heights, shifts };
     },
+    /**
+     * Water sheet along ROW for an island (Gaussian, peak 100) in a sea at level 76: `film` layers of
+     * rain on every land column, and optionally a real 0.6-layer stream down the island's +x flank.
+     * Returns the sampled bilinear ground height and water level (quarter cells) and the island centre.
+     */
+    async waterProfile(film: number, stream = false) {
+      const SEA = 76, C = 100;
+      offset = 0; travel = 0;
+      for (let z = 0; z < NZ; z++) for (let x = 0; x < NX; x++) {
+        const c = x + z * NX, dx = x - C, dz = z - ROW;
+        surf[c] = 60 + 40 * Math.exp(-(dx * dx + dz * dz) / (2 * 8 * 8));
+        water[c] = surf[c]! < SEA ? SEA - surf[c]! : film;
+        if (stream && z === ROW && dx > 0 && surf[c]! >= SEA) water[c] = 0.6;
+        pid[0]![c] = pid[1]![c] = 0;
+      }
+      for (const n of ['surfY', 'water', 'plateId']) fields.markDirty(n);
+      snapRenderColumns(fields); updateRenderColumns(renderer, fields, 1 / 60);
+      const probeW = instancedArray(SAMPLES * 2, 'float');
+      const k = Fn(() => {
+        const u = float(instanceIndex).div(4);
+        const c = S.corners(u, float(ROW));
+        probeW.element(instanceIndex.mul(2)).assign(S.height(c));
+        probeW.element(instanceIndex.mul(2).add(1)).assign(S.level(c).level);
+      })().compute(SAMPLES);
+      renderer.compute(k);
+      const a = new Float32Array(await renderer.getArrayBufferAsync(probeW.value as THREE.StorageBufferAttribute));
+      const h: number[] = [], lv: number[] = [];
+      for (let i = 0; i < SAMPLES; i++) { h.push(a[i * 2]!); lv.push(a[i * 2 + 1]!); }
+      return { h, lv, centre: C * 4, sea: SEA };
+    },
     /** Rendered peak on each 'plateId' parity (the sim swaps it every tectonics run). */
     async parityPeaks() {
       const out: number[] = [];

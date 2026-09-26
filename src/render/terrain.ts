@@ -14,7 +14,7 @@ import {
 import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL, Mat } from '../sim/layout';
 import { tMat } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
-import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, ridgeGlow, volcanoSampler } from './space';
+import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, seamGlow, volcanoSampler } from './space';
 import { createPaletteNodes, createBiomeNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
 import { skyU } from './sky';
@@ -26,16 +26,31 @@ type F = THREE.Node<'float'>;
 type V3 = THREE.Node<'vec3'>;
 
 /**
- * Stylised blackbody ramp for lava °C (linear HDR): dull red ~650, orange ~900, yellow ~1100,
- * yellow-white ~1250, rising steeply in intensity so hot cores bloom.
+ * Stylised blackbody ramp for lava °C (linear HDR): dull red ~650, deep orange ~900-1000, orange-yellow
+ * ~1150, yellow ~1250. Green stays low through the body and the intensity moderate: the ACES tone map
+ * bends bright orange toward yellow-white, so only a hot open core should read yellow.
  */
 export const blackbody = (T: F): V3 => {
-  // deep red only at the cool edge; a saturated incandescent orange body; yellow → yellow-white hottest
   const t = smoothstep(600, 1250, T);
-  const c = mix(mix(vec3(0.75, 0.1, 0.0), vec3(1.0, 0.42, 0.05), smoothstep(0.0, 0.3, t)),
-    mix(vec3(1.0, 0.7, 0.2), vec3(1.0, 0.92, 0.72), smoothstep(0.85, 1.0, t)), smoothstep(0.55, 0.85, t));
-  return c.mul(mix(float(1.2), float(9.0), t.mul(t))) as V3;
+  const c = mix(mix(vec3(0.7, 0.08, 0.0), vec3(1.0, 0.28, 0.035), smoothstep(0.0, 0.35, t)),
+    mix(vec3(1.0, 0.5, 0.1), vec3(1.0, 0.75, 0.35), smoothstep(0.85, 1.0, t)), smoothstep(0.6, 0.9, t));
+  return c.mul(mix(float(1.2), float(4.5), t.mul(t))) as V3;
 };
+
+/** Magma orange (linear), the hue of rift and ridge glow on land and seen through the sea (water.ts). */
+export const MAGMA_ORANGE = [1.0, 0.3, 0.045] as const;
+
+/**
+ * Slow patchy intensity along spreading seams (0.45..1.15): two world-space noise layers drifting in
+ * different directions on ambTime, so patches brighten and dim over a few seconds, soft, no strobing.
+ * Speeds are k/AMB_PERIOD multiples (seamless wrap).
+ */
+export function seamPulse(xz: THREE.Node<'vec2'>): F {
+  const tex = lookTextures();
+  const a = texture(tex.detail, xz.mul(0.55).add(vec2(ambTime.mul(0.02), ambTime.mul(-0.0125)))).r;
+  const b = texture(tex.detail, xz.mul(0.9).add(vec2(ambTime.mul(-0.015), ambTime.mul(0.02)))).g;
+  return mix(float(0.45), float(1.15), smoothstep(0.3, 0.7, a.mul(0.6).add(b.mul(0.4)))) as F;
+}
 
 /** 1 where h > threshold (sparse selection helper). */
 const step01 = (h: F, t: number): F => smoothstep(t, t + 0.001, h) as F;
@@ -317,31 +332,34 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   })();
 
   // Spreading ridges and lava (§T.38 pulled forward). renderHeat: x crust age My, y lava layers,
-  // z lava °C. Young crust (< ~1 My) glows along the seam through flickering fissures; underwater the
-  // water refraction/absorption dims and tints it. Lava: blackbody glow broken by cooling crust.
+  // z lava °C. Young crust (< ~1 My) glows along the seam through flickering fissures, on land and on
+  // the seafloor; seen through the sea, water.ts passes this light neutrally (dimmed, not turned green).
+  // Lava: blackbody glow broken by cooling crust.
   const glow = Fn(() => {
     const crack = texture(tex.detail, p.xz.mul(1.7).add(vec2(0, ambTime.mul(0.0025)))).a;
-    const rg = ridgeGlow(heat.x, p.xz, dMid.r, crack);
+    const pulse = seamPulse(p.xz);
+    const rg = seamGlow(volcS.zw, pulse.mul(crack.mul(0.4).add(0.6))); // fissures break up the land core
     // Subaerial (rift) glow only on truly dry ground: the bilinear age also sees young seafloor
     // next to a coast, which must not light the beach.
     const wet = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z))).wet;
     const subaerial = float(1).sub(step(0, uwDepth)).mul(float(1).sub(smoothstep(0.0, 0.15, wet)));
     const submerged = step(0, uwDepth);
-    // Underwater the water's Beer-Lambert absorption (refraction pass) dims and tints it, so the
-    // seabed source is hotter than the subaerial one.
-    // Underwater the colour comes from the water's halo (unabsorbed, water.ts); a bright seabed source
-    // would reach the eye green-white after red absorption, so it stays a faint core here.
-    // deep red-orange core → dim ember halo; only subaerial here (the sea gets it from water.ts)
-    const ridgeCol = vec3(1.0, 0.4, 0.06).mul(rg.x.mul(4.0)).add(vec3(0.8, 0.16, 0.02).mul(rg.y));
-    // Subaerial rifts only: the underwater version never read convincingly (coordinator: ship it off).
-    const ridgeGlowC = ridgeCol.mul(subaerial).add(ridgeCol.mul(submerged).mul(0));
+    // magma-orange core → dim halo of the same hue (kept moderate: little bloom)
+    const ridgeCol = vec3(...MAGMA_ORANGE).mul(rg.x.mul(1.6).add(rg.y.mul(0.8)));
+    // Seafloor seam: same field without the fissure pattern, a little dimmer; water.ts lets this light
+    // through the sea (see there).
+    const rgSea = seamGlow(volcS.zw, pulse);
+    const seaCol = vec3(...MAGMA_ORANGE).mul(rgSea.x.mul(1.4).add(rgSea.y));
+    const ridgeGlowC = ridgeCol.mul(subaerial).add(seaCol.mul(submerged));
     // Lava as molten rock (display-eased depth / temperature / channel memory): black crust plates
     // drifting downhill (two-phase flow map along the slope), glowing cracks between them, an
     // incandescent open core where the flow is thick, hot and in a live channel, blackbody colour
     // by temperature, a faint heat shimmer. Never a smooth glaze.
     const T = heat.z;
-    const lavaAmt = lavaMask;
-    const coreness = smoothstep(0.25, 1.0, heat.y).mul(smoothstep(900, 1200, T)).mul(volcS.y.mul(0.6).add(0.4));
+    // thin films count too: most flows are a fraction of a layer deep, and a hot one must read as lava
+    const lavaAmt = smoothstep(0.005, 0.15, heat.y);
+    const hot = smoothstep(800, 1150, T);
+    const coreness = smoothstep(0.05, 0.6, heat.y).mul(hot).mul(volcS.y.mul(0.5).add(0.5));
     const nrm = nVary.xyz.normalize();
     const flow = nrm.xz.div(max(length(nrm.xz), 1e-3)).mul(smoothstep(0.0, 0.08, length(nrm.xz)));
     const ph0 = fract(ambTime.mul(0.15)), ph1 = fract(ambTime.mul(0.15).add(0.5)); // 540 periods / AMB_PERIOD
@@ -350,24 +368,29 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const plB = texture(tex.detail, uvL.sub(flow.mul(ph1.mul(0.35))).add(0.37)).a;
     const plates = mix(plA, plB, abs(ph0.mul(2).sub(1)));
     const shimmer = texture(tex.detail, p.xz.mul(14).add(vec2(ambTime.mul(0.02), 0))).b.sub(0.5).mul(0.06);
-    const crust = smoothstep(0.42, 0.6, plates.add(shimmer).add(float(1).sub(coreness).mul(0.55)));
+    const crust = smoothstep(0.42, 0.6, plates.add(shimmer).add(float(1).sub(coreness).mul(0.35)));
     const cracks = float(1).sub(smoothstep(0.012, 0.07, abs(plates.sub(0.5))));
     const pulseL = sin(ambTime.mul(1.1).add(dMid.r.mul(9))).mul(0.08).add(0.92);
-    const open = float(1).sub(crust).add(crust.mul(cracks).mul(0.45));
-    const lavaGlow = blackbody(T).mul(open.mul(lavaAmt).mul(pulseL).mul(smoothstep(550, 800, T)));
+    // a hot flow glows through its crust too (dull, never black): visible in daylight from the hero view
+    const open = max(float(1).sub(crust).add(crust.mul(cracks).mul(0.6)), hot.mul(0.6));
+    // colour temperature: crust and cracks stay deep orange (≤ 1000 °C), only the open core of a hot
+    // live channel shows its real temperature (orange-yellow)
+    const lavaGlow = blackbody(mix(min(T, 1000), T, coreness.mul(float(1).sub(crust)))).mul(open.mul(lavaAmt).mul(pulseL).mul(smoothstep(550, 800, T)));
     // Summit crater: glowing lava lake in the concave top while the vent is active, pulsing rim embers.
     const act = volcS.x;
     // vent columns are single cells: the bilinear activity already gives a small round crater spot;
     // concave tops (carved craters) glow a little wider
-    const lake = smoothstep(0.25, 0.7, act).mul(smoothstep(-2.0, 1.5, nVary.w).mul(0.6).add(0.4));
+    // (low threshold: the bilinear spot spreads over the neighbouring cells, so the vent reads from afar)
+    const lake = smoothstep(0.08, 0.5, act).mul(smoothstep(-2.0, 1.5, nVary.w).mul(0.5).add(0.5));
     const rimPulse = sin(ambTime.mul(2.2)).mul(0.3).add(0.7);
-    // an orange-yellow lake (not white-hot: it is a small spot and would clip)
-    const craterGlow = blackbody(float(1020)).mul(lake.mul(open.mul(0.6).add(0.4)).mul(0.7))
+    // a deep orange lake (not white-hot: it is a small spot and would clip to yellow-white)
+    const craterGlow = blackbody(float(1000)).mul(lake.mul(open.mul(0.5).add(0.5)).mul(1.2))
       .add(blackbody(float(850)).mul(act.mul(float(1).sub(lake)).mul(rimPulse).mul(smoothstep(0.05, 0.25, slopeAt)).mul(0.25)));
     return ridgeGlowC.add(lavaGlow).add(craterGlow);
   })();
   // Crust albedo: black basalt under lava; old channels stay dark basalt ribbons after the flow stops.
-  const lavaCrust = max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75));
+  // Fresh basalt along spreading seams (the glow sits on dark rock, not on pale sediment).
+  const lavaCrust = max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)), smoothstep(0.08, 0.5, volcS.z).mul(0.6));
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   mat.positionNode = positionNode;

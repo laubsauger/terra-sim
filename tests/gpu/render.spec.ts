@@ -214,3 +214,28 @@ test('foreign display refreshes between frames do not snap the eased display', a
   }
   expect(heights.at(-1)! - heights[0]!, 'uplift arrived').toBeGreaterThan(12);
 });
+
+// Regression (translucent water curtains up the mountains, flickering every tick): rain films of a few
+// hundredths of a layer on land counted as fully wet, so the sheet level on a mountain became its top
+// and the sheet interpolated up the slope from the sea. Films must never lift the sheet; real water
+// (the sea, a stream) must still draw.
+test('rain films on land never lift the water sheet; sea and streams still draw', async ({ page }) => {
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  for (const film of [0.01, 0.03]) {
+    const { h, lv, sea } = await page.evaluate((f) => (window as any).rm.waterProfile(f), film);
+    let land = 0, sheetOverLand = 0, openSea = 0;
+    for (let i = 0; i < h.length; i++) {
+      if (h[i] > sea + 0.3) { land++; if (lv[i] > h[i] + 0.02) sheetOverLand++; }
+      if (h[i] < sea - 2) { openSea++; expect(Math.abs(lv[i] - sea), `film ${film}: sea level at sample ${i}`).toBeLessThan(0.05); }
+    }
+    expect(land, 'profile crosses the island').toBeGreaterThan(40);
+    expect(openSea, 'profile crosses open sea').toBeGreaterThan(200);
+    expect(sheetOverLand, `film ${film}: land samples with the sheet above the ground`).toBe(0);
+  }
+  const { h, lv, sea, centre } = await page.evaluate(() => (window as any).rm.waterProfile(0, true));
+  let flank = 0, drawn = 0;
+  for (let i = centre + 4; i < h.length; i++) if (h[i] > sea + 1) { flank++; if (lv[i] > h[i] + 0.2) drawn++; }
+  expect(flank, 'stream flank samples').toBeGreaterThan(20);
+  expect(drawn / flank, `stream drawn on ${drawn}/${flank} flank samples`).toBeGreaterThan(0.8);
+});

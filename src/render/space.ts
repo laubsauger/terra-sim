@@ -5,7 +5,7 @@ import * as THREE from 'three/webgpu';
 const THREE_Vector2 = THREE.Vector2;
 import {
   uniform, uniformArray, float, int, uint, floor, fract, clamp, max, min, ceil, step, smoothstep, mix, If, Fn, Return, vec2, vec4, instanceIndex, instancedArray,
-  exp, sin,
+  exp,
   positionWorld, cameraPosition,
 } from 'three/tsl';
 import { NX, NY, NCOL, CELL, BLOCK_SIZE, VOXEL_H } from '../sim/layout';
@@ -220,13 +220,29 @@ function display(fields: GpuFields): Display {
     bioV.element(i).assign(ease(sBioV.element(i) as unknown as V4, vec4(bioN.veg(bId), f.y)));
   })().compute(NCOL);
 
-  // (2d) volcano activity + lava channel memory
+  // (2d) volcano activity + lava channel memory; z, w = spreading-seam glow (see seamGlow) from crust
+  // age, e^(−age/0.5 My) and e^(−age/1.5 My) over a 5×5 binomial footprint: young crust comes in
+  // per-cell steps, blurred first the seam is a soft curved line instead of a staircase.
   const volcF = has('volcano') ? fields.cur<'vec4'>('volcano') : null;
   const kVolc = Fn(() => {
     guard();
     const act0 = volcF ? min(max((volcF.element(i) as unknown as V4).x, 0), 1) : float(0);
     const mem = lava ? float(lava.element(i).y.shiftRight(uint(24))).div(255) : float(0);
-    volc.element(i).assign(ease(sVolc.element(i) as unknown as V4, vec4(act0, mem, 0, 0)));
+    const core = float(0).toVar(), halo = float(0).toVar();
+    if (agePair) {
+      const { x, z } = tColXZ(i);
+      const b5 = [1, 4, 6, 4, 1];
+      const blur = (buf: StorageNode<'float'>) => {
+        for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
+          const a = max(buf.element(tColIdx(x.add(dx), z.add(dz))) as unknown as F, 0).toVar();
+          const w = b5[dx + 2]! * b5[dz + 2]! / 256;
+          core.addAssign(exp(a.div(-0.5)).mul(w)); halo.addAssign(exp(a.div(-1.5)).mul(w));
+        }
+      };
+      If(ageParity.equal(uint(0)), () => { blur(agePair[0] as unknown as StorageNode<'float'>); })
+        .Else(() => { blur(agePair[1] as unknown as StorageNode<'float'>); });
+    }
+    volc.element(i).assign(ease(sVolc.element(i) as unknown as V4, vec4(act0, mem, core, halo)));
   })().compute(NCOL);
   const remapVolc = Fn(() => {
     guard();
@@ -370,18 +386,14 @@ export function advect(fields: GpuFields) {
 }
 
 /**
- * Spreading-ridge glow, shared by terrain (subaerial rifts) and water (seam seen through the sea).
- * age = display crust age My (bilinear, so it is continuous). Soft and continuous: a narrow crack core
- * exp(−age/(0.25..0.5 My)) whose width wanders along the seam, a very faint wide halo exp(−age/1.2), and a
- * smooth (never thresholded) flicker: no bands, no dashes, no hard edges.
- * Returns (core, halo) intensities 0..1.
+ * Spreading-seam glow from the blurred display seam (volcanoSampler .zw), shared by terrain (rifts on
+ * land, seams on the seafloor) and water (lets that light through). Narrow core (a soft ramp on the
+ * blurred seam: tightens toward the axis, stays a smooth curve) scaled by `pulse` (slow patchy
+ * intensity, see terrain.ts seamPulse), faint wide halo. Returns (core, halo) 0..1.
  */
-export function ridgeGlow(age: F, xz: THREE.Node<'vec2'>, noise: F, crack: F): THREE.Node<'vec2'> {
-  const a = max(age, 0);
-  const core = exp(a.div(mix(0.25, 0.5, noise)).negate());
-  const halo = exp(a.div(1.2).negate()).mul(0.2);
-  const flick = sin(ambTime.mul(1.3).add(xz.x.mul(9)).add(xz.y.mul(7))).mul(0.1).add(0.9);
-  return vec2(core.mul(crack.mul(0.5).add(0.5)).mul(flick), halo) as unknown as THREE.Node<'vec2'>;
+export function seamGlow(seam: THREE.Node<'vec2'>, pulse: F): THREE.Node<'vec2'> {
+  const core = smoothstep(0.08, 0.5, seam.x);
+  return vec2(core.mul(pulse), seam.y.mul(0.15).mul(pulse.mul(0.5).add(0.5))) as unknown as THREE.Node<'vec2'>;
 }
 
 /** Bilinear read of the heat display (age, lava layers, lava °C, snow) at a rendered cell coordinate. */
@@ -391,7 +403,7 @@ export function heatSampler(fields: GpuFields) {
   return (u: F, v: F): V4 => { const [su, sv] = adv(u, v); return bilinear(heat, su, sv); };
 }
 
-/** Bilinear (vent activity, lava channel memory, 0, 0) at a rendered cell coordinate. */
+/** Bilinear (vent activity, lava channel memory, seam core, seam halo) at a rendered cell coordinate. */
 export function volcanoSampler(fields: GpuFields) {
   const { volc } = display(fields);
   const adv = advect(fields);
@@ -441,16 +453,21 @@ export function columnSampler(fields: GpuFields) {
    * Water level from wet corners only, so a coast does not drag the sheet down onto dry land;
    * the flat level meets rising terrain and the depth test draws the shoreline.
    * `wet` is the bilinear fraction of wet columns (0 = no water anywhere near).
+   * Rain films (< ~0.05 layer, they come and go every tick) are wet ground, not a water sheet, and
+   * the level is depth-weighted: a thin film perched on a slope next to open water cannot lift the
+   * sheet up the mountain (translucent curtains). Weights are continuous in depth → no seams.
    */
   function level(c: Corner[]): { level: F; wet: F; dry: F } {
-    const wetW = (k: Corner) => k.w.mul(smoothstep(0.005, 0.03, k.water));
+    const wetW = (k: Corner) => k.w.mul(smoothstep(0.05, 0.2, k.water));
     const wet = sum(c, wetW).toVar();
-    const lv = sum(c, (k) => wetW(k).mul(k.rawEased.add(k.water))).div(max(wet, 1e-4));
+    const lvW = (k: Corner) => wetW(k).mul(min(k.water, 2));
+    const lvSum = sum(c, lvW).toVar();
+    const lv = sum(c, (k) => lvW(k).mul(k.rawEased.add(k.water))).div(max(lvSum, 1e-8));
     // True coastline: bilinear share of corner columns that are dry land (water < 0.05). Zero over
     // submerged crests however shallow, so shore effects never fire there.
     const dry = sum(c, (k) => k.w.mul(float(1).sub(step(0.05, k.water))));
     // branch-free (see BRANCH-FREE NOTE below)
-    return { level: mix(height(c).sub(2), lv, step(1e-4, wet)), wet, dry };
+    return { level: mix(height(c).sub(2), lv, step(1e-7, lvSum)), wet, dry };
   }
 
   return {
