@@ -285,3 +285,29 @@ test('plate boundaries run down the cut face only while the Tectonics layer is o
   const offAgain = await run(0, 'off2');
   offAgain.forEach((c, k) => expect(dist(c, off[k]!), `layer off again, pixel ${k}`).toBeLessThan(12));
 });
+
+// User: "still never seeing a lava lake crater". The sim's summit lake is too thin to show, so the
+// terrain draws one: an active dry vent shows a bright orange pool several pixels across at the summit;
+// an inactive one shows nothing.
+test('an active vent shows a glowing summit lava lake, an idle one does not', async ({ page }) => {
+  mkdirSync(OUT, { recursive: true });
+  await page.goto('/tests/gpu/support/render.html');
+  await page.waitForFunction(() => (window as any).rt?.ready === true, null, { timeout: 60_000 });
+  const X = 64, Z = 128; // land crest of the synthetic world
+  const sample = async (act: number, tag: string) => {
+    const pts = await page.evaluate(([x, z, a]) => (window as any).rt.vent(x, z, a), [X, Z, act]);
+    // centre and a 5-pixel cross: the lake is a pool, not a single bright pixel
+    const around = [0, 5, -5].flatMap((dx) => [0, 5, -5].map((dy) => ({ px: pts.vent.px + dx, py: pts.vent.py + dy })));
+    return (await shoot(page, `lake-${tag}`, [...around, pts.away])).samples;
+  };
+  const idle = await sample(0, 'idle');
+  const lake = await sample(1, 'active');
+  // glowing: much brighter than the idle summit and warm (r ≥ g > b); the test world's sand is orange
+  // itself, so brightness against the idle frame is the measure, not the hue alone
+  const lum = (c: number[]) => c[0]! + c[1]! + c[2]!;
+  const glowing = (k: number) => lum(lake[k]!) - lum(idle[k]!) > 60 && lake[k]![0]! >= lake[k]![1]! && lake[k]![1]! > lake[k]![2]!;
+  expect(glowing(0), `lake centre: ${lake[0]} idle ${idle[0]}`).toBe(true);
+  const pool = [...Array(9).keys()].filter(glowing).length;
+  expect(pool, `pool pixels ${JSON.stringify(lake.slice(0, 9))} idle ${JSON.stringify(idle.slice(0, 9))}`).toBeGreaterThanOrEqual(5);
+  expect(dist(lake[9]!, idle[9]!), `3 cells away stays terrain: ${lake[9]} vs ${idle[9]}`).toBeLessThan(40);
+});

@@ -139,6 +139,20 @@ async function main() {
       fields.markDirty('plateId');
       setFaceTectonics(opacity, [{ x: v0[0], y: v0[1], z: 1, w: 0 }, { x: v1[0], y: v1[1], z: 1, w: 0 }] as THREE.Vector4[]);
     },
+    /**
+     * Vent at column (x, z) with display activity `act` (sim 'volcano'.x), camera straight above it at
+     * `dist`; returns the screen point of the vent and of a point 3 cells away.
+     */
+    async vent(x: number, z: number, act: number, dist = 1.2) {
+      const vo = fields.cpuArray('volcano') as Float32Array;
+      vo.fill(0); vo[colIdx(x, z) * 4] = act;
+      fields.markDirty('volcano');
+      const wx = cellToWorld(x), wz = cellToWorld(z), wy = voxelToWorldY(info.surf[colIdx(x, z)]!);
+      camera.fov = 35; camera.position.set(wx + 0.001, wy + dist, wz + 0.002); camera.lookAt(wx, wy, wz);
+      camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); camera.updateMatrixWorld();
+      await frame();
+      return { vent: project(wx, wy, wz), away: project(wx + 3 * (4 / 256), wy, wz) };
+    },
     /** Screen point of a face-plane position (x world, voxel y, on the +Z face). */
     project(x: number, vy: number) { return project(x, voxelToWorldY(vy), HALF); },
     /** Render one frame (after a parity change) without moving the camera. */

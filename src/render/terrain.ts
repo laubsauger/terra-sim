@@ -12,9 +12,9 @@ import {
   color, step, cos, int, fract, sin, abs, cameraPosition, length,
 } from 'three/tsl';
 import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL, Mat } from '../sim/layout';
-import { tMat } from '../sim/tslLayout';
+import { tMat, tColIdx } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
-import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, seamGlow, volcanoSampler } from './space';
+import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, seamGlow, volcanoSampler, advect, displayBuffers } from './space';
 import { createPaletteNodes, createBiomeNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
 import { skyU } from './sky';
@@ -51,6 +51,9 @@ export function seamPulse(xz: THREE.Node<'vec2'>): F {
   const b = texture(tex.detail, xz.mul(0.9).add(vec2(ambTime.mul(-0.015), ambTime.mul(0.02)))).g;
   return mix(float(0.45), float(1.15), smoothstep(0.3, 0.7, a.mul(0.6).add(b.mul(0.4)))) as F;
 }
+
+/** Voxel layers an active vent's column sinks in the display: a sunken summit lake, not a cone tip. */
+const CRATER_DIP = 1.5;
 
 /** 1 where h > threshold (sparse selection helper). */
 const step01 = (h: F, t: number): F => smoothstep(t, t + 0.001, h) as F;
@@ -125,7 +128,13 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
 
   // ---- vertex ----
   const gu = tWorldToCell(positionGeometry.x), gv = tWorldToCell(positionGeometry.z);
-  const heightAt = (du: number, dv: number) => S.height(S.corners(gu.add(du), gv.add(dv)));
+  // Summit crater (render only): active vents sink their column by up to CRATER_DIP layers, so the
+  // lake below sits in a real depression with a lip (normals follow). The outer vertex ring keeps the
+  // side faces' silhouette (they use the undisplaced height).
+  const volcV = volcanoSampler(fields);
+  const keepEdge = float(1).sub(step(HALF - CELL * 0.25, max(abs(positionGeometry.x), abs(positionGeometry.z))));
+  const heightAt = (du: number, dv: number) => S.height(S.corners(gu.add(du), gv.add(dv)))
+    .sub(volcV(gu.add(du), gv.add(dv)).x.mul(CRATER_DIP).mul(keepEdge));
 
   const hVary = varying(Fn(() => heightAt(0, 0))(), 'vTerrH');
   // xyz = normal (wrapped finite differences, V1), w = broad cavity term (Laplacian over ±3 cells) for fake AO.
@@ -175,7 +184,6 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   // Heat summary (renderHeat): x crust age My, y lava layers, z lava °C, w sim 'ice' cover.
   const heat = heatSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z)).toVar('terrHeat');
   const lavaMask = smoothstep(0.02, 0.35, heat.y).toVar('terrLava');
-  const slopeAt = float(1).sub(nVary.xyz.normalize().y);
 
   // Surface class masks, shared by colour, roughness, normal and emissive:
   // x rock, y snow, z forest, w underwater depth (voxel units) or -1 on land.
@@ -296,6 +304,30 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     return vec4(col, mix(landR, float(0.7), underF));
   }).once()().toVar('terrShade');
 
+  // Summit lava lake (render feature: the sim's lake is a few hundredths of a layer and its crater one
+  // column). A round pool on each active vent column among the 3×3 (advected) display columns around
+  // the fragment, radius growing with the eased activity (BUILD / WANING: smaller, dimmer; ACTIVE: ~2 cells
+  // across), its edge wobbling with a little noise. Dry vents only.
+  // lake = (pool, lip ring around it, core 1 at the vent → 0 at the rim, activity of that vent)
+  const lakeN = texture(tex.detail, p.xz.mul(9.0)).r.sub(0.5);
+  const dryK = float(1).sub(step(0, uwDepth));
+  const lake = Fn(() => {
+    const [su, sv] = advect(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
+    const u0 = floor(su.add(0.5)), v0 = floor(sv.add(0.5)); // nearest column; a pool (≤ 1.5 cells with its lip) stays within ±1
+    const pool = float(0).toVar(), lip = float(0).toVar(), core = float(0).toVar(), actM = float(0).toVar();
+    for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]] as const) {
+      const a = (displayBuffers(fields).volc.element(tColIdx(int(u0).add(dx), int(v0).add(dz))) as unknown as THREE.Node<'vec4'>).x;
+      const d = length(vec2(su.sub(u0.add(dx)), sv.sub(v0.add(dz))));
+      const R = mix(0.3, 0.9, smoothstep(0.15, 0.9, a)).add(lakeN.mul(0.2)).mul(step(0.12, a));
+      pool.assign(max(pool, smoothstep(R, R.sub(0.2), d)));
+      lip.assign(max(lip, smoothstep(R.add(0.5), R, d).mul(smoothstep(0.05, 0.3, a))));
+      core.assign(max(core, float(1).sub(d.div(max(R, 0.05))).mul(step(d, R))));
+      actM.assign(max(actM, a.mul(step(d, R.add(0.5)))));
+    }
+    return vec4(pool, lip.mul(float(1).sub(pool)), saturate(core), actM).mul(dryK);
+  }).once()().toVar('terrLakeInfo');
+  const lakeK = lake.x, lipK = lake.y;
+
   // Detail normal: finite differences of the ridged channel (crisp cracks on rock), canopy bumps in
   // forests, soft ripple in grass. 3 extra taps on one texture.
   const bumpN = Fn(() => {
@@ -308,7 +340,8 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const canopyG = vec2(dFine.a.sub(0.5), dFine.b.sub(0.5));
     const k = rockAmt.mul(1.6).add(forestAmt.mul(0.15)).add(0.08).mul(float(1).sub(snowAmt.mul(0.8)));
     const n = nVary.xyz.normalize();
-    return normalize(n.add(vec3(g.x.negate(), 0, g.y.negate()).mul(k)).add(vec3(canopyG.x, 0, canopyG.y).mul(forestAmt.mul(0.35))));
+    const nb = normalize(n.add(vec3(g.x.negate(), 0, g.y.negate()).mul(k)).add(vec3(canopyG.x, 0, canopyG.y).mul(forestAmt.mul(0.35))));
+    return normalize(mix(nb, vec3(0, 1, 0), lakeK)); // the lake surface is flat
   })();
 
   // Seabed caustics: albedo boost so the sun shadow still gates them; fade in from the shoreline and out with depth.
@@ -378,28 +411,42 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     // live channel shows its real temperature (orange-yellow)
     const lavaGlow = blackbody(mix(min(T, 1000), T, coreness.mul(float(1).sub(crust)))).mul(open.mul(lavaAmt).mul(pulseL).mul(smoothstep(550, 800, T)));
     // Summit crater: glowing lava lake in the concave top while the vent is active, pulsing rim embers.
-    const act = volcS.x;
-    // vent columns are single cells: the bilinear activity already gives a small round crater spot;
-    // concave tops (carved craters) glow a little wider
-    // (low threshold: the bilinear spot spreads over the neighbouring cells, so the vent reads from afar)
-    const lake = smoothstep(0.08, 0.5, act).mul(smoothstep(-2.0, 1.5, nVary.w).mul(0.5).add(0.5));
-    const rimPulse = sin(ambTime.mul(2.2)).mul(0.3).add(0.7);
-    // a deep orange lake (not white-hot: it is a small spot and would clip to yellow-white)
-    const craterGlow = blackbody(float(1000)).mul(lake.mul(open.mul(0.5).add(0.5)).mul(1.2))
-      .add(blackbody(float(850)).mul(act.mul(float(1).sub(lake)).mul(rimPulse).mul(smoothstep(0.05, 0.25, slopeAt)).mul(0.25)));
-    return ridgeGlowC.add(lavaGlow).add(craterGlow);
+    // Summit lava lake: a molten surface broken by dark crust plates slowly circulating (two layers
+    // drifting across each other; speeds are k/AMB_PERIOD multiples), glowing cracks between them, more
+    // crust toward the cooler rim, hottest (orange-yellow) in the core; a soft glow on the lip.
+    const act = lake.w;
+    const tL = ambTime;
+    const uvK = p.xz.mul(7.0);
+    const la = texture(tex.detail, uvK.add(vec2(tL.mul(0.0125), tL.mul(0.0075)))).a;
+    const lb = texture(tex.detail, uvK.mul(1.37).add(vec2(tL.mul(-0.01), tL.mul(0.0125))).add(0.31)).a;
+    const lPlates = la.mul(0.55).add(lb.mul(0.45));
+    const core = lake.z; // 1 over the vent, 0 at the rim
+    const lCrust = smoothstep(0.6, 0.74, lPlates.add(float(1).sub(core).mul(0.3))); // molten dominates the core
+    const lCracks = float(1).sub(smoothstep(0.01, 0.05, abs(lPlates.sub(0.5))));
+    const lOpen = float(1).sub(lCrust).add(lCrust.mul(lCracks).mul(0.8));
+    const lPulse = sin(ambTime.mul(0.7).add(lakeN.mul(6))).mul(0.1).add(0.9);
+    // colour temperature kept below yellow-white (the tone map would bleach a bright small pool)
+    const lakeGlow = blackbody(mix(float(920), float(1040), core)).mul(lOpen.mul(lPulse).mul(mix(0.75, 1.1, core)).mul(smoothstep(0.1, 0.6, act).mul(0.5).add(0.5)))
+      .add(blackbody(float(820)).mul(lCrust.mul(0.12))) // crust plates still glow dull red
+      .mul(lakeK);
+    const rimPulse = sin(ambTime.mul(1.3)).mul(0.15).add(0.85);
+    // the lip glow carries the lake to the default camera by day (a few pixels of orange halo)
+    const lipGlow = blackbody(float(900)).mul(lipK.mul(lipK).mul(rimPulse).mul(1.1));
+    return ridgeGlowC.add(lavaGlow).add(lakeGlow).add(lipGlow);
   })();
   // Crust albedo: black basalt under lava; old channels stay dark basalt ribbons after the flow stops.
   // Fresh basalt along spreading seams, a little wider than the crack: the glow sits on dark rock, and
   // where the sea passes the glow light neutrally (water.ts) it shows basalt, never a pale sand band.
-  const lavaCrust = max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)),
-    max(smoothstep(0.1, 0.5, volcS.z), smoothstep(0.08, 0.4, volcS.w).mul(0.85)).mul(0.92));
+  const lavaCrust = max(max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)),
+    max(smoothstep(0.1, 0.5, volcS.z), smoothstep(0.08, 0.4, volcS.w).mul(0.85)).mul(0.92)),
+    lakeK.mul(0.97).add(lipK.mul(0.5))); // lake crust and the scorched lip
+
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   mat.positionNode = positionNode;
   mat.normalNode = transformNormalToView(bumpN);
   mat.colorNode = mix(out0.rgb.mul(caus.mul(causticGain).add(1)), vec3(0.035, 0.03, 0.03), lavaCrust);
-  mat.roughnessNode = mix(out0.a, float(0.88), lavaMask);
+  mat.roughnessNode = mix(mix(out0.a, float(0.88), lavaMask), float(0.75), lakeK); // lake crust: no sky sheen washing out the glow
   mat.emissiveNode = skyU.sunColor.mul(glint).add(glow);
   // cloud shadows from the atmosphere module (1 until it runs)
   mat.receivedShadowNode = Fn(([s]: [F]) => s.mul(cloudShadowAt(positionWorld))) as unknown as () => THREE.Node;
