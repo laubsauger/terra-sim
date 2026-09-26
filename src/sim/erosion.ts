@@ -51,15 +51,15 @@ export const EROSION_DEFAULTS = {
   minSlope: 0.05,    // voxel/cell floor so flat rivers still carry some load
   maxSlope: 4,
   dMax: 4,           // depth (voxels) above which capacity stops growing (deep water barely moves anyway)
-  submarineTalusMul: 2, // talus multiplier where the sender is under > 1 voxel of water
+  submarineTalusMul: 1.4, // talus multiplier where the sender is under > 1 voxel of water (2: sea cliffs everywhere)
   dDeep: 2,          // standing water deeper than this loses capacity: sediment settles in lakes/oceans (deltas, shelves)
   dDecay: 1.5,       // e-folding depth of that loss
   kDep: 0.5,         // fraction of excess suspended load settling per tick
   maxExchange: 64,   // fill units per column per tick, hydraulic
-  talus: 2.5,        // layers per cell before slumping (≈ 7° real at 250 m layers, 20 km cells); 1.2 (≈0.9°) flattened every margin into the sea (B9)
+  talus: 2.0,        // layers per cell before slumping (2.5 left permanent sea cliffs) (≈ 7° real at 250 m layers, 20 km cells); 1.2 (≈0.9°) flattened every margin into the sea (B9)
   // high ground slumps at a gentler talus: 2.5 layers/cell renders ~70° on the diorama, so mountain fronts read as
   // walls. Coasts keep `talus` (margins must not slump into the sea, B9); fades in between these heights above sea.
-  talusHigh: 1.5,
+  talusHigh: 1.3,
   talusHighFrom: 4,
   talusHighTo: 14,
   thermalRate: 0.5,  // fraction of talus excess relaxed per tick (× 'thermalErosion'), clamped to 1
