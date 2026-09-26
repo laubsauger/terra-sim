@@ -224,6 +224,13 @@ async function main() {
     setCut: (x: number, z: number) => atmo.setCut(x, z),
     shadowParams: () => ({ key: cloudShadowU.keyDir.value.toArray(), planeY: cloudShadowU.planeY.value, on: cloudShadowU.on.value }),
     colWorld: (x: number, z: number) => [cellToWorld(x), cellToWorld(z)],
+    /** Show / hide one atmosphere draw by name (e.g. 'plumesUnder') for on/off image diffs. */
+    setVisible: (name: string, v: boolean) => { const o = atmo.object.getObjectByName(name); if (o) o.visible = v; return !!o; },
+    /** Screen pixel (CSS px) of a world point with the current camera. */
+    project: (x: number, y: number, z: number) => {
+      const v = new THREE.Vector3(x, y, z).project(camera), r = renderer.domElement.getBoundingClientRect();
+      return [(v.x * 0.5 + 0.5) * r.width, (0.5 - v.y * 0.5) * r.height];
+    },
     /** Water depth per column (voxel layers). */
     water: async () => Array.from(new Float32Array(await fields.read(renderer, 'water'))),
     NCOL, NX,

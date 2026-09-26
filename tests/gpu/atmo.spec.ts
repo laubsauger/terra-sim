@@ -214,6 +214,82 @@ test('every particle kind spawns with its own seed, jitter and launch velocity (
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('a deep submarine vent raises a slim dark smoker column that is actually drawn, not a dome', async ({ page }) => {
+  // user: 'underwater volcano plumes look like a big blob', then 'I'd like it be visible'
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({})); // dry weather: no clouds / rain in the image diff
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  let s: { x: number; z: number } | null = null;
+  for (let z = 130; z < 236 && !s; z++) for (let x = 120; x < 236 && !s; x++) {
+    let ok = true;
+    for (let dz = -3; dz <= 3 && ok; dz++) for (let dx = -3; dx <= 3 && ok; dx++) { const w = water[(z + dz) * 256 + x + dx]!; ok = w > 8 && w < 60; }
+    if (ok) s = { x, z };
+  }
+  expect(s, 'a deep sea patch outside the painted wet box').not.toBeNull();
+  await page.evaluate((v) => (window as any).at.paint({ lava: v }), s);
+  await page.evaluate(() => (window as any).at.frames(200, 1 / 30));
+  const [vx, vz] = await page.evaluate(([x, z]) => (window as any).at.colWorld(x, z), [s!.x, s!.z]);
+  const col = (await page.evaluate(() => (window as any).at.particles())).live
+    .filter((p: any) => Math.abs(p.kind - 6) < 0.5 && Math.hypot(p.x - vx, p.z - vz) < 0.2);
+  const ys = col.map((p: any) => p.y), y0 = Math.min(...ys), y1 = Math.max(...ys), surf = col[0]?.ceil ?? 0;
+  // width: rms distance to the column axis within height bands (bending with the current is fine)
+  let width = 0;
+  for (let b = 0; b < 4; b++) {
+    const band = col.filter((p: any) => p.y >= y0 + (y1 - y0) * b / 4 && p.y <= y0 + (y1 - y0) * (b + 1) / 4);
+    if (band.length < 5) continue;
+    const mx = avg(band.map((p: any) => p.x)), mz = avg(band.map((p: any) => p.z));
+    width = Math.max(width, Math.sqrt(avg(band.map((p: any) => (p.x - mx) ** 2 + (p.z - mz) ** 2))));
+  }
+  console.log(`smoker column: ${col.length} puffs, y ${y0.toFixed(3)} → ${y1.toFixed(3)} (sea surface ${surf.toFixed(3)}), rms width ${width.toFixed(4)} world`);
+  expect(col.length, 'a dense column of puffs').toBeGreaterThan(80);
+  expect(y1 - y0, 'it rises through most of the water column').toBeGreaterThan(0.6 * (surf - y0));
+  expect(y1, 'and dies below the surface').toBeLessThan(surf);
+  expect(width, 'slim: a few cells wide against its height, no dome').toBeLessThan(0.2 * (y1 - y0));
+  // drawn: an on/off image diff at a low view through the water shows a tall, narrow dark shape
+  await page.evaluate(([x, z]) => (window as any).at.setCam([x + 0.9, 0.12, z + 1.0], [x, -0.1, z]), [vx, vz]);
+  const shot = async () => (await page.screenshot()).toString('base64');
+  await page.evaluate(() => (window as any).at.frames(2, 0));
+  const on = await shot();
+  await page.evaluate(() => (window as any).at.setVisible('plumesUnder', false));
+  await page.evaluate(() => (window as any).at.frames(2, 0));
+  const off = await shot();
+  await page.evaluate(() => (window as any).at.setVisible('plumesUnder', true));
+  // window around the column on screen: vent to sea surface, ± the column height sideways
+  const [px0, py0] = await page.evaluate(([x, y, z]) => (window as any).at.project(x, y, z), [vx, y0, vz]);
+  const [, py1] = await page.evaluate(([x, y, z]) => (window as any).at.project(x, y, z), [vx, surf, vz]);
+  const win = [px0 - (py0 - py1), py1 - 10, px0 + (py0 - py1), py0 + 10];
+  const d = await page.evaluate(async ([a, b, win]) => {
+    const load = async (s: string) => {
+      const bmp = await createImageBitmap(new Blob([Uint8Array.from(atob(s), (c) => c.charCodeAt(0))], { type: 'image/png' }));
+      const cv = new OffscreenCanvas(bmp.width, bmp.height); const ctx = cv.getContext('2d')!; ctx.drawImage(bmp, 0, 0);
+      return { w: bmp.width, h: bmp.height, px: ctx.getImageData(0, 0, bmp.width, bmp.height).data };
+    };
+    const A = await load(a!), B = await load(b!);
+    const k = A.w / innerWidth; // device px per CSS px
+    const [x0, y0, x1, y1] = (win as number[]).map((v) => Math.round(v * k));
+    const xs: number[] = [], ys: number[] = [];
+    let contrast = 0;
+    for (let y = Math.max(0, y0!); y < Math.min(A.h, y1!); y++) for (let x = Math.max(0, x0!); x < Math.min(A.w, x1!); x++) {
+      const o = (y * A.w + x) * 4;
+      const dl = Math.abs(0.2126 * (A.px[o]! - B.px[o]!) + 0.7152 * (A.px[o + 1]! - B.px[o + 1]!) + 0.0722 * (A.px[o + 2]! - B.px[o + 2]!));
+      if (dl > 4) { xs.push(x / k); ys.push(y / k); contrast += dl; }
+    }
+    const q = (v: number[], f: number) => [...v].sort((a, b) => a - b)[Math.floor(f * (v.length - 1))] ?? 0;
+    // typical width: median changed pixels per row (the foot, over the lava pool, is wider than the column)
+    const rows = new Map<number, number>();
+    for (const y of ys) rows.set(Math.round(y), (rows.get(Math.round(y)) ?? 0) + 1 / k);
+    return { n: xs.length, contrast: contrast / Math.max(1, xs.length), w: q([...rows.values()].filter((c) => c >= 2), 0.5), h: q(ys, 0.9) - q(ys, 0.1) };
+  }, [on, off, win] as const);
+  console.log(`smoker in the image: ${d.n} px changed, mean contrast ${d.contrast.toFixed(1)} (0-255 luma), median row width ${d.w.toFixed(0)} px, height ${d.h.toFixed(0)} px (column ${(py0 - py1).toFixed(0)} px tall)`);
+  expect(d.n, 'the column is drawn and shows through the water').toBeGreaterThan(400);
+  expect(d.contrast, 'with real contrast, not a ghost').toBeGreaterThan(8);
+  expect(d.h, 'it reaches well up the water column on screen (the top fades out)').toBeGreaterThan(0.3 * (py0 - py1));
+  // (on-screen width is logged only: the foot over the painted lava pool and the bubbles blur it; the slim
+  // shape is asserted on the particles above, in world units)
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');

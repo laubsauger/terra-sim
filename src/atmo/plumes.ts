@@ -218,11 +218,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         p0.assign(vec4(o.x.add(j.x), o.y.add(0.003), o.z.add(j.y), 0));
         p1.assign(vec4(0, up, 0, surf.sub(o.y).div(up).mul(1.2).add(0.1)));
         p2.assign(vec4(float(PK.BUBBLE), seed, surf, o.y));
-      }).ElseIf(is(PK.TURBID), () => { // TURBID: dark glowing cloud billowing off a deep vent, dies below the surface
-        const j = dir.mul(rr.mul(0.025));
-        const up = rnd(14).mul(0.015).add(0.025);
+      }).ElseIf(is(PK.TURBID), () => { // TURBID: slim black-smoker column off a deep vent, gone just below the surface
+        const j = dir.mul(rr.mul(0.004));
+        const up = rnd(14).mul(0.01).add(0.02);
         p0.assign(vec4(o.x.add(j.x), o.y.add(0.003), o.z.add(j.y), 0));
-        p1.assign(vec4(dir.x.mul(0.01), up, dir.y.mul(0.01), min(surf.sub(o.y).mul(0.7).div(up), 7)));
+        p1.assign(vec4(0, up, 0, min(surf.sub(o.y).mul(0.92).div(up), 9)));
         p2.assign(vec4(float(PK.TURBID), seed, surf, o.y));
       }).ElseIf(is(PK.FOUNTAIN), () => { // FOUNTAIN: bright spray arcing just above the vent
         const out = dir.mul(rr.mul(0.18).add(0.04)).mul(sqrt(heat));
@@ -268,7 +268,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       //           build-up / plain pools → degassing steam wisps + a little ash; waning → ash only
       //   shallow (≤ 1 voxel, Surtseyan): black tephra jets, white steam billows, some ash
       //   medium (1-4 voxels): white steam puffs boiling off the sea surface, no ash column
-      //   deep (> 4 voxels): nothing in the air; a dark turbid glowing cloud + bubbles under water,
+      //   deep (> 4 voxels): nothing in the air; a slim dark smoker column (warm glow at its foot) + bubbles under water,
       //           pumice specks floating on the surface above
       const nV = iMin(atomicLoad(ctr.element(CTR_VENTS)) as unknown as THREE.Node<'int'>, int(ATMO.VENTS_MAX)).toVar();
       If(nV.greaterThan(int(0)), () => {
@@ -289,10 +289,10 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
             const origin = v.xyz.toVar();
             const floorY = v.y.sub(wdep.mul(VOXEL_H).mul(vertEx)).toVar();
             const active = step(1.5, pc).mul(step(pc, 2.5)).toVar();
-            If(wdep.greaterThan(VENT_DEEP), () => { // deep submarine: turbid cloud + bubbles below, slick + pumice on top
+            If(wdep.greaterThan(VENT_DEEP), () => { // deep submarine: smoker column + bubbles below, slick + pumice on top
               If(r.lessThan(0.07), () => { kind.assign(PK.PUMICE); })
                 .ElseIf(r.lessThan(0.16), () => { kind.assign(PK.SLICK); })
-                .ElseIf(r.lessThan(0.5), () => { kind.assign(PK.BUBBLE); origin.y.assign(floorY); })
+                .ElseIf(r.lessThan(0.4), () => { kind.assign(PK.BUBBLE); origin.y.assign(floorY); })
                 .Else(() => { kind.assign(PK.TURBID); origin.y.assign(floorY); });
             }).ElseIf(wdep.greaterThan(VENT_SHALLOW), () => { // boiling sea: steam, a discoloured patch, pumice
               If(r.lessThan(0.12), () => { kind.assign(PK.SLICK); }).ElseIf(r.lessThan(0.18), () => { kind.assign(PK.PUMICE); }).Else(() => { kind.assign(PK.STEAM); });
@@ -408,9 +408,13 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         vel.y.assign(0);
       }).ElseIf(kind.lessThan(4.5), () => { // BUBBLE: steady rise, wobble
         vel.xz.assign(vec2(sin(u.time.mul(7).add(seed.mul(40))), cos(u.time.mul(6).add(seed.mul(31)))).mul(0.012));
-      }).ElseIf(kind.lessThan(6.5), () => { // SMOKER / TURBID: slow, spreading, billowing under water
+      }).ElseIf(kind.lessThan(5.5), () => { // SMOKER: slow, spreading, billowing under water
         vel.y.assign(vel.y.mul(exp(dt.mul(-0.15))));
-        vel.xz.assign(turb.mul(mix(float(0.1), float(0.35), isK(PK.TURBID))));
+        vel.xz.assign(turb.mul(0.1));
+      }).ElseIf(kind.lessThan(6.5), () => { // TURBID: steady rise, a little churn, bent gently downstream as it climbs
+        const frac = saturate(hAbove.div(max(p2.z.sub(oy), 1e-3))); // p2.z: sea surface
+        vel.y.assign(vel.y.mul(exp(dt.mul(-0.05))));
+        vel.xz.assign(turb.mul(0.05).add(wind.mul(frac.mul(0.06))));
       }).ElseIf(ballistic.greaterThan(0.5), () => { // FOUNTAIN / BOMB / TEPHRA: ballistic, a touch of drag; landed bombs rest
         const flying = step(1e-5, dot(vel, vel));
         vel.y.subAssign(dt.mul(G).mul(flying));
@@ -481,10 +485,10 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     const hAb = q0.y.sub(q2.w);
     const pdcLoft = step(1.5, q2.z);
     const size0 = dot(kA, vec4(0.016, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
-      .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.02, mix(float(0.04), float(0.05), pdcLoft))))
+      .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.01, mix(float(0.04), float(0.05), pdcLoft))))
       .add(dot(kC, vec3(0.007, 0.011, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
     // a PDC widens as it runs out (base) and billows up as it lofts
-    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.09))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.28));
+    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.28));
     const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.3))));
     // ejecta streak along their screen-space velocity (ember trails)
     const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
@@ -528,17 +532,20 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const wrap = saturate(dot(nv, normalize(keyV)).add(0.5).div(1.5));
       const keyCol = tKeyColor();
       const amb = mix(skyU.horizon, skyU.zenith, q.y.mul(0.5).add(0.5)).mul(0.75);
+      // turbid smoker column: height fraction from the vent (vH.x above it) to the sea surface (heat slot)
+      const colFrac = saturate(vH.x.div(max(heat.sub(vPos.y).add(vH.x), 1e-3)));
       // ash: near-black at the vent, lighter grey as it rises and thins
       const ashCol = mix(vec3(0.05, 0.045, 0.04), vec3(0.44, 0.42, 0.4), smoothstep(0.0, 0.3, vH.x));
       const albedo = ashCol.mul(k.x)
         .add(vec3(0.93, 0.94, 0.96).mul(k.y)).add(vec3(0.56, 0.45, 0.33).mul(k.z)).add(vec3(0.6, 0.55, 0.48).mul(k.w))
-        .add(vec3(0.8, 0.92, 1.0).mul(kb.x.mul(1.1))).add(vec3(0.05, 0.05, 0.06).mul(kb.y)).add(vec3(0.11, 0.09, 0.075).mul(kb.z))
+        .add(vec3(0.8, 0.92, 1.0).mul(kb.x.mul(1.1))).add(vec3(0.05, 0.05, 0.06).mul(kb.y)).add(mix(vec3(0.035, 0.03, 0.026), vec3(0.24, 0.215, 0.19), smoothstep(0, 0.9, colFrac)).mul(kb.z))
         .add(mix(vec3(0.19, 0.17, 0.155), vec3(0.44, 0.41, 0.38), loftF).mul(kb.w)).add(vec3(0.78, 0.74, 0.64).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
       const litC = albedo.mul(amb.add(keyCol.mul(wrap).mul(0.3)));
       // a PDC keeps its ash grey: a third of the warm sky / low-sun tint is taken out (no pink tubes)
       const lit = mix(litC, vec3(dot(litC, vec3(0.3, 0.55, 0.15))), kb.w.mul(0.35));
-      // orange underglow from the lava: ash just above the crater, turbid clouds at a submarine vent
-      const glow = vec3(1.0, 0.33, 0.07).mul(exp(max(vH.x, 0).mul(-24)).mul(min(heat, 1).mul(k.x).add(kb.z.mul(0.5)))
+      // orange underglow from the lava: ash just above the crater, the foot of a submarine smoker column
+      const glow = vec3(1.0, 0.33, 0.07).mul(exp(max(vH.x, 0).mul(-24)).mul(min(heat, 1).mul(k.x))
+        .add(exp(max(vH.x, 0).mul(-45)).mul(kb.z.mul(0.35)))
         .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1)))
         .add(kb.w.mul(float(1).sub(loftF)).mul(0.1).mul(exp(age.mul(-1.4))).mul(min(heat, 1))) // PDC base: faint heat near the vent
         .mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
@@ -554,7 +561,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)))
         .add(kb.x.mul(0.45).mul(float(1).sub(pow(t, 4))))
         .add(kb.y.mul(pow(float(1).sub(t), 1.5).mul(0.5)).mul(shimmer))
-        .add(kb.z.mul(pow(float(1).sub(t), 1.3).mul(0.38)))
+        .add(kb.z.mul(float(1).sub(smoothstep(0.65, 1, colFrac)).mul(0.7)))
         .add(kb.w.mul(mix(pow(float(1).sub(t), 1.4).mul(0.4), smoothstep(0, 0.2, t).mul(pow(float(1).sub(t), 1.2)).mul(0.3), loftF)))
         .add(isStreak.mul(mix(float(0.9), float(1), kc.y)).mul(float(1).sub(pow(t, 6))))
         .add(kd.x.mul(0.85).mul(smoothstep(1, 0.85, t)))
