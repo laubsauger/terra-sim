@@ -153,11 +153,11 @@ export function createOverlays(o: OverlayOptions) {
   });
 
   let current = 0;
-  // toggles act on data overlays AND the Tectonics layer (they used to do nothing with only the layer on);
-  // declutter defaults off so the default-on Tectonics layer keeps life and clouds
+  // arrows / legend act on data overlays AND the Tectonics layer; declutter hides life + clouds whenever it is
+  // checked (it used to need an overlay on, so the checkbox seemed dead)
   let uiVisible = true, legendOn = true, arrowsOn = true, declutterOn = false;
-  // Tectonics layer: explicit user choice per mode (normal: on by default; ambient: off unless switched on)
-  let tecNormal = true, tecAmbient = false;
+  // Tectonics layer: explicit user choice per mode (both off until switched on)
+  let tecNormal = false, tecAmbient = false; // off by default (user); T / 'Plates' pill turns it on
   const ambient = () => o.ambient?.() ?? false;
   const tecOn = () => (ambient() ? tecAmbient : tecNormal);
   let tecFade = 0, cloudFade = 0;
@@ -177,7 +177,7 @@ export function createOverlays(o: OverlayOptions) {
     sheet.visible = !!d;
     if (faces) faces.visible = d?.id === 'heat';
     legend.setVisible(!!d && legendOn && uiVisible);
-    declutter((!!d || tecOn()) && declutterOn);
+    declutter(declutterOn);
     pill.setActive(tecOn());
     pill.setVisible(uiVisible);
     if (!showTags()) for (const t of tags) if (t.shown) { t.el.style.display = 'none'; t.shown = false; }
@@ -257,13 +257,13 @@ export function createOverlays(o: OverlayOptions) {
   function frame(dt: number) {
     const d = def();
     const tec = tecOn();
-    // eased fades: Tectonics layer in/out, clouds out under a data overlay
+    // eased fades: Tectonics layer in/out, clouds out while decluttered
     const k = 1 - Math.exp(-Math.max(0, dt) / 0.18);
     tecFade += ((tec ? 1 : 0) - tecFade) * k;
     if (Math.abs(tecFade - (tec ? 1 : 0)) < 1e-3) tecFade = tec ? 1 : 0;
     U.tecOpacity.value = tecFade;
     tecSheet.visible = tecFade > 0 && d?.id !== 'plates'; // the Plates overlay draws the same lines itself
-    fadeClouds(!!d || tec, k);
+    fadeClouds(k);
     const plates = showArrows() || d?.id === 'plates' || tecFade > 0;
     arrows.object.visible = arrowsOn && (showArrows() || tecFade > 0);
     U.arrowFade.value = !arrowsOn ? 0 : d?.id === 'plates' ? 1 : tecFade;
@@ -313,10 +313,10 @@ export function createOverlays(o: OverlayOptions) {
     }
   }
 
-  function fadeClouds(on: boolean, k: number) {
+  function fadeClouds(k: number) {
     const c = o.clouds;
     if (!c) return;
-    const target = on && declutterOn ? 1 : 0;
+    const target = declutterOn ? 1 : 0;
     if (cloudFade === target) return;
     cloudFade += (target - cloudFade) * k;
     if (Math.abs(cloudFade - target) < 1e-3) cloudFade = target;

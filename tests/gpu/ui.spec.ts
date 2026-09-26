@@ -36,3 +36,25 @@ test('H hides panel, timebar and HUD; ambient url starts hidden', async ({ page 
   await page.keyboard.press('h');
   await expect(page.locator('.terra-perf')).toBeVisible();
 });
+
+// Game UI time of day: the Day pill sets the sun directly, runs / stops a day cycle, and hiding the UI (H)
+// must not undo the player's cycle choice.
+test('Day pill drags the sun and toggles the day cycle; H keeps the choice', async ({ page }) => {
+  await page.goto('/?seed=4');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  const pill = page.locator('.terra-day');
+  await expect(pill).toBeVisible();
+  await pill.locator('input').fill('500'); // noon
+  const look = () => page.evaluate(() => { const l = (window as any).terra.look; return { tod: l.timeOfDay as number, day: l.dayLength as number }; });
+  expect((await look()).tod).toBeCloseTo(0.5, 2);
+  await expect(pill.locator('.td-clock')).toHaveText('12:00');
+  await pill.locator('button').click();
+  expect((await look()).day).toBeGreaterThan(0);
+  const t0 = (await look()).tod;
+  expect(Math.abs(t0 - 0.5), 'starting the cycle keeps the sun where it is').toBeLessThan(0.01);
+  await page.keyboard.press('h');
+  await page.keyboard.press('h');
+  expect((await look()).day, 'H does not stop the cycle').toBeGreaterThan(0);
+  await pill.locator('button').click();
+  expect((await look()).day).toBe(0);
+});

@@ -43,6 +43,8 @@ export interface Look {
   readonly timeOfDay: number;
   setTimeOfDay(tod: number): void;
   setDayLength(seconds: number): void;
+  /** Real seconds per full day cycle; 0 = fixed time of day. */
+  readonly dayLength: number;
   setHighQuality(v: boolean): void;
   /** Per frame: ambience clock (s, V17) drives waves, caustics, mantle flow and the day cycle. */
   frame(ambTime: number): void;
@@ -70,6 +72,7 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
   let tod0 = opts.timeOfDay ?? GOLDEN_HOUR;
   let dayLength = opts.dayLength ?? 0;
   let tod = tod0;
+  let lastAmb = 0;
   let lastTod = -1;
   const applyTod = (t: number) => {
     tod = ((t % 1) + 1) % 1;
@@ -83,8 +86,10 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
   return {
     lighting, post, backdrop, terrain: terrain.object, sides: sides.object, water: water.object,
     get timeOfDay() { return tod; },
-    setTimeOfDay(t) { tod0 = t; applyTod(t); },
-    setDayLength(s) { dayLength = s; },
+    // tod0 is the phase at ambTime 0 while cycling: keep the current sun where it is when either changes
+    setTimeOfDay(t) { tod0 = dayLength > 0 ? t - lastAmb / dayLength : t; applyTod(t); },
+    setDayLength(s) { tod0 = s > 0 ? tod - lastAmb / s : tod; dayLength = s; },
+    get dayLength() { return dayLength; },
     setHighQuality(v) {
       post.setHighQuality(v);
       lighting.sun.shadow.mapSize.setScalar(v ? 4096 : 2048);
@@ -93,6 +98,7 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
     },
     frame(ambTime) {
       setAmbTime(ambTime);
+      lastAmb = ambTime;
       if (dayLength > 0) applyTod(tod0 + ambTime / dayLength);
       backdrop.update();
       // Camera keep-out: the slice volume (grid top) + plinth, and the floor.

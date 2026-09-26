@@ -244,7 +244,7 @@ test('arrow length is proportional to plate speed', async ({ page }) => {
 
 // The Overlays panel toggles must act on what is on screen by default: the Tectonics layer alone, without a data
 // overlay (they used to apply only to data overlays, so with just the plate lines on they did nothing).
-test('arrow, legend and declutter toggles act on the Tectonics layer alone', async ({ page }) => {
+test('arrow, legend and declutter toggles act on the Tectonics layer alone; Plates off by default', async ({ page }) => {
   test.setTimeout(120_000);
   await page.goto('/?seed=4');
   await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
@@ -252,10 +252,10 @@ test('arrow, legend and declutter toggles act on the Tectonics layer alone', asy
     const t = (window as any).terra;
     return { arrows: t.overlays.objects.arrows.visible, life: t.life.object.visible, tags: [...document.querySelectorAll('.terra-plate-tag')].some((e: any) => e.style.display !== 'none') };
   });
+  expect(await page.evaluate(() => (window as any).terra.overlays.tectonics), 'plate lines + arrows start off (user)').toBe(false);
   await page.evaluate(() => { const o = (window as any).terra.overlays; o.select(0); o.tectonics = true; });
-  await page.waitForTimeout(600);
+  await expect.poll(async () => (await state()).arrows, { timeout: 5000 }).toBe(true);
   const on = await state();
-  expect(on.arrows).toBe(true);
   expect(on.life, 'declutter is off by default: life stays under the plate lines').toBe(true);
   await page.evaluate(() => { const o = (window as any).terra.overlays; o.arrowsVisible = false; o.declutter = true; });
   await page.waitForTimeout(400);
@@ -269,4 +269,15 @@ test('arrow, legend and declutter toggles act on the Tectonics layer alone', asy
   expect(back.arrows).toBe(true);
   expect(back.life).toBe(true);
   expect(back.tags, 'legend off hides the plate speed tags').toBe(false);
+});
+
+// 'hide life & clouds' is a plain switch: it must work with no overlay and no plate lines on.
+test('declutter hides life with no overlay on and restores it', async ({ page }) => {
+  await page.goto('/?seed=4');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  const life = () => page.evaluate(() => (window as any).terra.life.object.visible as boolean);
+  await page.evaluate(() => { const o = (window as any).terra.overlays; o.select(0); o.tectonics = false; o.declutter = true; });
+  expect(await life()).toBe(false);
+  await page.evaluate(() => { (window as any).terra.overlays.declutter = false; });
+  expect(await life()).toBe(true);
 });

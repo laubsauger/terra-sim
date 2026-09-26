@@ -6,6 +6,7 @@ import { Params, PARAM_DEFS } from './core/params';
 import { DualClock } from './core/clock';
 import { createPanel } from './ui/panel';
 import { createTimebar, type ClockLike } from './ui/timebar';
+import { createDayPill } from './ui/dayPill';
 import { bindKeys } from './ui/keys';
 import { registerSimFields, uploadWorld } from './sim/fields';
 import { generateWorld } from './sim/worldgen';
@@ -89,6 +90,7 @@ async function main() {
   const panel = createPanel(params);
   const savePanel = createSavePanel(panel.folders.Save, saves);
   const timebar = createTimebar(clockUi, { minSpeed: speedDef.min!, maxSpeed: speedDef.max! });
+  const dayPill = createDayPill(look);
   // sim GPU budget per frame (V9): speed beyond this shows as effective < requested (V22)
   const budget = new TickBudget(5);
   let ticksSinceSample = 0;
@@ -113,11 +115,14 @@ async function main() {
   let volcanic = 0, seenEvents = 0;
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
-    ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean));
-    look.setDayLength((params.get('ambientMode') as boolean) ? 600 : 0); };
-  params.onChange((key) => { if (key === 'ambientMode') applyUi(); });
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); dayPill.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
+    ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean)); };
+  // ambient mode runs a slow day; leaving it stops the cycle (the Day pill can restart it). Not on H: that
+  // must not undo the pill's choice.
+  const applyAmbientDay = () => look.setDayLength((params.get('ambientMode') as boolean) ? 600 : 0);
+  params.onChange((key) => { if (key === 'ambientMode') { applyUi(); applyAmbientDay(); } });
   applyUi();
+  applyAmbientDay();
   bindKeys({
     toggleUI: () => { uiVisible = !uiVisible; applyUi(); },
     togglePause: () => clock.togglePause(),
@@ -144,6 +149,7 @@ async function main() {
     saves.frame();
     savePanel.update();
     timebar.update();
+    dayPill.update();
     probe.update(dt);
     god.update(dt);
     statsPane.update();
