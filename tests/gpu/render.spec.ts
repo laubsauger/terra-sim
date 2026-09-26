@@ -346,6 +346,13 @@ test('slice grips: hover cue, drag moves the cut with edge glow, release sweeps'
   expect(hov.gripX, 'hovered grip lights its chevrons').toBeGreaterThan(0.8);
   expect(hov.gripZ, 'the other grip stays dim').toBeLessThan(0.1);
   expect(hov.tip, 'first hover shows the tip').toBe(true);
+  // user: "the arrows on one of the drag handles are rotated wrong and they should hide on the side that is maxed out"
+  expect(hov.dirX, 'grip X chevrons point along ±x').toEqual([1, 0]);
+  expect(hov.dirZ, 'grip Z chevrons point along ±z').toEqual([0, 1]);
+  for (const [k, c] of [['X', hov.chevX], ['Z', hov.chevZ]] as const) {
+    expect(c[1], `uncut: grip ${k} outward chevrons hidden`).toBeLessThan(0.05);
+    expect(c[0], `uncut: grip ${k} inward chevrons shown`).toBeGreaterThan(0.95);
+  }
   await page.mouse.down();
   for (let k = 1; k <= 10; k++) { await page.mouse.move(p.x - k * 20, p.y + 2 - k * 5); await page.waitForTimeout(30); }
   await page.waitForTimeout(300);
@@ -353,6 +360,7 @@ test('slice grips: hover cue, drag moves the cut with edge glow, release sweeps'
   const cut = await page.evaluate(() => (window as any).terra.slice.cut);
   expect(cut.x, 'dragging moved the X cut').toBeLessThan(1.8);
   expect(mid.glow, 'cut edge glows while dragging').toBeGreaterThan(0.6);
+  expect(Math.min(...mid.chevX), 'mid-cut: both chevron pairs of grip X show').toBeGreaterThan(0.9);
   await page.mouse.up();
   await page.waitForTimeout(150);
   const rel = await fxs();
@@ -362,6 +370,11 @@ test('slice grips: hover cue, drag moves the cut with edge glow, release sweeps'
   const after = await fxs();
   expect(after.glow, 'fx off when not interacting').toBeLessThan(0.05);
   expect(after.sweep).toBe(0);
+  await page.evaluate(() => (window as any).terra.slice.setCut(-9, 2)); // clamps to MIN_CUT
+  await page.waitForTimeout(1500);
+  const minCut = await fxs();
+  expect(minCut.chevX[0], 'at the minimum cut the inward chevrons hide').toBeLessThan(0.05);
+  expect(minCut.chevX[1], 'and the outward ones show').toBeGreaterThan(0.95);
   expect(problems).toEqual([]);
 });
 

@@ -25,7 +25,9 @@ export interface Slice {
   setVisible(v: boolean): void;
   update(dt: number): void;
   /** Interaction state for tools and tests: chevron light per grip, cut edge glow, sweep 0..1. */
-  readonly fxState: { gripX: number; gripZ: number; glow: number; sweep: number; tip: boolean };
+  readonly fxState: { gripX: number; gripZ: number; glow: number; sweep: number; tip: boolean;
+    /** Chevron pair visibility per grip: [inward (−), outward (+)], and the chevrons' world direction of +. */
+    chevX: [number, number]; chevZ: [number, number]; dirX: [number, number]; dirZ: [number, number] };
 }
 
 export function createSlice(stage: Stage, fields: GpuFields): Slice {
@@ -97,27 +99,31 @@ export function createSlice(stage: Stage, fields: GpuFields): Slice {
     return new THREE.ShapeGeometry(sh).rotateX(-Math.PI / 2);
   })();
   /** Chevrons on both sides of a grip (children of the grip, so they travel and pick with it). */
+  // Each side's pair fades out while the cut sits at that side's limit (outward at the uncut edge, inward
+  // at MIN_CUT): the chevrons only show directions the grip can still go.
   const addChevrons = (g: THREE.Group, axis: 'x' | 'z') => {
     const lit = uniform(0); // 0 idle … 1 hovered / dragged
-    const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
-    // brass engraving that lights to a warm glow (> 1: blooms a little) when hot
-    m.colorNode = vec3(0.78, 0.6, 0.3).mul(float(0.5).add(lit.mul(2.0)));
-    m.opacityNode = float(0.7).add(lit.mul(0.3));
-    const chevs: THREE.Mesh[] = [];
-    for (const side of [-1, 1]) for (const k of [0, 1]) {
-      const c = new THREE.Mesh(chevGeo, m);
-      c.rotation.y = side > 0 ? 0 : Math.PI;
-      c.userData.base = side * (0.095 + k * 0.042);
-      c.userData.side = side;
-      c.renderOrder = 1;
-      chevs.push(c);
-      g.add(c);
-    }
-    const holder = new THREE.Group(); // local frame: +x = drag axis
+    const fade = { [-1]: uniform(1), [1]: uniform(1) } as Record<number, THREE.UniformNode<'float', number>>;
+    const holder = new THREE.Group(); // local frame: +x = the grip's drag axis (+x or +z in the world)
     if (axis === 'z') holder.rotation.y = -Math.PI / 2;
-    for (const c of chevs) holder.attach(c);
+    const chevs: THREE.Mesh[] = [];
+    for (const side of [-1, 1]) {
+      const m = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
+      // brass engraving that lights to a warm glow (> 1: blooms a little) when hot
+      m.colorNode = vec3(0.78, 0.6, 0.3).mul(float(0.5).add(lit.mul(2.0)));
+      m.opacityNode = float(0.7).add(lit.mul(0.3)).mul(fade[side]!);
+      for (const k of [0, 1]) {
+        const c = new THREE.Mesh(chevGeo, m);
+        c.rotation.y = side > 0 ? 0 : Math.PI;
+        c.userData.base = side * (0.095 + k * 0.042);
+        c.userData.side = side;
+        c.renderOrder = 1;
+        chevs.push(c);
+        holder.add(c); // in the holder's frame (attach would bake the holder's rotation into each chevron)
+      }
+    }
     g.add(holder);
-    g.userData.chev = { lit, chevs, holder, m };
+    g.userData.chev = { lit, fade, chevs, holder };
   };
   addChevrons(gripX, 'x');
   addChevrons(gripZ, 'z');
@@ -217,7 +223,17 @@ export function createSlice(stage: Stage, fields: GpuFields): Slice {
     cut,
     get fxState() {
       const lit = (g: THREE.Group) => (g.userData.chev as { lit: THREE.UniformNode<'float', number> }).lit.value;
-      return { gripX: lit(gripX), gripZ: lit(gripZ), glow: fx.glow.value, sweep: fx.sweep.value, tip: tip.style.opacity === '1' };
+      type Chev = { fade: Record<number, THREE.UniformNode<'float', number>>; chevs: THREE.Mesh[] };
+      const pair = (g: THREE.Group): [number, number] => { const c = g.userData.chev as Chev; return [c.fade[-1]!.value, c.fade[1]!.value]; };
+      // world direction a + side chevron points (its local +x)
+      const dir = (g: THREE.Group): [number, number] => {
+        const c = (g.userData.chev as Chev).chevs.find((m) => m.userData.side > 0)!;
+        c.updateWorldMatrix(true, false);
+        const v = new THREE.Vector3(1, 0, 0).transformDirection(c.matrixWorld);
+        return [+v.x.toFixed(3), +v.z.toFixed(3)];
+      };
+      return { gripX: lit(gripX), gripZ: lit(gripZ), glow: fx.glow.value, sweep: fx.sweep.value, tip: tip.style.opacity === '1',
+        chevX: pair(gripX), chevZ: pair(gripZ), dirX: dir(gripX), dirZ: dir(gripZ) };
     },
     setCut(x, z) { cut.x = Math.min(HALF, Math.max(MIN_CUT, x)); cut.z = Math.min(HALF, Math.max(MIN_CUT, z)); apply(); },
     reset() { cut.x = HALF; cut.z = HALF; apply(); },
@@ -230,8 +246,12 @@ export function createSlice(stage: Stage, fields: GpuFields): Slice {
       if (!drag) { gripX.scale.setScalar(hover === gripX ? 1.15 : s); gripZ.scale.setScalar(hover === gripZ ? 1.15 : s); }
       for (const g of [gripX, gripZ]) {
         const active = drag === (g === gripX ? 'x' : 'z') || hover === g;
-        const c = g.userData.chev as { lit: THREE.UniformNode<'float', number>; chevs: THREE.Mesh[]; holder: THREE.Group };
+        const c = g.userData.chev as { lit: THREE.UniformNode<'float', number>; fade: Record<number, THREE.UniformNode<'float', number>>; chevs: THREE.Mesh[]; holder: THREE.Group };
         c.lit.value += ((active ? 1 : 0) - c.lit.value) * (1 - Math.exp(-dt * 10));
+        const at = cut[g === gripX ? 'x' : 'z'];
+        const kf = 1 - Math.exp(-dt * 8);
+        c.fade[1]!.value += ((at >= HALF - 0.02 ? 0 : 1) - c.fade[1]!.value) * kf;   // outward: none at the uncut edge
+        c.fade[-1]!.value += ((at <= MIN_CUT + 0.02 ? 0 : 1) - c.fade[-1]!.value) * kf; // inward: none at the minimum cut
         // chevrons drift outward along the axis (idle: slow breath; hot: a quicker nudge)
         const ph = active ? (t * 1.6) % 1 : 0.5 + 0.5 * Math.sin(t * 1.4);
         for (const m of c.chevs) m.position.x = (m.userData.base as number) + (m.userData.side as number) * 0.018 * ph;
