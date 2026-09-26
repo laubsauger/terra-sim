@@ -195,7 +195,10 @@ export class Tectonics {
         // orogeny: continental losers stack onto the winner as crustal root (continents are not destroyed
         // in collisions), limited by max crust thickness and grid top; only the excess delaminates
         const k = uint(0).toVar();
-        If(bestCont.equal(uint(1)).and(count.greaterThan(uint(1))), () => {
+        // oceanic winners accrete too (island arcs grow from their trench wedge): with continental winners only,
+        // every ocean-ocean trench sent its slab sediment and slumped debris into the reservoir, which grew to
+        // 7 layers/col while land shrank from 27 % to 13 %
+        If(count.greaterThan(uint(1)), () => {
           const room = uint(MAX_CRUST_LAYERS).sub(uMin(bestMass.div(uint(255)), uint(MAX_CRUST_LAYERS)));
           const floorRoom = base.sub(uMin(base, uint(1))); // root must stay above y=0
           // continental losers stack fully; oceanic losers accrete ACCRETE_FRAC of what they carry beyond

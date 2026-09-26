@@ -134,3 +134,27 @@ test('thermal erosion relaxes cliffs to talus and leaves gentle slopes untouched
   expect(res.gentleChanged).toBe(0);
   expect(res.m1).toBe(res.m0); // thermal alone is pure integer bookkeeping → exact
 });
+
+// Convergent fronts rebuild their cliff every tectonics step (~1 cell/My). Talus capped at 0.25 layer per
+// direction per step left 50-layer walls standing forever; a tall cliff must slump within a few My.
+test('a 40-layer wall slumps to a slope within ~4 My of erosion steps', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const r = await makeRenderer();
+    const rig = await R.makeHydroRig(r, R.voxFromHeights((_x: number, z: number) => (z >= 64 && z < 192 ? 110 : 70)));
+    rig.params.set('erosionRate', 0); // thermal only
+    const maxSlope = (s: Float32Array) => {
+      let m = 0;
+      for (let z = 0; z < R.NZ; z++) for (let x = 0; x < R.NX; x++) m = Math.max(m, Math.abs(s[R.idx(x, z)]! - s[R.idx(x, (z + 1) % R.NZ)]!));
+      return m;
+    };
+    const before = maxSlope(await rig.readF('surfY'));
+    const m0 = await rig.mass();
+    for (let t = 0; t < 40; t++) rig.tick(1); // 40 erosion steps = 4 My at EROSION_EVERY 2 (the old 0.25-layer cap: slope ≈ 30)
+    return { before, after: maxSlope(await rig.readF('surfY')), m0, m1: await rig.mass() };
+  });
+  expect(res.before).toBeGreaterThan(39);
+  expect(res.after, `max slope ${res.after.toFixed(1)} layers/cell`).toBeLessThan(12);
+  expect(res.m1).toBe(res.m0);
+});

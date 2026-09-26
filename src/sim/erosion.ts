@@ -58,7 +58,9 @@ export const EROSION_DEFAULTS = {
   maxExchange: 64,   // fill units per column per tick, hydraulic
   talus: 2.5,        // layers per cell before slumping (≈ 7° real at 250 m layers, 20 km cells); 1.2 (≈0.9°) flattened every margin into the sea (B9)
   thermalRate: 0.5,  // fraction of talus excess relaxed per tick (× 'thermalErosion'), clamped to 1
-  thermalMaxDir: 63, // fill units per direction per tick (4·63 < 255 → one new voxel max per receiver)
+  // fill units per direction per tick (byte-packed). 63 (0.25 layer) let convergent fronts rebuild 50-layer walls
+  // faster than they slumped; receivers take up to 4 new voxels, senders give from their top 4 crust voxels
+  thermalMaxDir: 255,
 };
 
 type U = THREE.Node<'uint'>;
@@ -95,11 +97,11 @@ export function scanTop(vox: Vox, x: I, z: I) {
   return { topY, topV };
 }
 
-/** Remove up to n (≤ 510) fill units from the column's crust top, never below y = 1. Returns units removed. */
+/** Remove up to n (≤ 1020) fill units from the column's crust top, never below y = 1. Returns units removed. */
 export function removeTop(vox: Vox, x: I, z: I, topY: I, n: U): U {
   const rem = n.toVar();
   const y = topY.toVar();
-  Loop({ start: int(0), end: int(3), condition: '<' }, () => {
+  Loop({ start: int(0), end: int(5), condition: '<' }, () => {
     If(rem.greaterThan(uint(0)).and(y.greaterThanEqual(int(1))), () => {
       const idx = tVoxIdx(x, y, z).toVar();
       const v = vox.element(idx).toVar();
@@ -121,7 +123,7 @@ export function removeTop(vox: Vox, x: I, z: I, topY: I, n: U): U {
   return n.sub(rem);
 }
 
-/** Add n (≤ 255) fill units: top up a partial crust top voxel, rest as a new SEDIMENT voxel above. Returns units added. */
+/** Add n (≤ 1020) fill units: top up a partial crust top voxel, rest as new SEDIMENT voxels above. Returns units added. */
 function addTop(vox: Vox, x: I, z: I, topY: I, topV: U, n: U): U {
   const rem = n.toVar();
   If(rem.greaterThan(uint(0)).and(topY.greaterThanEqual(int(0))), () => {
@@ -133,11 +135,14 @@ function addTop(vox: Vox, x: I, z: I, topY: I, topV: U, n: U): U {
       rem.subAssign(t);
     });
   });
-  If(rem.greaterThan(uint(0)).and(topY.add(int(1)).lessThan(int(NY))), () => {
-    vox.element(tVoxIdx(x, topY.add(int(1)), z)).assign(
-      tPack(uint(Mat.SEDIMENT), rem, uint(0), tFlags(topV).bitAnd(uint(FLAG_CONTINENTAL))));
-    rem.assign(uint(0));
-  });
+  for (let k = 1; k <= 4; k++) {
+    If(rem.greaterThan(uint(0)).and(topY.add(int(k)).lessThan(int(NY))), () => {
+      const t = uMin(rem, uint(255)).toVar();
+      vox.element(tVoxIdx(x, topY.add(int(k)), z)).assign(
+        tPack(uint(Mat.SEDIMENT), t, uint(0), tFlags(topV).bitAnd(uint(FLAG_CONTINENTAL))));
+      rem.subAssign(t);
+    });
+  }
   return n.sub(rem);
 }
 
@@ -239,7 +244,7 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const nbs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     const ex = nbs.map(([dx, dz]) => {
       const hn = surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))));
-      return select(hn.lessThan(NY - 1.01), max(h.sub(hn).sub(tal), 0), float(0)).toVar();
+      return select(hn.lessThan(NY - 5.01), max(h.sub(hn).sub(tal), 0), float(0)).toVar(); // room for 4 new voxels
     });
     const exSum = ex[0]!.add(ex[1]!).add(ex[2]!).add(ex[3]!).toVar();
     const exMax = max(max(ex[0]!, ex[1]!), max(ex[2]!, ex[3]!));
@@ -248,19 +253,17 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const q = ex.map((e, k) => quantize(select(exSum.greaterThan(0), total.mul(e).div(max(exSum, 1e-9)), float(0)),
       tDither(i.mul(uint(4)).add(uint(k)), tick, 2), D.thermalMaxDir).toVar());
     const qSum = q[0]!.add(q[1]!).add(q[2]!).add(q[3]!).toVar();
-    // availability, same rules as removeTop: top crust voxel + the one below (both y ≥ 1)
+    // availability, same rules as removeTop: the contiguous top crust voxels (up to 4), all y ≥ 1
     const topY = int(ceil(h)).sub(int(1)).toVar();
     const avail = uint(0).toVar();
-    If(topY.greaterThanEqual(int(1)), () => {
-      const v0 = vox.element(tVoxIdx(x, topY, z)).toVar();
-      If(isCrust(tMat(v0)), () => {
-        avail.assign(tFill(v0));
-        If(topY.greaterThanEqual(int(2)), () => {
-          const v1 = vox.element(tVoxIdx(x, topY.sub(int(1)), z)).toVar();
-          If(isCrust(tMat(v1)), () => { avail.addAssign(tFill(v1)); });
-        });
-      });
-    });
+    const ok = uint(1).toVar();
+    for (let k = 0; k < 4; k++) {
+      const y = topY.sub(int(k));
+      If(ok.equal(uint(1)).and(y.greaterThanEqual(int(1))), () => {
+        const v = vox.element(tVoxIdx(x, y, z)).toVar();
+        If(isCrust(tMat(v)), () => { avail.addAssign(tFill(v)); }).Else(() => { ok.assign(0); });
+      }).Else(() => { ok.assign(0); });
+    }
     If(qSum.greaterThan(avail), () => {
       for (const qk of q) qk.assign(qk.mul(avail).div(uMax(qSum, uint(1))));
     });

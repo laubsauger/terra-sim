@@ -463,7 +463,8 @@ export class MagmaPass {
         atomicAdd(mctr.element(MCTR.ARCW), int(round(wgt.mul(ARC_W_SCALE))));
         arcU.assign(wgt.mul(float(atomicLoad(mctr.element(MCTR.ARCK)))).mul(volc.div(ARC_K_SCALE)));
       });
-      const melt = hotU.add(arcU).toVar();
+      const fert = clamp(float(atomicLoad(mctr.element(MCTR.RES_SNAP))).div(M.resRef), M.fertMin, M.fertMax);
+      const melt = hotU.add(arcU).mul(fert).toVar();
 
       // melt generation: reservoir → pending (gated on a deterministic reservoir snapshot)
       If(atomicLoad(mctr.element(MCTR.RES_SNAP)).greaterThan(int(M.reservoirMin)), () => {
@@ -557,6 +558,31 @@ export class MagmaPass {
           chBot.assign(select(n.greaterThan(int(0)), chBot.add(int(1)), int(-1)));
         });
 
+        // a chamber roof within depthMin of the surface (erosion / talus stripped its lid) freezes to a pluton, an
+        // empty roof cavity at the very top opens to air. Magma cannot slump, so exposed chambers used to pin
+        // mountain fronts as 50-layer walls. Exact: magma → crust of the same fill, cavity (fill 0) → air.
+        If(chTop.greaterThanEqual(int(0)).and(chTop.greaterThan(top.sub(int(M.depthMin)))), () => {
+          const idx = tVoxIdx(x, chTop, z).toVar();
+          const v = vox.element(idx).toVar();
+          const fel = tAge(v).greaterThanEqual(uint(M.silAndesite));
+          const gone = tFill(v).greaterThan(uint(0)).or(chTop.equal(top)).toVar(); // a buried empty cavity waits for collapse
+          If(tFill(v).greaterThan(uint(0)), () => {
+            vox.element(idx).assign(tPack(select(fel, uint(Mat.GRANITE), uint(Mat.GABBRO)), tFill(v), uint(0), select(fel, uint(FLAG_CONTINENTAL), uint(0))));
+            ch.subAssign(tFill(v));
+            atomicAdd(mctr.element(MCTR.FROZEN), int(tFill(v)));
+          }).ElseIf(chTop.equal(top), () => {
+            vox.element(idx).assign(uint(0));
+            top.subAssign(1);
+          });
+          If(gone, () => {
+            n.subAssign(1);
+            If(topFull.equal(chTop), () => { topFull.assign(-1); });
+            If(lowRoom.equal(chTop), () => { lowRoom.assign(-1); });
+            chTop.assign(select(n.greaterThan(int(0)), chTop.sub(int(1)), int(-1)));
+            If(n.equal(int(0)), () => { chBot.assign(-1); });
+          });
+        });
+
         // chamber growth: refill a cavity / partial voxel first, else insert a new MAGMA voxel (column inflates)
         If(seg.and(lowRoom.greaterThanEqual(int(0))), () => {
           const idx = tVoxIdx(x, lowRoom, z).toVar();
@@ -569,7 +595,8 @@ export class MagmaPass {
         }).ElseIf(seg.and(n.lessThan(int(M.chamberMax))).and(top.greaterThanEqual(int(0))).and(top.lessThanEqual(int(NY - 3))), () => {
           const depth = iMin(iMax(top.sub(base).div(int(3)), int(M.depthMin)), int(M.depthMax));
           const ins = select(n.greaterThan(int(0)), chTop.add(int(1)), top.sub(depth)).toVar();
-          If(ins.greaterThan(base).and(ins.lessThanEqual(top.add(int(1)))), () => {
+          // the roof stays ≥ depthMin below the surface: a chamber that reached it is full (like chamberMax)
+          If(ins.greaterThan(base).and(ins.lessThanEqual(top.sub(int(M.depthMin)))), () => {
             Loop({ start: top, end: ins, condition: '>=' }, ({ i: y }) => {
               vox.element(tVoxIdx(x, y.add(int(1)), z)).assign(vox.element(tVoxIdx(x, y, z)));
             });

@@ -97,6 +97,8 @@ V28: thermal talus ≥ 2.5 layers/cell subaerial, ×2 submarine; stretched margi
 V29: reservoir debt ⊥ grows unbounded: accretion takes only slab excess over ridge mass; collided crust stacking fades to 0 over 1 layer/col of debt (window snapshot, deterministic).
 V30: ∀ column surfY ≥ deepest initial crust base & y=0 always PERIDOTITE (no holes through the world).
 V31: every GPU test fails on WGSL / pipeline validation errors: a kernel that does not compile must never pass as a sim that merely does less.
+V33: talus throughput ≥ 1 layer / direction / erosion step: walls at convergent fronts slump faster than the front rebuilds them; chamber roofs stay ≥ depthMin below the surface.
+V34: every trench accretes slab excess (continental AND oceanic winners); arc + hotspot melt scale with reservoir fertility (clamp(res / 1 layer·col, 0.25, 4)) — mass-coupled rate, no target value.
 V32: displayed plate motion moves every frame at ≈ plate speed; sim steps (every TEC_EVERY ticks, bursts at stats-window stalls) glide over the measured step interval.
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
@@ -174,5 +176,7 @@ B16|2026-09-26|collision lock averaged colliding plates' velocity vectors + merg
 B17|2026-09-26|orogeny raised surface by half the stacked layers in one run → mountains popped up instantly|V24
 B18|2026-09-27|diverging continental plates opened one-cell ocean ridge slits inside continents → vertical flicker streaks on cut faces; rift fill (RIFT_THIN × neighbours, ≥ RIFT_MIN_THICK, ≤ RIFT_MAX_THICK, reservoir-gated) stretches crust instead|V29
 B19|2026-09-27|TSL dropped a float cast inside uMax/select (f32 / u32) → tectonics voxel kernel invalid WGSL, never ran; plates, crust and land decayed (cont 0.39 → 0 in 50 My), all tests green|V31
+B21|2026-09-27|talus capped at 63 fill units (0.25 layer) per direction per step + magma chambers growing to the surface (magma cannot slump) → 50-layer walls along every convergent front|V33
+B22|2026-09-27|faster slumping fed trench slabs; ocean-ocean trenches accreted nothing and arc return counted nominal slabs → reservoir 1 → 7 layers/col, land 27 → 13 %|V34
 B20|2026-09-27|plate display offset followed sim steps instantly; at normal speed a 0.1-0.3 cell step every few frames read as jerking plates|V32
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26
