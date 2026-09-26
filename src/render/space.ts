@@ -257,7 +257,7 @@ function display(fields: GpuFields): Display {
     bioV.element(i).assign(ease(sBioV.element(i) as unknown as V4, vec4(bioN.veg(bId), f.y)));
   })().compute(NCOL);
 
-  // (2e) terrain albedo inputs: colour of the top voxel's material, and of the bedrock under loose
+  // (2e) terrain albedo inputs: colour of the top voxel's material (w: see kVent), and of the bedrock under loose
   // sediment (steep faces) with its roughness. Erosion, deposition and lava freezing change the top
   // material within a tick; eased like the rest, the terrain shade blends over DISPLAY_TAU, never flips.
   const top = mk('dispTop'), bed = mk('dispBed'), sTop = mk('dispTopPrev'), sBed = mk('dispBedPrev');
@@ -307,6 +307,16 @@ function display(fields: GpuFields): Display {
     }
     volc.element(i).assign(ease(sVolc.element(i) as unknown as V4, vec4(act0, mem, core, halo)));
   })().compute(NCOL);
+  // top.w = largest eased vent activity over the column's 3×3: lets the terrain skip its lava-lake search
+  // (packed into a free channel: the terrain fragment is at the storage-buffer binding limit)
+  const kVent = Fn(() => {
+    guard();
+    const { x, z } = tColXZ(i);
+    const m = float(0).toVar();
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) m.assign(max(m, (volc.element(tColIdx(x.add(dx), z.add(dz))) as unknown as V4).x));
+    const t4 = (top.element(i) as unknown as V4).toVar();
+    top.element(i).assign(vec4(t4.xyz, m));
+  })().compute(NCOL);
   const remapVolc = Fn(() => {
     guard();
     const { srcI } = source();
@@ -347,7 +357,7 @@ function display(fields: GpuFields): Display {
     travel: new Float64Array(MAX_PLATES_R * 2), travelEased: new Float64Array(MAX_PLATES_R * 2),
     travelPrev: new Float64Array(MAX_PLATES_R * 2), travelFrom: new Float64Array(MAX_PLATES_R * 2), clock: 0, lastStep: 0, stepGap: 1 / 60,
     kernels: [remap(cols, heat, sCols, sHeat), remap(bioG, bioV, sBioG, sBioV), remap(top, bed, sTop, sBed), remapVolc, remapMot,
-      kCols, kHeat, kBio, kTop, kVolc, kMotion],
+      kCols, kHeat, kBio, kTop, kVolc, kVent, kMotion],
     src: null, lastRun: -1, snap: true, initialised: false,
   };
   displays.set(fields, d);
@@ -474,6 +484,25 @@ export function seamGlow(seam: THREE.Node<'vec2'>, pulse: F): THREE.Node<'vec2'>
   return vec2(core.mul(pulse), seam.y.mul(0.05).mul(pulse.mul(0.5).add(0.5))) as unknown as THREE.Node<'vec2'>;
 }
 
+/**
+ * Several display reads at one rendered point with a single advection lookup: a fragment that reads the
+ * columns, heat, volcano and biome displays at the same spot would otherwise redo the same four motion
+ * loads (and the corner loads) for each. Values match the individual samplers exactly.
+ */
+export function displayAt(fields: GpuFields, u: F, v: F) {
+  const d = display(fields);
+  const [au, av] = advect(fields)(u, v);
+  const a = vec2(au, av).toVar();
+  const su = a.x as F, sv = a.y as F;
+  return {
+    su, sv,
+    corners: () => columnSampler(fields).corners(su, sv, true),
+    heat: () => bilinear(d.heat, su, sv),
+    volc: () => bilinear(d.volc, su, sv),
+    bio: () => ({ ground: bilinear(d.bioG, su, sv), veg: bilinear(d.bioV, su, sv) }),
+  };
+}
+
 /** Bilinear read of the heat display (age, lava layers, lava °C, snow) at a rendered cell coordinate. */
 export function heatSampler(fields: GpuFields) {
   const { heat } = display(fields);
@@ -506,8 +535,9 @@ export function columnSampler(fields: GpuFields) {
   const at = (x: I, z: I) => cols.element(tColIdx(x, z)) as unknown as V4;
   const shiftAt = (x: I, z: I) => (motion.element(tColIdx(x, z)) as unknown as V4).z;
 
-  function corners(uR: F, vR: F): Corner[] {
-    const [u, v] = adv(uR, vR);
+  /** Corner columns at a rendered cell coordinate; `advected`: (uR, vR) is already advected (displayAt). */
+  function corners(uR: F, vR: F, advected = false): Corner[] {
+    const [u, v] = advected ? [uR, vR] : adv(uR, vR);
     const u0 = floor(u).toVar(), v0 = floor(v).toVar();
     const fu = fract(u).toVar(), fv = fract(v).toVar();
     const xi = int(u0).toVar(), zi = int(v0).toVar();

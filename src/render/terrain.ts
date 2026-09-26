@@ -7,14 +7,14 @@
 // shadow pass too).
 import * as THREE from 'three/webgpu';
 import {
-  Fn, vec2, vec3, vec4, float, uniform, varying, positionGeometry, positionWorld, transformNormalToView,
+  Fn, If, vec2, vec3, vec4, float, uniform, varying, positionGeometry, positionWorld, transformNormalToView,
   mix, smoothstep, saturate, normalize, exp, texture, max, min, dot, hash, floor, reflect,
   color, step, cos, int, fract, sin, abs, cameraPosition, length,
 } from 'three/tsl';
 import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL } from '../sim/layout';
 import { tMat, tColIdx } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
-import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, seamGlow, volcanoSampler, advect, displayBuffers } from './space';
+import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, seamGlow, volcanoSampler, displayBuffers, displayAt } from './space';
 import { createBiomeNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
 import { skyU } from './sky';
@@ -166,9 +166,12 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
 
   // Biome display colours (eased in time, advected with the plates; colours blend, ids never do).
   // bioCover = (ground covered by its vegetation) rgb, w = veg; bioFlags = (arid, forest, -, has biome data).
-  const bioS = biomeSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
+  // One advection lookup and one set of corner columns for every display read at this fragment.
+  const at = displayAt(fields, tWorldToCell(p.x), tWorldToCell(p.z));
+  const C = at.corners();
+  const bioS = at.bio();
   const vegAmt = Fn(() => {
-    const c = S.corners(tWorldToCell(p.x), tWorldToCell(p.z));
+    const c = C;
     return c.slice(1).reduce((a, k) => a.add(k.veg.mul(k.w)), c[0]!.veg.mul(c[0]!.w) as F);
   }).once()().toVar('terrVeg');
   const hasVeg = step(0, vegAmt);
@@ -179,9 +182,9 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   const arid = bioFlags.x.mul(bioFlags.w), hasBio = bioFlags.w;
 
   // Volcano display: x vent activity, y lava channel memory (both eased, advected).
-  const volcS = volcanoSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z)).toVar('terrVolc');
+  const volcS = at.volc().toVar('terrVolc');
   // Heat summary (renderHeat): x crust age My, y lava layers, z lava °C, w sim 'ice' cover.
-  const heat = heatSampler(fields)(tWorldToCell(p.x), tWorldToCell(p.z)).toVar('terrHeat');
+  const heat = at.heat().toVar('terrHeat');
   const lavaMask = smoothstep(0.02, 0.35, heat.y).toVar('terrLava');
 
   // Surface class masks, shared by colour, roughness, normal and emissive:
@@ -202,7 +205,7 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const procForest = clumps.mul(float(1).sub(saturate(alt.sub(4).div(14)))).mul(smoothstep(1.2, 3.0, alt));
     const bioForest = bioFlags.y.mul(smoothstep(0.3, 0.7, bioCover.w)).mul(smoothstep(-0.2, 0.3, nMid.mul(0.7).add(nLo.mul(0.4)).add(0.2)));
     const forestAmt = mix(procForest, bioForest, hasBio).mul(float(1).sub(rockAmt));
-    const wl = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z)));
+    const wl = S.level(C);
     // Underwater only where the corners are (nearly) all wet: near the coast the smoothed land can
     // dip under the neighbours' water level without a real water sheet over it.
     const depth = wl.level.sub(h).mul(smoothstep(0.5, 0.95, wl.wet));
@@ -213,7 +216,7 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
 
   // out = (rgb albedo, roughness)
   const out0 = Fn(() => {
-    const c = S.corners(tWorldToCell(p.x), tWorldToCell(p.z));
+    const c = C;
     // Top voxel material of each corner column, bilinear. Steep faces show bedrock: loose SEDIMENT
     // does not hold on cliffs, so they use the voxel 2 below. Bedrock only *tints* humid rock
     // (strata colours belong on the cut faces, not as zebra stripes on mountains).
@@ -255,11 +258,16 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     // ochre, cream bands), each layer with a lit top ledge and a shadowed lip.
     // Layer colour blended over the four corner columns at this height (no brick seams between cells).
     const vyF = tVoxelY(p.y).sub(0.3);
-    let strataCol = vec3(0) as V3;
-    for (const k of c) {
-      const cy = int(min(floor(vyF), float(tTopVoxel(k.raw))));
-      strataCol = strataCol.add(bio.strata(tMat(vox(k.x, cy, k.z))).mul(k.w));
-    }
+    // Only arid ground shows it (canyon weight = arid): skip the four voxel reads everywhere else.
+    const strataCol = vec3(0).toVar();
+    If(arid.greaterThan(0.001), () => {
+      let acc = vec3(0) as V3;
+      for (const k of c) {
+        const cy = int(min(floor(vyF), float(tTopVoxel(k.raw))));
+        acc = acc.add(bio.strata(tMat(vox(k.x, cy, k.z))).mul(k.w));
+      }
+      strataCol.assign(acc);
+    });
     const ledge = mix(0.74, 1.08, smoothstep(0.05, 0.35, fract(vyF))).mul(mix(1.0, 0.86, smoothstep(0.85, 1.0, fract(vyF))));
     const canyon = strataCol.mul(ledge).mul(dFine.b.sub(0.5).mul(0.14).add(1));
     const cliff = mix(rockCol, canyon, arid);
@@ -308,21 +316,26 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   // the fragment, radius growing with the eased activity (BUILD / WANING: smaller, dimmer; ACTIVE: ~2 cells
   // across), its edge wobbling with a little noise. Dry vents only.
   // lake = (pool, lip ring around it, core 1 at the vent → 0 at the rim, activity of that vent)
-  const lakeN = texture(tex.detail, p.xz.mul(9.0)).r.sub(0.5);
+  const lakeN = texture(tex.detail, p.xz.mul(9.0)).r.sub(0.5).toVar('terrLakeN'); // var: also read inside the lake search branch
   const dryK = float(1).sub(step(0, uwDepth));
   const lake = Fn(() => {
-    const [su, sv] = advect(fields)(tWorldToCell(p.x), tWorldToCell(p.z));
+    const su = at.su, sv = at.sv;
     const u0 = floor(su.add(0.5)), v0 = floor(sv.add(0.5)); // nearest column; a pool (≤ 1.5 cells with its lip) stays within ±1
     const pool = float(0).toVar(), lip = float(0).toVar(), core = float(0).toVar(), actM = float(0).toVar();
-    for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]] as const) {
-      const a = (displayBuffers(fields).volc.element(tColIdx(int(u0).add(dx), int(v0).add(dz))) as unknown as THREE.Node<'vec4'>).x;
-      const d = length(vec2(su.sub(u0.add(dx)), sv.sub(v0.add(dz))));
-      const R = mix(0.3, 0.9, smoothstep(0.15, 0.9, a)).add(lakeN.mul(0.2)).mul(step(0.12, a));
-      pool.assign(max(pool, smoothstep(R, R.sub(0.2), d)));
-      lip.assign(max(lip, smoothstep(R.add(0.5), R, d).mul(smoothstep(0.05, 0.3, a))));
-      core.assign(max(core, float(1).sub(d.div(max(R, 0.05))).mul(step(d, R))));
-      actM.assign(max(actM, a.mul(step(d, R.add(0.5)))));
-    }
+    // the pool and its lip need activity ≥ 0.05 somewhere in this 3×3: elsewhere (nearly everywhere)
+    // skip the nine reads (same result: all terms are 0 there)
+    const near = (displayBuffers(fields).top.element(tColIdx(int(u0), int(v0))) as unknown as THREE.Node<'vec4'>).w; // 3×3 vent max
+    If(near.greaterThan(0.04), () => {
+      for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1]] as const) {
+        const a = (displayBuffers(fields).volc.element(tColIdx(int(u0).add(dx), int(v0).add(dz))) as unknown as THREE.Node<'vec4'>).x;
+        const d = length(vec2(su.sub(u0.add(dx)), sv.sub(v0.add(dz))));
+        const R = mix(0.3, 0.9, smoothstep(0.15, 0.9, a)).add(lakeN.mul(0.2)).mul(step(0.12, a));
+        pool.assign(max(pool, smoothstep(R, R.sub(0.2), d)));
+        lip.assign(max(lip, smoothstep(R.add(0.5), R, d).mul(smoothstep(0.05, 0.3, a))));
+        core.assign(max(core, float(1).sub(d.div(max(R, 0.05))).mul(step(d, R))));
+        actM.assign(max(actM, a.mul(step(d, R.add(0.5)))));
+      }
+    });
     return vec4(pool, lip.mul(float(1).sub(pool)), saturate(core), actM).mul(dryK);
   }).once()().toVar('terrLakeInfo');
   const lakeK = lake.x, lipK = lake.y;
@@ -373,7 +386,7 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const rg = seamGlow(volcS.zw, pulse.mul(crack.mul(0.4).add(0.6))); // fissures break up the land core
     // Subaerial (rift) glow only on truly dry ground: the bilinear age also sees young seafloor
     // next to a coast, which must not light the beach.
-    const wet = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z))).wet;
+    const wet = S.level(C).wet;
     const subaerial = float(1).sub(step(0, uwDepth)).mul(float(1).sub(smoothstep(0.0, 0.15, wet)));
     const submerged = step(0, uwDepth);
     // magma-orange core → dim halo of the same hue; peaks stay near the bloom threshold, so the crack
