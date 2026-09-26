@@ -57,6 +57,10 @@ async function main() {
   }
   const quality = q.get('quality') !== 'low';
   const atmo = createAtmosphere(fields, renderer, scene, camera, { highQuality: quality, lightning: q.get('lightning') !== '0' });
+  { // record the volume plumes the atmosphere hands to the clouds (tests: world-fixed plumes)
+    const set = atmo.clouds.setPlumes.bind(atmo.clouds);
+    atmo.clouds.setPlumes = (l) => { (window as unknown as { __volPlumes?: unknown[] }).__volPlumes = l.map((p) => ({ ...p })); set(l); };
+  }
   for (const name of (q.get('hide') ?? '').split(',').filter(Boolean)) { const o = atmo.object.getObjectByName(name); if (o) o.visible = false; }
 
   // Integration demo (what render/ would do): terrain + water receive the cloud shadow on the sun term.
@@ -237,6 +241,8 @@ async function main() {
      * (max(|x|, |y|) ≥ 0.92) and at the centre region, for the puff (worst-case noise 1, strongest erosion
      * setting 0.75) and the ejecta streak.
      */
+    /** Volume plumes as last handed to the cloud volume (x, y, z vent origin, strength s, …). */
+    volumePlumes: () => (window as unknown as { __volPlumes?: unknown[] }).__volPlumes ?? [],
     spriteEdges: async () => {
       const N = 64;
       const out = instancedArray(N * N, 'vec2');

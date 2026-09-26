@@ -190,6 +190,8 @@ export const ATMO = {
   IMPACT_HAZE_S: 5, IMPACT_HAZE_MAG: 0.35,
   /** Fade rate (1/s) of a volume plume whose vent no longer erupts (no column under it any more). */
   PLUME_ORPHAN_DECAY: 0.6,
+  /** A volume plume stays world-fixed; once its vent has moved this far (world, ~4 cells) a new one takes over at the vent. */
+  PLUME_HANDOVER: 0.06,
   /** Volcanic lightning inside big ash columns: flashes/s at a full-heat vent at night (day × 0.15). */
   VOLC_FLASH_RATE: 0.4,
   BURSTS_MAX: 12,

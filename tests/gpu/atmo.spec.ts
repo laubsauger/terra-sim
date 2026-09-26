@@ -485,6 +485,38 @@ test('an impact leaves only a brief, faint haze (the ground scorch is what stays
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('a volume plume stays where it is in the air while its vent moves on with the plate', async ({ page }) => {
+  // user: 'plumes do not get rewritten … don't jank the whole cloud over with the plate movement'
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  const x0 = 180, z = 60;
+  await page.evaluate((v) => (window as any).at.paint({ lava: v }), { x: x0, z });
+  await page.evaluate(() => (window as any).at.frames(150, 1 / 30)); // a plume builds over the vent
+  // the vent drifts one column per second (fast plate motion at a high sim speed), 14 columns
+  const seen = new Map<string, { x: number; z: number; first: number[] }>();
+  let moved = 0, strongAtVent = 0;
+  for (let i = 1; i <= 14; i++) {
+    await page.evaluate((v) => (window as any).at.paint({ lava: v }), { x: x0 + i, z });
+    await page.evaluate(() => (window as any).at.frames(30, 1 / 30));
+    const pl: any[] = await page.evaluate(() => (window as any).at.volumePlumes());
+    const [vx, vz] = await page.evaluate(([x, zz]) => (window as any).at.colWorld(x, zz), [x0 + i, z]);
+    for (const q of pl) {
+      // a plume is identified by its origin: an origin that changes while it lives would be a sliding plume
+      const near = [...seen.values()].find((s) => Math.hypot(s.x - q.x, s.z - q.z) < 0.02);
+      if (near) moved = Math.max(moved, Math.hypot(near.x - q.x, near.z - q.z));
+      else seen.set(`${q.x},${q.z}`, { x: q.x, z: q.z, first: [q.x, q.z] });
+    }
+    const best = pl.reduce((b: any, q: any) => (q.s > (b?.s ?? 0) ? q : b), null);
+    if (i >= 10 && best && Math.hypot(best.x - vx, best.z - vz) < 0.08) strongAtVent++;
+  }
+  console.log(`volume plumes over 14 s of vent drift: ${seen.size} origins, largest origin shift of a living plume ${moved.toFixed(4)}; strongest plume at the vent in ${strongAtVent}/5 late samples`);
+  expect(moved, 'a plume never slides with the plate').toBeLessThan(1e-6);
+  expect(seen.size, 'new emission starts at the moved vent').toBeGreaterThan(1);
+  expect(strongAtVent, 'and the strongest plume is the one over the vent now').toBeGreaterThanOrEqual(4);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');

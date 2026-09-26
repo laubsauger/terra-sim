@@ -30,6 +30,12 @@ export const QUAKE = {
   COL: { mu: 0.35, sigma: 0.42, max: 8.3 },
 } as const;
 
+/**
+ * Impact scorch (real s): the incandescent floor cools within ~5 s; the charred crater, the sooty ejecta
+ * blanket and (big strikes) dark ejecta rays hold, then fade out gradually by SCORCH_S.
+ */
+export const SCORCH_S = 50;
+
 export const RING = {
   /** Shock ring speed over the ground (cells/s). */
   SPEED: 42,

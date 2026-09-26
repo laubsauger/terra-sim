@@ -15,7 +15,7 @@
 //  - idle FX cost nothing (hidden, no dispatches).
 import { test, expect, type Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { QuakeScheduler, QUAKE, TSUNAMI, activity, type QuakeSites, type QuakePick } from '../../src/fx/fxModel';
+import { QuakeScheduler, QUAKE, TSUNAMI, SCORCH_S, activity, type QuakeSites, type QuakePick } from '../../src/fx/fxModel';
 
 const OUT = process.env.FX_SHOTS ?? 'test-results/fx';
 test.use({ viewport: { width: 1280, height: 800 } });
@@ -249,6 +249,10 @@ test('meteor strike: streak, impact on schedule with one sim event, ejecta downr
   await f.frames(250);
   const late = await parts();
   expect([late.byKind[1], late.byKind[3], late.byKind[4], late.byKind[5]], 'impact dust fades within a few seconds').toEqual([0, 0, 0, 0]);
+  // … while the charred crater and ejecta blanket stay on the ground for most of a minute (~30 s now)
+  await f.frames(Math.round(23 / 0.25), 0.25);
+  const ground = (await page.evaluate(() => (window as any).fxp.visible())).find(([n]: [string]) => n === 'quakeGround');
+  expect(ground?.[1], 'the scorch still shows ~30 s after the impact').toBe(true);
   // a meteor the sim applied on its own: a short streak that lands right away
   await page.evaluate(([x, z]) => (window as any).fxp.godMeteor(x, z, 1.1), [ocean.x, ocean.z]);
   await f.frames(3);
@@ -259,7 +263,7 @@ test('meteor strike: streak, impact on schedule with one sim event, ejecta downr
   expect(qs[1].tsunami, 'ocean impact raises a tsunami').toBe(true);
   expect(await page.evaluate(() => (window as any).fxp.tsunamiActive())).toBe(true);
   // the whole show winds down: nothing drawn, nothing dispatched
-  await f.frames(150, 0.25);
+  await f.frames(Math.ceil((SCORCH_S + 4) / 0.25), 0.25); // the impact scorch is the last to go
   const vis = await page.evaluate(() => (window as any).fxp.visible());
   expect(vis.every(([, v]: [string, boolean]) => !v), JSON.stringify(vis)).toBe(true);
   const mv = await page.evaluate(() => (window as any).fxp.meteorVisible());
@@ -326,7 +330,7 @@ test('perf: active FX cost and idle FX hidden with no dispatches; hero-view mete
   console.log(`fx active @1280×800 on ${gpu}: ${Object.entries(amp).map(([k, v]) => `${k} ${v.perCopy.toFixed(3)}`).join(', ')}, tsunami sweeps ${sweeps.toFixed(3)} → ≈ ${total.toFixed(2)} ms`);
   expect(total, 'active budget (≤ 0.7 ms target; loose bound for a shared, noisy GPU)').toBeLessThan(1.5);
   // idle: once everything has played out, nothing is drawn or dispatched
-  await f.frames(160, 0.25);
+  await f.frames(Math.ceil((SCORCH_S + 6) / 0.25), 0.25); // (the impact scorch stays longest)
   const vis = await page.evaluate(() => (window as any).fxp.visible());
   expect(vis.every(([, v]: [string, boolean]) => !v), `hidden when idle: ${JSON.stringify(vis)}`).toBe(true);
   expect((await f.stats()).active).toBe(false);

@@ -6,7 +6,7 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, If, Return, float, int, uint, vec2, vec3, vec4, uniform, uniformArray, instanceIndex, instancedArray, hash,
-  sin, cos, exp, mix, smoothstep, saturate, max, min, floor, abs, length, normalize, dot, sqrt, step, pow, uv, varying, texture,
+  sin, cos, exp, mix, atan, smoothstep, saturate, max, min, floor, abs, length, normalize, dot, sqrt, step, pow, uv, varying, texture,
   positionGeometry, positionWorld, screenUV, viewportSharedTexture, cameraViewMatrix, transformNormalToView,
 } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
@@ -17,13 +17,12 @@ import { createColumnGrid } from '../render/terrain';
 import { skyU } from '../render/sky';
 import { sceneViewZ } from '../render/shared';
 import { lookTextures } from '../render/textures';
-import { RING, DUST, ringRadius, ringWidth } from './fxModel';
+import { RING, DUST, SCORCH_S, ringRadius, ringWidth } from './fxModel';
 import { tTorusD, fxMRT, type F, type V3 } from './fxTsl';
 
 type V4 = THREE.Node<'vec4'>;
 const TAU = Math.PI * 2;
-/** Seconds the impact scorch takes to fade. */
-const SCORCH_S = 10;
+export { SCORCH_S } from './fxModel';
 /** Concurrent quakes drawn by the ground overlay. */
 export const QUAKE_SLOTS = 2;
 
@@ -113,16 +112,28 @@ export function createQuakeFx(fields: GpuFields, renderer: THREE.WebGPURenderer,
     // lit dust haze on the crest (additive, so the band reads on shadowed ground too), dark dip behind it
     const haze = vec3(0.62, 0.52, 0.4).mul(skyU.sunIntensity.mul(0.05).add(0.03)).mul(bright);
     const col = dusty.mul(bright.mul(1.4).add(1)).add(haze).mul(float(1).sub(tint.mul(0.42))).mul(float(1).sub(max(crest.negate(), 0).mul(0.6)));
-    // impact scorch: incandescent crater floor cooling to a dark scar, soot + settled dust around it
+    // impact scorch: incandescent crater floor cooling to a dark scar within ~5 s; a charred crater and rim,
+    // a sooty ejecta blanket out to ~2.8 radii and, for big strikes, dark ejecta rays out to ~5 radii. They
+    // hold for a while, then fade out gradually by SCORCH_S.
     const sa = scorchU.w, on = step(0, sa);
-    const sd = length(vec2(tTorusD(u, scorchU.x), tTorusD(v, scorchU.y))).div(scorchU.z);
+    const du = tTorusD(u, scorchU.x), dv = tTorusD(v, scorchU.y);
+    const sd = length(vec2(du, dv)).div(scorchU.z);
     const nz = texture(lookTextures().detail, positionWorld.xz.mul(7)).r;
-    const hot = smoothstep(1.05, 0.2, sd.add(nz.mul(0.35))).mul(exp(sa.div(-2.2))).mul(on);
-    const soot = smoothstep(2.6, 0.6, sd.add(nz.mul(0.6))).mul(exp(sa.div(-SCORCH_S * 0.45))).mul(smoothstep(0, 0.4, sa)).mul(on);
+    const nz2 = texture(lookTextures().detail, positionWorld.xz.mul(2.3)).g;
+    const hot = smoothstep(1.05, 0.2, sd.add(nz.mul(0.35))).mul(exp(sa.div(-1.7))).mul(on);
+    const hold = smoothstep(SCORCH_S, SCORCH_S * 0.25, sa).mul(smoothstep(0, 0.4, sa)).mul(on);
+    const crater = smoothstep(2.0, 1.15, sd.add(nz.sub(0.5).mul(0.3))); // floor, walls and the raised rim
+    const blanket = smoothstep(3.0, 1.3, sd.add(nz2.sub(0.5).mul(0.9)).add(nz.sub(0.5).mul(0.3))).mul(nz2.mul(0.45).add(0.55));
+    const ang = atan(dv, du);
+    const rayA = sin(ang.mul(7).add(nz2.mul(1.5))).mul(sin(ang.mul(11).add(1.3))).mul(0.5).add(0.5);
+    const rays = pow(rayA, 5).mul(smoothstep(5, 1.5, sd.add(nz2.sub(0.5)))).mul(smoothstep(1, 1.6, sd))
+      .mul(smoothstep(5, 9, scorchU.z)); // rays only for big craters (radius ≳ 5–9 cells)
+    const char = max(max(crater.mul(0.85), blanket.mul(0.72)), rays.mul(0.6)).mul(hold);
     const glowCol = mix(vec3(1.0, 0.18, 0.03), vec3(1.0, 0.62, 0.22), hot).mul(hot.mul(hot).mul(6));
-    const scorched = col.mul(float(1).sub(soot.mul(0.55))).add(glowCol);
+    // sooty, not only darker: toward a warm black
+    const scorched = mix(col, col.mul(0.12).add(vec3(0.026, 0.022, 0.018)), char).add(glowCol);
     const dry = step(info.y, -0.02); // under water the sea draws over it anyway
-    return vec4(scorched, saturate(abs(crest).mul(3).add(tint.mul(4)).add(soot.mul(3)).add(hot.mul(4))).mul(dry));
+    return vec4(scorched, saturate(abs(crest).mul(3).add(tint.mul(4)).add(char.mul(3)).add(hot.mul(4))).mul(dry));
   })();
   gmat.colorNode = vec4(shade.rgb, 1);
   gmat.opacityNode = shade.a;
