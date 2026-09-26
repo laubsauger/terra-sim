@@ -417,6 +417,7 @@ test('plumes stay with their vent: small sources low and close, big columns atta
     if (burst) await page.evaluate((v) => (window as any).at.trigger({ kind: 'volcano', x: v.x, z: v.z, magnitude: 1.5 }), vent);
     let dist = 0, top = 0, n = 0;
     const vy0 = { y: NaN };
+    const low: number[] = [], high: number[] = [], hs: number[] = [];
     for (let i = 0; i < seconds; i++) {
       await page.evaluate(() => (window as any).at.frames(30, 1 / 30));
       const st = await page.evaluate(() => (window as any).at.particles());
@@ -424,23 +425,63 @@ test('plumes stay with their vent: small sources low and close, big columns atta
       for (const p of st.live) {
         if (p.kind > 1.5) continue; // ash and steam (the drifting plume kinds)
         n++;
-        dist = Math.max(dist, Math.hypot(p.x - vx, p.z - vz));
-        top = Math.max(top, p.y - vy0.y);
+        const d = Math.hypot(p.x - vx, p.z - vz), h = p.y - vy0.y;
+        dist = Math.max(dist, d);
+        top = Math.max(top, h);
+        hs.push(h);
+        if (h < 0.08) low.push(d * d); else if (h > 0.18) high.push(d * d);
       }
     }
-    return { dist, top, n };
+    const rms = (a: number[]) => Math.sqrt(avg(a));
+    return { dist, top, n, neck: rms(low), crown: rms(high), medH: [...hs].sort((a, b) => a - b)[hs.length >> 1] ?? 0 };
   };
   const small = await survey(false, 30); // a plain hot lava pool: degassing wisps
   const vent1 = await survey(true, 30);  // an erupting vent: ash column (the cloud volume draws it above ~0.3)
   const big = await survey(true, 30, true); // plus a strong eruption burst (god tool): the biggest column
-  const fmt = (r: typeof small) => `${r.n} samples, farthest ${r.dist.toFixed(3)}, highest ${r.top.toFixed(3)} above the vent`;
+  const fmt = (r: typeof small) => `${r.n} samples, farthest ${r.dist.toFixed(3)}, highest ${r.top.toFixed(3)}, median height ${r.medH.toFixed(3)}, rms width below 0.08 ${r.neck.toFixed(3)} / above 0.18 ${r.crown.toFixed(3)}`;
   console.log(`plume reach over 30 s: degassing pool ${fmt(small)}; erupting vent ${fmt(vent1)}; strong eruption ${fmt(big)}`);
   expect(small.n, 'the pool degasses').toBeGreaterThan(50);
   expect(small.dist, 'small plumes stay near their vent').toBeLessThan(0.35);
   expect(small.top, 'and low').toBeLessThan(0.25);
   expect(vent1.dist, 'an ordinary eruption column too').toBeLessThan(0.4);
+  // user: 'spewing the smoke too much around and not up enough': a column with a narrow neck that widens aloft
+  // (width at the vent includes the painted pool's up-to-4 scan-cell vents; puffs themselves widen with height)
+  expect(vent1.neck, 'narrow at the vent').toBeLessThan(0.035);
+  expect(vent1.medH, 'most of the ash is up in the column').toBeGreaterThan(0.1);
+  expect(small.medH, 'a degassing wisp rises instead of hugging the ground').toBeGreaterThan(0.04);
   expect(vent1.top, 'its particles hand over to the volume column instead of drifting on unseen').toBeLessThan(0.35);
   expect(big.dist, 'a big column trails further downwind but stays attached (no puffs across the block)').toBeLessThan(0.8);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
+test('no sprite shows its square: every footprint fades to 0 well inside the quad', async ({ page }) => {
+  // user: 'black semi opaque squares behind explosions' (slow, cooled bombs were drawn with a flat head edge)
+  await open(page, 'world=paint&look=0');
+  const e = await page.evaluate(() => (window as any).at.spriteEdges());
+  console.log(`sprite footprints: puff max ${e.puffMax.toFixed(2)}, on the quad border ${e.puffEdge.toFixed(4)}; streak max ${e.streakMax.toFixed(2)}, on the border ${e.streakEdge.toFixed(4)}`);
+  expect(e.puffMax, 'the puff is drawn').toBeGreaterThan(0.5);
+  expect(e.streakMax, 'the ejecta clot is drawn').toBeGreaterThan(0.5);
+  expect(e.puffEdge, 'puff: nothing near the quad edge').toBeLessThan(0.01);
+  expect(e.streakEdge, 'streak: nothing near the quad edge').toBeLessThan(0.01);
+});
+
+test('an impact leaves only a brief, faint haze (the ground scorch is what stays)', async ({ page }) => {
+  // user: 'meteorite hits leave quite the long sustained cloud… maybe that smoke is fog? it's too strong'
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  await page.evaluate(() => (window as any).at.trigger({ kind: 'meteor', x: 190, z: 20, magnitude: 1.5 }));
+  const haze = async () => (await page.evaluate(() => (window as any).at.particles())).live.filter((p: any) => Math.abs(p.kind - 3) < 0.5);
+  await page.evaluate(() => (window as any).at.frames(90, 1 / 30));
+  const mid = await haze();
+  const dens = Math.max(0, ...mid.map((p: any) => p.ceil)); // heat slot = density
+  // 13 s after the impact: the 5 s burst's last puffs live up to 6.5 s (the old haze lingered ~44 s)
+  await page.evaluate(() => (window as any).at.frames(300, 1 / 30));
+  const late = await haze();
+  console.log(`impact haze: ${mid.length} puffs at 3 s (density ${dens.toFixed(2)}), ${late.length} at 13 s`);
+  expect(mid.length, 'a little regional haze').toBeGreaterThan(5);
+  expect(dens, 'faint').toBeLessThanOrEqual(0.4);
+  expect(late.length, 'cleared within ~13 s').toBe(0);
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
@@ -680,10 +721,17 @@ test('layered wind: high cirrus drifts faster and in another direction than the 
   // an even frame count (the density volume is rebuilt on even frames in the high tier); long enough that the
   // cirrus moves well over a streak width (streaks are stretched along the wind: short shifts are ambiguous along them)
   const FR = 48, dt = FR / 30;
-  const snap = (y: number) => page.evaluate(([y, x0, z0, s, n]) => (window as any).at.densityGrid(y, n, x0, z0, s), [y, X0, Z0, SIZE, N]);
-  const a = [await snap(yCu), await snap(yCi)];
+  // cirrus only forms in its frontal bands: track it in the square of band 1 that holds the most of it
+  let XC = X0, most = -1;
+  for (let x0 = -1.8; x0 <= 1.25; x0 += 0.25) {
+    const g: number[] = await page.evaluate(([y, x0, z0, s]) => (window as any).at.densityGrid(y, 24, x0, z0, s), [yCi, x0, Z0, SIZE]);
+    let sum = 0; for (let i = 0; i < g.length; i += 4) sum += g[i]! * g[i + 3]!;
+    if (sum > most) { most = sum; XC = x0; }
+  }
+  const snap = (y: number, x0: number) => page.evaluate(([y, x0, z0, s, n]) => (window as any).at.densityGrid(y, n, x0, z0, s), [y, x0, Z0, SIZE, N]);
+  const a = [await snap(yCu, X0), await snap(yCi, XC)];
   await page.evaluate((n) => (window as any).at.frames(n, 1 / 30), FR);
-  const b = [await snap(yCu), await snap(yCi)];
+  const b = [await snap(yCu, X0), await snap(yCi, XC)];
   const shift = (A: number[], B: number[]) => {
     const R = 46; let best = -2, bx = 0, bz = 0;
     for (let sz = -R; sz <= R; sz++) for (let sx = -R; sx <= R; sx++) {
@@ -710,5 +758,45 @@ test('layered wind: high cirrus drifts faster and in another direction than the 
   expect(Math.hypot(hi.u - high[1].u, hi.v - high[1].v), 'cirrus rides the upper wind').toBeLessThan(tol + 0.15 * mag(high[1]));
   expect(mag(hi), 'high cloud is faster').toBeGreaterThan(1.5 * mag(lo));
   expect(ang(lo, hi), 'and heads another way (shear)').toBeGreaterThan(25);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
+test('high cloud stays a modest, steady share of the sky over long ambient time, even in saturated air', async ({ page }) => {
+  // user: 'the stratosphere is getting fully saturated with cloud layer after a little while'. Nothing in the cloud
+  // weather may accumulate: over 20 minutes of ambience clock the high-cloud share is bounded and shows no trend.
+  // Measured at the cirrus level (slab top - 0.1): cirrus (volume share a) and everything else there (storm tops, anvils).
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  const run = async (rh: number, precip: number) => {
+    await page.evaluate((a) => (window as any).at.paintAir(a), { rh, t: 20, precip });
+    await page.evaluate(() => (window as any).at.frames(4, 1 / 30));
+    const [, yHi]: number[] = await page.evaluate(() => (window as any).at.slab());
+    const ci: number[] = [], all: number[] = [];
+    for (let t = 0; t <= 1200; t += 40) {
+      await page.evaluate((t) => (window as any).at.setClock(t), t);
+      await page.evaluate(() => (window as any).at.frames(4, 1 / 30));
+      const g: number[] = await page.evaluate((y) => (window as any).at.densityGrid(y, 96, -1.9, -1.9, 3.8), yHi! - 0.1);
+      let c = 0, a = 0;
+      for (let i = 0; i < g.length; i += 4) { if (g[i]! * g[i + 3]! > 0.01) c++; if (g[i]! > 0.01) a++; }
+      ci.push(c / (g.length / 4)); all.push(a / (g.length / 4));
+    }
+    return { ci, all };
+  };
+  const mean = (v: number[]) => v.reduce((s, x) => s + x, 0) / v.length;
+  const third = (v: number[], k: number) => mean(v.slice(Math.floor(k * v.length / 3), Math.floor((k + 1) * v.length / 3)));
+  const report = (name: string, r: { ci: number[]; all: number[] }) => console.log(`${name}: cirrus max ${Math.max(...r.ci).toFixed(3)} mean ${mean(r.ci).toFixed(3)} (thirds ${[0, 1, 2].map((k) => third(r.ci, k).toFixed(3)).join(' ')}); all high cloud max ${Math.max(...r.all).toFixed(3)} mean ${mean(r.all).toFixed(3)} (thirds ${[0, 1, 2].map((k) => third(r.all, k).toFixed(3)).join(' ')})`);
+  const humid = await run(1.0, 1e-3), stormy = await run(1.0, 5e-3), dry = await run(0.3, 0);
+  report('saturated', humid); report('saturated + storms everywhere', stormy); report('dry', dry);
+  for (const r of [humid, stormy]) {
+    expect(Math.max(...r.ci), 'cirrus: a modest share of the sky, whatever the humidity').toBeLessThan(0.25);
+    expect(third(r.ci, 2), 'cirrus: no upward trend').toBeLessThan(third(r.ci, 0) + 0.05);
+    expect(third(r.all, 2), 'high cloud: no upward trend').toBeLessThan(third(r.all, 0) + 0.05);
+  }
+  expect(mean(humid.ci), 'saturated air does carry cirrus').toBeGreaterThan(0.01);
+  expect(Math.max(...humid.all), 'saturated air, no storms: high cloud ≤ 35 % of the sky').toBeLessThan(0.35);
+  // a sky raining storms everywhere has cumulonimbus tops up there; still no solid deck (anvils only off dense cores)
+  expect(Math.max(...stormy.all), 'storms everywhere: never a solid deck').toBeLessThan(0.65);
+  expect(mean(stormy.all), 'storms everywhere: mostly open at the top').toBeLessThan(0.45);
+  expect(Math.max(...dry.all), 'dry air: no high cloud').toBeLessThan(0.005);
   expect(problems, problems.join('\n')).toEqual([]);
 });

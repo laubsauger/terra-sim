@@ -71,7 +71,9 @@ export const ATMO = {
   /** Global coverage scale: noise survives where it exceeds 1 - blurredCover·COVERAGE (≤ ~35 % sky). */
   COVERAGE: 0.75,
   /** Extra coverage threshold under full storm precip (may exceed 1: storm cores stay filled, only rims fray). */
-  STORM_FILL: 0.35,
+  STORM_FILL: 0,
+  /** Storm-cell coverage where anvils start / are full (dense cores only). */
+  ANVIL_COV0: 0.7, ANVIL_COV1: 0.97,
   /**
    * Coverage noise evolves through the 3D noise's third axis, in cycles per ambTime period (whole numbers:
    * seamless when ambTime wraps). EVOLVE: the large-scale pattern (regional cloudiness drifts slowly; even,
@@ -128,15 +130,29 @@ export const ATMO = {
   /** World units: clouds fade to nothing within this distance of the camera. */
   NEAR_FADE0: 0.25,
   NEAR_FADE1: 1.1,
-  /** Cirrus: sparse high streaks, share of the sky and peak density. */
-  CIRRUS_COVER: 0.34,
-  CIRRUS_DENS: 0.5,
-  /** Cirrus noise tile along the upper wind (world): long streaks. */
-  CIRRUS_TILE: 4.8,
-  /** Share of the march's detail erosion cirrus gets (wispy edges, but the veil survives), and its step length (× in-cloud step). */
-  CIRRUS_ERO: 0.35,
+  /**
+   * Cirrus: thin, wispy veils near the slab top. A 2D map (weather pass) says where: humid or stormy air
+   * upwind in the upper wind (fronts, anvil outflow), gathered into drifting frontal bands; dry air
+   * has none. Inside it, long soft filaments bent by a low-frequency warp (curves, hooks) and sheared
+   * with height, stretched along and drifting with the upper wind; the march adds fine fibres.
+   * CIRRUS_COVER: gain on the map. CIRRUS_DENS: peak density (kept optically thin: alpha ~0.2-0.35).
+   */
+  CIRRUS_COVER: 1,
+  /**
+   * Frontal-band threshold on the stretched band noise (bounds the cirrus share of the sky whatever the
+   * humidity: the map is band × source, so saturated air never makes more than the bands), and the
+   * blurred sim cover (humidity) where the upper air starts / is fully able to carry cirrus.
+   */
+  CIRRUS_FRONT0: 0.38, CIRRUS_HUM0: 0.15, CIRRUS_HUM1: 0.55,
+  CIRRUS_DENS: 0.08,
+  /** Tiles along the upper wind (world): frontal bands, filaments, fibres. Each divides CIRRUS_FRONT (seamless drift wrap). */
+  CIRRUS_FRONT: 19.2, CIRRUS_TILE: 9.6, CIRRUS_FIBER: 1.6,
+  /** Tiles across the wind (world): frontal bands, filaments (~0.1 wide), fibres; filament bending amplitude (world). */
+  CIRRUS_FRONT_W: 4.8, CIRRUS_W: 0.4, CIRRUS_FIBER_W: 0.08, CIRRUS_WARP: 0.3,
+  /** sin(elevation) below which grazing rays see the veil no thicker than at this angle (stays translucent at the horizon). */
+  CIRRUS_ELEV: 0.45,
+  /** Cirrus step length (× in-cloud step) and share of the cloud shadow (a thin ice veil barely dims the sun). */
   CIRRUS_STEP: 2.5,
-  /** Cirrus share of the cloud shadow (a thin ice veil barely dims the sun). */
   CIRRUS_SHADOW: 0.15,
 
   // ---- cloud shadow texture ----
@@ -169,7 +185,11 @@ export const ATMO = {
   /** Explosive openings (natural BUILD → ACTIVE): at most one blast per BLAST_GAP s; vents within BLAST_NEAR (world) are the same vent. */
   BLAST_GAP: 3, BLAST_NEAR: 0.1,
   /** Pyroclastic density currents: mean episodes per second at a full-heat vent. */
-  PDC_RATE: 1 / 30,
+  PDC_RATE: 1 / 60,
+  /** Impact aftermath haze: burst seconds and density (0..1); particles live ~0.5 × burst + 2-4 s. */
+  IMPACT_HAZE_S: 5, IMPACT_HAZE_MAG: 0.35,
+  /** Fade rate (1/s) of a volume plume whose vent no longer erupts (no column under it any more). */
+  PLUME_ORPHAN_DECAY: 0.6,
   /** Volcanic lightning inside big ash columns: flashes/s at a full-heat vent at night (day × 0.15). */
   VOLC_FLASH_RATE: 0.4,
   BURSTS_MAX: 12,
@@ -283,10 +303,10 @@ function bandMean(hf: number, curl: number): { u: number; v: number }[] {
  * Cirrus drift per band (world/s, x and z) at the top of the profile (CIRRUS_HF), turned the other way
  * from the low layer: the streaks translate rigidly along their own wind (no shear inside a band) and
  * are stretched along it. The speed is quantised so one ambTime period moves the streak noise by a
- * whole number of tiles along the wind (CIRRUS_TILE): seamless when ambTime wraps.
+ * whole number of tiles along the wind (CIRRUS_FRONT, which all cirrus tiles divide): seamless when ambTime wraps.
  */
 export function cirrusBands(): { u: number; v: number }[] {
-  const q = ATMO.CIRRUS_TILE / AMB_PERIOD;
+  const q = ATMO.CIRRUS_FRONT / AMB_PERIOD;
   return bandMean(ATMO.CIRRUS_HF, -ATMO.CIRRUS_CURL).map((w) => {
     const s = Math.hypot(w.u, w.v), sq = Math.max(1, Math.round(s / q)) * q;
     return { u: (w.u / s) * sq, v: (w.v / s) * sq };

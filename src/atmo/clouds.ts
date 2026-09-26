@@ -20,19 +20,24 @@
 //               (warm convective towers), a = cloud base (world y; lowered to hug lifted flanks / caps).
 //   3. density  (VX·VY·VX → rgba16f 3D texture): coverage × height profile (flat base at the
 //               condensation level, rounded cumulus tops, flat stratus, taller congestus, tall storm
-//               towers leaning with the shear, anvils spreading in the upper wind), eroded by
-//               Perlin-Worley in the drifting noise frame; sparse cirrus streaks near the slab top,
-//               stretched along and drifting with the upper-level wind (faster, and in another
-//               direction than the low layer: parallax); faded to 0 at every slab boundary.
+//               towers leaning with the shear, anvils spreading in the upper wind off dense storm
+//               cores only), eroded by Perlin-Worley in the drifting noise frame; thin cirrus veils
+//               near the slab top where the cirrus map (weather pass: humid / stormy air upwind aloft,
+//               inside drifting frontal bands that bound its sky share) allows: long soft filaments
+//               bent by a low-frequency warp (curves, hooks) and sheared with height, stretched along
+//               and drifting with the upper-level wind (faster, and in another direction than the low
+//               layer: parallax); faded to 0 at every slab boundary.
 //   4. shadow   (RES² → 2D texture): transmittance of the slab along the key light; cloudShadowAt()
 //               projects any world point onto it (terrain / water can multiply their sun term).
 //   5. march    (half res high / third res low, before the scene pass): full-screen raymarch through
-//               the density with per-pixel, per-frame jitter; 2-octave detail Worley erosion; a short
+//               the density with per-pixel, per-frame jitter; 2-octave detail Worley erosion (cirrus:
+//               fine fibres instead, optically thin at any view angle); a short
 //               light march toward the key light per sample (4 steps) + sky visibility upward;
 //               Beer-Lambert + powder, dual-lobe HG (silver lining), sky ambient, darker bases; fades
 //               out near the camera; strides through empty space. Writes premultiplied colour + the
 //               cloud's front distance, blended with the history reprojected at that depth (temporal
-//               accumulation; TRAA smooths further in the high tier).
+//               accumulation; TRAA smooths further in the high tier). Output and history reads are
+//               sanitised (NaN / Inf by exponent bits): one bad sample can never stick in the history.
 //   6. composite (scene pass, full res): a back-faced box over the slab samples the march target and
 //               hides clouds whose front lies behind the opaque scene depth (sceneViewZ): mountains and
 //               the plinth occlude correctly. Fully clear pixels are discarded.
@@ -106,6 +111,8 @@ export interface Clouds {
   /** Weather probe grid (CELLS² vec4: coverage, storm, base world y, ground world y) for lightning + tests. */
   cells: StorageNode<'vec4'>;
   weather: THREE.StorageTexture;
+  /** Cirrus map (r: where thin high veils may form, 0..1; bounded by the frontal bands). */
+  cirrusMap: THREE.StorageTexture;
   density: THREE.Storage3DTexture;
   /** Bilinear summary lookup at world x/z (TSL, for other atmo kernels). */
   sampleSummary(x: F, z: F): V4;
@@ -157,6 +164,13 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   weather.minFilter = weather.magFilter = THREE.LinearFilter;
   weather.wrapS = weather.wrapT = THREE.RepeatWrapping; // torus: off-block lookups (anvils) wrap instead of smearing edge texels
   weather.name = 'cloudWeather';
+  /** Cirrus map (RES², r = where thin high veils form: humid / stormy air upwind aloft, frontal bands). */
+  const cirrusMap = new THREE.StorageTexture(W, W);
+  cirrusMap.type = THREE.HalfFloatType;
+  cirrusMap.generateMipmaps = false;
+  cirrusMap.minFilter = cirrusMap.magFilter = THREE.LinearFilter;
+  cirrusMap.wrapS = cirrusMap.wrapT = THREE.RepeatWrapping;
+  cirrusMap.name = 'cloudCirrus';
   const mk3 = (x: number, y: number, z: number, type: THREE.TextureDataType, name: string) => {
     const t = new THREE.Storage3DTexture(x, y, z);
     t.name = name; t.type = type; t.format = THREE.RGBAFormat;
@@ -219,21 +233,34 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     return d.mul(min(float(1), float(ATMO.TILT_MAX).div(max(length(d), 1e-5)))) as V2;
   };
   const evolve = u.time.mul(ATMO.EVOLVE / AMB_PERIOD), life = u.time.mul(ATMO.LIFE / AMB_PERIOD);
-  /**
-   * Cirrus streak mask of upper band i at p: noise stretched along the band's wind and translating
-   * with it (whole tiles per ambTime period, see cirrusBands), slowly evolving.
-   */
-  const cirrusMask = (p: V3, i: I): F => {
+  /** Upper band i's wind frame at world x,z: unit direction, speed, and (along, across) coordinates drifting with it. */
+  const hiFrame = (x: F, z: F, i: I) => {
     const vel = vec2(hiU.element(i) as unknown as F, hiV.element(i) as unknown as F);
     const sp = length(vel);
     const d = vel.div(max(sp, 1e-5));
-    const along = p.x.mul(d.x).add(p.z.mul(d.y)).sub(sp.mul(u.time));
-    const across = p.z.mul(d.x).sub(p.x.mul(d.y));
-    const cn = texture3D(noise, vec3(along.div(ATMO.CIRRUS_TILE), life.mul(0.5).add(0.37), across.div(baseTile * 0.45))).level(lvl0);
-    // Perlin-Worley spans ~0.57..0.8: stretch it to 0..1 (as the coverage noise) so CIRRUS_COVER means what it says;
-    // a wide soft rim, so the veils fray out instead of ending in lumps
-    const n = saturate(cn.r.sub(0.6).div(0.18)).mul(0.7).add(cn.b.mul(0.3));
-    return pow(smoothstep(1 - ATMO.CIRRUS_COVER, 1 - ATMO.CIRRUS_COVER + 0.4, n), 1.5) as F;
+    return { d, sp, along: x.mul(d.x).add(z.mul(d.y)).sub(sp.mul(u.time)) as F, across: z.mul(d.x).sub(x.mul(d.y)) as F };
+  };
+  /**
+   * Cirrus filaments of upper band i at p (0..1): long, soft streaks along the band's wind, bent by a
+   * low-frequency warp (curved filaments and hooks, never straight parallel rows) and sheared with
+   * height (fall streaks); a soft ramp, no threshold edge. All tiles divide CIRRUS_FRONT (seamless wrap).
+   */
+  const cirrusStreaks = (p: V3, i: I): F => {
+    const f = hiFrame(p.x, p.z, i);
+    const yc = p.y.sub(u.yHi.sub(0.1));
+    const wv = texture3D(noise, vec3(f.along.div(ATMO.CIRRUS_TILE / 4), evolve.mul(0.5).add(0.13), f.across.div(1.2))).level(lvl0);
+    const ac = f.across.add(wv.g.sub(0.5).mul(ATMO.CIRRUS_WARP * 2)).add(yc.mul(1.5));
+    const al = f.along.add(wv.b.sub(0.5).mul(0.6));
+    const sn = texture3D(noise, vec3(al.div(ATMO.CIRRUS_TILE), life.mul(0.5).add(0.37), ac.div(ATMO.CIRRUS_W))).level(lvl0);
+    const n = saturate(sn.r.sub(0.6).div(0.18)).mul(0.6).add(sn.g.mul(0.4));
+    const r = smoothstep(0.35, 0.95, n);
+    return r.mul(r) as F;
+  };
+  /** Fine fibres inside the veils (march): thin ridges along the upper wind, ~1.6 mean so the veil keeps its weight. */
+  const cirrusFibres = (p: V3, i: I): F => {
+    const f = hiFrame(p.x, p.z, i);
+    const fn = texture3D(noise, vec3(f.along.div(ATMO.CIRRUS_FIBER), life.mul(0.5).add(0.61), f.across.div(ATMO.CIRRUS_FIBER_W))).level(lvl0);
+    return smoothstep(0.25, 0.85, fn.g.mul(0.6).add(fn.b.mul(0.4))).mul(1.6) as F;
   };
 
   // ---- 1. climate summary ----
@@ -289,15 +316,17 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     taps.push([dx, dz, w]); wsum += w;
     if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) tsum += w; // terrain humidity / wet fraction / mean ground: inner 3×3
   }
-  const covNoise = (p: V2, slice: number): F => {
+  const covNoise = (p: V2, slice: number, stormW: F): F => {
     // domain warp: a second, larger noise bends the coverage field so cells are organic
     const wv = texture3D(noise, vec3(p.div(ATMO.COV_TILE * 2), evolve.mul(0.5).add(slice + 0.29))).level(lvl0);
     const q = p.add(vec2(wv.g, wv.b).sub(0.5).mul(ATMO.WARP * ATMO.COV_TILE * 2));
     const n1 = texture3D(noise, vec3(q.div(ATMO.COV_TILE), evolve.add(slice))).level(lvl0);
     // cell-scale octave on the fast life clock: individual clouds form, grow and dissolve
     const n2 = texture3D(noise, vec3(q.div(ATMO.COV_TILE / 2), life.add(slice + 0.5))).level(lvl0);
-    // the Perlin-Worley channel spans ~0.57..0.8 (10-95 %): stretch it to 0..1 so the coverage threshold means what it says
-    return saturate(n1.r.mul(0.6).add(n2.r.mul(0.4)).sub(0.6).div(0.18)) as F;
+    // the Perlin-Worley channel spans ~0.57..0.8 (10-95 %): stretch it to 0..1 so the coverage threshold means what it says.
+    // Storm clusters live longer: under heavy precip the slow octave takes over from the life octave.
+    const w2 = float(0.4).mul(float(1).sub(stormW));
+    return saturate(n1.r.mul(float(1).sub(w2)).add(n2.r.mul(w2)).sub(0.6).div(0.18)) as F;
   };
   const weatherK = Fn(() => {
     If(instanceIndex.greaterThanEqual(uint(W * W)), () => { Return(); });
@@ -341,7 +370,8 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       .mul(float(1).sub(shadow.mul(ATMO.LEE_CUT))).mul(float(1).sub(desert.mul(ATMO.DESERT_CUT)));
     const fl = bandFlow(z);
     const p = vec2(x, z);
-    const cn = mix(covNoise(p.sub(fl.o0), 0.13), covNoise(p.sub(fl.o1), 0.13), fl.w1);
+    const stormW = smoothstep(ATMO.STORM0, ATMO.STORM1, bl.y).toVar();
+    const cn = mix(covNoise(p.sub(fl.o0), 0.13, stormW), covNoise(p.sub(fl.o1), 0.13, stormW), fl.w1);
     // near the cut faces the coverage itself tapers: clouds shrink away organically instead of being sliced
     const edgeW = smoothstep(0.05, 0.4, float(HALF).sub(max(abs(x), abs(z))));
     // heavy precip fills its storm cells in (a raining storm always has its cloud; the noise only frays its rim)
@@ -357,6 +387,23 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     const hug = saturate(max(lift, cap).mul(moist).mul(1.5));
     const base = tWorldY(mix(baseFree, min(baseHug, baseFree), hug));
     textureStore(weather, uvec2(tx, ty), vec4(cov, storm, stratus.sub(congestus), base)).toWriteOnly();
+    // ---- cirrus map: high veils where the upper wind brings humid or stormy air (fronts, anvil outflow),
+    // gathered into frontal bands that drift with it; dry air aloft stays clear ----
+    const hb = bandIdx(z);
+    const cirrusSrc = (i: I): F => {
+      const f = hiFrame(x, z, i);
+      const upC = float(0).toVar(), upP = float(0).toVar();
+      for (const k of [0.25, 0.55, 0.9]) {
+        const su = sampleSummary(x.sub(f.d.x.mul(k)), z.sub(f.d.y.mul(k)));
+        upC.addAssign(su.x.div(3)); upP.addAssign(su.y.div(3));
+      }
+      const fn = texture3D(noise, vec3(f.along.div(ATMO.CIRRUS_FRONT), evolve.mul(0.5).add(0.71), f.across.div(ATMO.CIRRUS_FRONT_W))).level(lvl0);
+      const front = smoothstep(ATMO.CIRRUS_FRONT0, ATMO.CIRRUS_FRONT0 + 0.4, saturate(fn.r.sub(0.6).div(0.18)));
+      const src = saturate(smoothstep(ATMO.CIRRUS_HUM0, ATMO.CIRRUS_HUM1, max(bl.x, upC)).add(smoothstep(ATMO.PRECIP_CLOUD, ATMO.STORM1, upP).mul(0.8)));
+      return src.mul(front) as F;
+    };
+    const cm = mix(cirrusSrc(hb.i0), cirrusSrc(hb.i1), hb.w1);
+    textureStore(cirrusMap, uvec2(tx, ty), vec4(saturate(cm.mul(ATMO.CIRRUS_COVER)).mul(edgeW), 0, 0, 1)).toWriteOnly();
   })().compute(W * W);
 
   const cellsK = Fn(() => {
@@ -439,7 +486,8 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       // Nubis-style carve: the shell only decides how much of the billow noise becomes cloud → lobes
       const body = saturate(bn.mul(0.85).add(0.15).sub(float(1).sub(shell)).div(max(shell, 0.08)).mul(1.35));
       const aTop = ws.w.add(float(0.78).mul(ws.y));
-      const anvil = ws.y.mul(smoothstep(0.1, 0.5, ws.x)).mul(smoothstep(aTop.sub(0.16), aTop.sub(0.1), p.y)).mul(smoothstep(aTop.add(0.02), aTop.sub(0.04), p.y))
+      // (only the dense cores of storm cells spread an anvil: a stormy region gets separate anvils, never one deck)
+      const anvil = ws.y.mul(smoothstep(ATMO.ANVIL_COV0, ATMO.ANVIL_COV1, ws.x)).mul(smoothstep(aTop.sub(0.16), aTop.sub(0.1), p.y)).mul(smoothstep(aTop.add(0.02), aTop.sub(0.04), p.y))
         .mul(mix(float(0.5), float(1.1), bn));
       cum.assign(max(body, anvil));
       // volcanic ash: carved by a finer, slowly churning billow noise (plume-sized lumps: the cloud-scale
@@ -452,14 +500,15 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
         ash.assign(saturate(shp.mul(1.3).sub(float(1).sub(ba).mul(1.05)).mul(1.9)).mul(min(shp.mul(2), 1)));
       });
     });
-    // cirrus: sparse streaks near the slab top, stretched along the upper wind of their band and drifting
-    // rigidly with it (no shear inside a band; bands cross-fade)
-    const cy = saturate(float(1).sub(abs(p.y.sub(u.yHi.sub(0.1)).div(0.045)))).toVar();
-    If(cy.greaterThan(0), () => {
+    // cirrus: thin veils near the slab top where the cirrus map allows, filaments drifting rigidly with the
+    // upper wind of their band (no shear inside a band; bands cross-fade)
+    const cy = smoothstep(0, 1, saturate(float(1).sub(abs(p.y.sub(u.yHi.sub(0.1)).div(0.045))))).toVar();
+    const cmap = texture(cirrusMap, worldUV(p.x, p.z)).level(lvl0).r.toVar();
+    If(cy.greaterThan(0).and(cmap.greaterThan(0.002)), () => {
       const hb = bandIdx(p.z);
-      const cmask = cirrusMask(p, hb.i0).toVar();
-      If(hb.w1.greaterThan(0.001), () => { cmask.assign(mix(cmask, cirrusMask(p, hb.i1), hb.w1)); });
-      cir.assign(cmask.mul(cy).mul(ATMO.CIRRUS_DENS));
+      const cmask = cirrusStreaks(p, hb.i0).toVar();
+      If(hb.w1.greaterThan(0.001), () => { cmask.assign(mix(cmask, cirrusStreaks(p, hb.i1), hb.w1)); });
+      cir.assign(cmask.mul(cmap).mul(cy).mul(ATMO.CIRRUS_DENS));
     });
     // no visible volume: everything fades to 0 at the slab faces
     const edge = smoothstep(0, 0.035, float(HALF).sub(max(abs(p.x), abs(p.z))))
@@ -574,11 +623,20 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
           // near the cut faces the detail noise eats the cloud (ragged edge, never a planar slice)
           const nearEdge = float(1).sub(smoothstep(0.03, 0.16, float(HALF).sub(max(abs(p.x), abs(p.z)))));
           // (ash is eroded through its dense core as well: lumpy plume, never a smooth solid lens)
-          const ero = float(1).sub(fbm).mul(0.62).mul(mix(float(1).sub(smoothstep(0.12, 0.7, v.r)).mul(0.78).add(0.22), float(0.85), v.b))
-            .mul(mix(float(1), float(ATMO.CIRRUS_ERO), v.a)).add(nearEdge.mul(0.8));
-          const d = saturate(v.r.sub(ero).div(max(float(1).sub(ero), 0.05)))
+          const ero = float(1).sub(fbm).mul(0.62).mul(mix(float(1).sub(smoothstep(0.12, 0.7, v.r)).mul(0.78).add(0.22), float(0.85), v.b)).add(nearEdge.mul(0.8));
+          // cirrus (share v.a) is not eroded (its thin veil would vanish or break into beads): fine fibres instead
+          const fib = float(1).toVar();
+          If(v.a.greaterThan(0.02), () => {
+            const hb = bandIdx(p.z);
+            const f0 = cirrusFibres(p, hb.i0).toVar();
+            If(hb.w1.greaterThan(0.001), () => { f0.assign(mix(f0, cirrusFibres(p, hb.i1), hb.w1)); });
+            fib.assign(f0);
+          });
+          const d = mix(saturate(v.r.sub(ero).div(max(float(1).sub(ero), 0.05))), v.r.mul(fib), v.a)
             .mul(smoothstep(ATMO.NEAR_FADE0, ATMO.NEAR_FADE1, t)).mul(tCutSoft(p));
-          const sigma = d.mul(ATMO.SIGMA).mul(v.b.mul(0.4).add(1));
+          // grazing rays through the thin cirrus layer: no thicker than at CIRRUS_ELEV (translucent near the horizon)
+          const sigma = d.mul(ATMO.SIGMA).mul(v.b.mul(0.4).add(1))
+            .mul(mix(float(1), saturate(abs(rd.y).div(ATMO.CIRRUS_ELEV)).max(0.25), v.a));
           // light march toward the key light (Beer), plus sky visibility straight up (darker bases)
           const od = float(0).toVar(), odUp = float(0).toVar();
           let tt = 0;
@@ -591,7 +649,7 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
           const sOd = od.mul(ATMO.SIGMA);
           const L = vec3(exp(sOd.negate()), exp(odUp.mul(ATMO.SIGMA * 0.35).negate()), exp(sOd.mul(-0.22)));
           const storm = v.g;
-          const powder = float(1).sub(exp(sigma.mul(-0.08))).mul(0.6).add(0.4);
+          const powder = mix(float(1).sub(exp(sigma.mul(-0.08))).mul(0.6).add(0.4), float(1), v.a); // (no dark powder rim on thin ice veils)
           // warm key light with Beer + powder, a little multiple scattering in the shade
           // lobe shading: density rising toward the light = a crease in shadow, falling = a sunlit bulge
           const dk = texture3D(density, uvw(p.add(key.mul(0.018)))).level(lvl0).r;
@@ -708,7 +766,7 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   let hq = opts.highQuality;
   let frame = 0;
   return {
-    object: mesh, summary, cells, weather, density, sampleSummary, weatherAt,
+    object: mesh, summary, cells, weather, cirrusMap, density, sampleSummary, weatherAt,
     occlusion: (c: V3): F => {
       const col = curColor.sample(screenUV), fr = curFront.sample(screenUV).x;
       const behind = smoothstep(fr.sub(0.03), fr.add(0.03), length(c.sub(cameraPosition)));
@@ -744,7 +802,7 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     dispose() {
       cloudShadowU.on.value = 0;
       geo.dispose(); mat.dispose(); marchMat.dispose(); quad.dispose(); for (const rt of rts) rt.dispose();
-      density.dispose(); weather.dispose();
+      density.dispose(); weather.dispose(); cirrusMap.dispose();
     },
   };
 }

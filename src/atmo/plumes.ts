@@ -51,6 +51,27 @@ const HV0 = ATMO.VENTS_MAX;
 /** Share of PDC particles in the lofting ash cloud (flagged as heat + 2 in P2.z); the rest is the dense base. */
 const PDC_LOFT = 0.4;
 
+type V2 = THREE.Node<'vec2'>;
+/**
+ * Sprite footprints in quad coordinates q ∈ [−1, 1]² (0 on and near every quad edge, so no sprite ever shows
+ * its square: the alpha of every kind is a radial mask × noise erosion, never noise alone).
+ * Puff: noise-eroded disc (n3 = Perlin-Worley 0..1, erode = how much low noise eats).
+ */
+export const tSpritePuff = (q: V2, n3: F, erode: F): F => {
+  const rr = length(q);
+  return saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(erode)).mul(2.4)).mul(smoothstep(0.9, 0.68, rr)) as F;
+};
+/**
+ * Ejecta streak: a rounded glowing clot at +x (direction of motion) on a tapering tail toward −x; a capsule
+ * whose head ends at x ≈ 0.9 (was a tail with a flat, hard head edge: slow bombs showed as dark squares).
+ */
+export const tSpriteStreak = (q: V2): F => {
+  const s = saturate(q.x.add(0.8).div(1.25)); // 0 tail end … 1 head centre (x = 0.45)
+  const d = length(vec2(q.x.sub(s.mul(1.25).sub(0.8)), q.y));
+  const r = mix(float(0.08), float(0.42), s);
+  return smoothstep(r, r.mul(0.35), d).mul(mix(float(0.3), float(1), s)) as F;
+};
+
 export interface Burst { x: number; y: number; z: number; kind: number; t0: number; dur: number; mag: number; radius: number; rate: number }
 
 
@@ -359,14 +380,15 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
                 const ring = rad.mul(rr.mul(0.3).add(0.15));
                 const col = step(rnd(17), 0.1); // a few puffs billow up off the ring
                 p0.assign(vec4(A.x.add(dir.x.mul(ring)), A.y.add(0.01), A.z.add(dir.y.mul(ring)), 0));
-                const out = rnd(14).mul(0.5).add(0.35).mul(mag).mul(float(1).sub(col.mul(0.8)));
-                p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.12).add(0.1), col), dir.y.mul(out), rnd(15).mul(2).add(2.2)));
+                const out = rnd(14).mul(0.3).add(0.25).mul(mag).mul(float(1).sub(col.mul(0.8)));
+                p1.assign(vec4(dir.x.mul(out), mix(pow(rnd(18), 3).mul(0.18).add(0.02), rnd(18).mul(0.12).add(0.1), col), dir.y.mul(out), rnd(15).mul(1.2).add(1.5)));
                 p2.assign(vec4(float(PK.DUST), rnd(16), 0.8, A.y));
-              }).ElseIf(kind.lessThan(2.5), () => { // HAZE (flood basalt)
+              }).ElseIf(kind.lessThan(2.5), () => { // HAZE (flood basalt, impact aftermath)
                 const d = dir.mul(sqrt(rr).mul(rad));
                 p0.assign(vec4(A.x.add(d.x), A.y.add(rnd(14).mul(0.12).add(0.03)), A.z.add(d.y), 0));
-                p1.assign(vec4(0, 0, 0, rnd(15).mul(10).add(16)));
-                p2.assign(vec4(float(PK.HAZE), rnd(16), 0.35, A.y));
+                // life follows the burst (a short impact haze clears soon after it stops), density its magnitude
+                p1.assign(vec4(0, 0, 0, min(rnd(15).mul(10).add(16), B.y.mul(0.5).add(rnd(15).mul(2)).add(2))));
+                p2.assign(vec4(float(PK.HAZE), rnd(16), min(mag, 1), A.y));
               }).ElseIf(kind.lessThan(3.5), () => { emit(float(PK.STEAM), A.xyz, mag.min(1), float(1), rad, A.y); })
               .ElseIf(kind.lessThan(4.5), () => { emit(float(PK.FOUNTAIN), A.xyz, float(1), mag, rad, A.y); })
               .ElseIf(kind.lessThan(5.5), () => { emit(float(PK.BOMB), A.xyz, float(1), mag, rad, A.y); })
@@ -403,15 +425,19 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         const hnb = min(heat.mul(0.32).add(0.2), max(seaY.add(0.95).sub(oy), 0.12));
         const rise = float(1).sub(smoothstep(hnb.mul(0.55), hnb, hAbove));
         const umb = smoothstep(hnb.mul(0.75), hnb, hAbove);
-        const wUp = heat.mul(0.08).add(0.1).mul(rise).sub(umb.mul(0.008));
-        vel.y.assign(mix(vel.y, wUp, float(1).sub(exp(dt.mul(-1.2)))));
-        const entrain = smoothstep(0, hnb, hAbove).mul(1.1).add(0.25);
+        // buoyant updraft, strongest at the vent and easing with height: a column, not a spreading heap
+        const wUp = heat.mul(0.1).add(0.12).mul(rise).mul(float(1).sub(smoothstep(0, hnb, hAbove).mul(0.5))).sub(umb.mul(0.008));
+        vel.y.assign(mix(vel.y, wUp, float(1).sub(exp(dt.mul(-1.8)))));
+        // sideways: nearly still in the jet (narrow neck), wind and churn take over with height
+        const up = smoothstep(0.02, 0.25, hAbove);
+        const entrain = up.mul(1.1).add(0.25);
         // (umbrella spread slow: the volume umbrella carries the wide canopy; particles stay near the column)
-        const target = wind.add(turb).add(sdir.mul(umb.mul(0.02)));
+        const target = wind.mul(up.mul(0.85).add(0.15)).add(turb.mul(up.mul(0.8).add(0.2))).add(sdir.mul(umb.mul(0.02)));
         vel.xz.assign(mix(vel.xz, target, float(1).sub(exp(dt.mul(entrain).negate()))));
-      }).ElseIf(kind.lessThan(1.5), () => { // STEAM: rises, bends early, fades fast
-        vel.y.assign(vel.y.mul(exp(dt.mul(-0.6))));
-        vel.xz.assign(mix(vel.xz, wind.mul(0.8).add(turb), float(1).sub(exp(dt.mul(-1.2)))));
+      }).ElseIf(kind.lessThan(1.5), () => { // STEAM: a thin rising wisp that bends downwind as it climbs, fades fast
+        const up = smoothstep(0.01, 0.15, hAbove);
+        vel.y.assign(max(vel.y.mul(exp(dt.mul(-0.35))), heat.mul(0.02).add(0.012)));
+        vel.xz.assign(mix(vel.xz, wind.mul(up.mul(0.7).add(0.1)).add(turb.mul(up.mul(0.6).add(0.15))), float(1).sub(exp(dt.mul(-1.2)))));
       }).ElseIf(kind.lessThan(2.5), () => { // DUST: rush out, drag, settle
         vel.xz.assign(vel.xz.mul(exp(dt.mul(-1.3))).add(wind.mul(0.3).mul(dt)));
         vel.y.assign(vel.y.mul(exp(dt.mul(-1.1))).sub(dt.mul(0.015)));
@@ -505,10 +531,10 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     const pdcLoft = step(1.5, q2.z);
     const size0 = dot(kA, vec4(0.02, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
       .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.01, mix(float(0.04), float(0.05), pdcLoft))))
-      .add(dot(kC, vec3(0.007, 0.014, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
+      .add(dot(kC, vec3(0.011, 0.022, 0.014))).add(dot(kD, vec2(0.004, 0.05)));
     // a PDC widens as it runs out (base) and billows up as it lofts
-    const grow = dot(kA, vec4(0.07, 0.11, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.16));
-    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.45))));
+    const grow = dot(kA, vec4(0.07, 0.05, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.16));
+    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.45)))).add(kA.y.mul(saturate(hAb.mul(0.35))));
     // ejecta streak along their screen-space velocity (ember trails)
     const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
     const speed = length(q1.xyz);
@@ -541,12 +567,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       // one column, not smooth tubes or a string of round beads)
       const lumpy = kb.w.add(k.x).add(k.y);
       const n3 = texture3D(noise, vec3(q.mul(mix(float(0.32), float(0.38), lumpy)).add(seed.mul(5.7)), age.mul(mix(float(0.03), float(0.07), lumpy)).add(seed.mul(3.1)))).r;
-      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(mix(float(0.75), float(0.88), lumpy))).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
+      const puff = tSpritePuff(q, n3, mix(float(0.75), float(0.88), lumpy));
       const ring = smoothstep(1.0, 0.75, rr).mul(smoothstep(0.35, 0.8, rr)).add(smoothstep(0.35, 0.0, length(q.sub(vec2(-0.3, 0.3)))).mul(0.8));
       const speck = smoothstep(1.0, 0.4, rr);
-      // ember streak: hot head at +x (direction of motion), trail fading behind
-      const across = smoothstep(0.9, 0.0, abs(q.y));
-      const trail = pow(saturate(quv.x), 1.6).mul(across).mul(smoothstep(1.0, 0.8, quv.x).mul(0.5).add(0.5));
+      // ember streak: rounded hot head at +x (direction of motion), a short tail fading behind
+      const trail = tSpriteStreak(q);
       const isStreak = kc.x.add(kc.y).add(kc.z);
       const shapeA = mix(mix(mix(puff, ring, kb.x), trail, isStreak), speck, kd.x);
       const nv = normalize(vec3(q.x, q.y, sqrt(max(float(1).sub(rr.mul(rr)), 0.05))));
@@ -587,7 +612,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.32)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
         .add(k.y.mul(pow(float(1).sub(t), 1.6).mul(0.36)).mul(min(heat.add(0.3), 1)))
         .add(k.z.mul(pow(float(1).sub(t), 1.5).mul(0.75)))
-        .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)))
+        .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)).mul(heat)) // haze: heat slot = density
         .add(kb.x.mul(0.45).mul(float(1).sub(pow(t, 4))))
         .add(kb.y.mul(pow(float(1).sub(t), 1.5).mul(0.5)).mul(shimmer))
         .add(kb.z.mul(float(1).sub(smoothstep(0.65, 1, colFrac)).mul(0.7)))

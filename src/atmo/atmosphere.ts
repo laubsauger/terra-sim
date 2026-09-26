@@ -151,8 +151,9 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
       case 'meteor': {
         // the cinematic strike (flash, curtain, dust column) lives in src/fx; atmosphere only adds the
         // lingering regional haze so the two don't double up
+        // (short and faint: a long, dense haze read as fog sitting over the view)
         const r = (e.radius ?? 4 + 8 * mag) * CELL;
-        add(BURST.HAZE, 18, r * 4, 0.5);
+        add(BURST.HAZE, ATMO.IMPACT_HAZE_S, r * 3, ATMO.IMPACT_HAZE_MAG);
         break;
       }
       case 'floodBasalt':
@@ -201,27 +202,40 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
   }
 
   // ---- big plumes in the cloud volume: strongest dry vents + eruption bursts, eased so they never pop ----
-  const slots: { x: number; y: number; z: number; s: number; target: number }[] = [];
+  const slots: { x: number; y: number; z: number; s: number; target: number; fed: boolean }[] = [];
   function updatePlumes(dt: number): void {
     const cands: { x: number; y: number; z: number; s: number }[] = [];
     for (const b of plumes.bursts) if (b.kind === BURST.ASH && fxTime >= b.t0 && fxTime - b.t0 < b.dur) cands.push({ x: b.x, y: -1, z: b.z, s: Math.min(1.5, b.mag) });
     // only erupting (active / waning) vents on land or in the Surtseyan range get a big ash plume
-    for (const v of [...vents].sort((a, b) => b.heat - a.heat)) if (!v.wet && v.heat > 0.3 && v.phase >= VENT_PHASE.ACTIVE) cands.push({ x: v.x, y: v.y, z: v.z, s: v.heat * (v.phase === VENT_PHASE.WANING ? 0.6 : 1) });
+    // (sticky: vents that already carry a plume come first, so the ≤ PLUMES picks don't churn between the many
+    // similar vents and leave orphaned plumes hanging where no vent erupts any more)
+    const held = (v: { x: number; z: number }) => (slots.some((q) => q.s > 0.05 && Math.hypot(q.x - v.x, q.z - v.z) < 0.2) ? 1 : 0);
+    for (const v of [...vents].sort((a, b) => held(b) - held(a) || b.heat - a.heat)) if (!v.wet && v.heat > 0.3 && v.phase >= VENT_PHASE.ACTIVE) cands.push({ x: v.x, y: v.y, z: v.z, s: v.heat * (v.phase === VENT_PHASE.WANING ? 0.6 : 1) });
     const picked: typeof cands = [];
     for (const c of cands) {
       if (picked.length >= ATMO.PLUMES) break;
       const near = picked.find((q) => Math.hypot(q.x - c.x, q.z - c.z) < 0.2);
       if (near) { near.s = Math.max(near.s, c.s); if (near.y < 0) near.y = c.y; } else picked.push({ ...c });
     }
-    for (const sl of slots) sl.target = 0;
+    for (const sl of slots) { sl.target = 0; sl.fed = false; }
     for (const c of picked) {
       let sl = slots.find((q) => Math.hypot(q.x - c.x, q.z - c.z) < 0.2);
-      if (!sl && slots.length < ATMO.PLUMES) { sl = { x: c.x, y: c.y, z: c.z, s: 0, target: 0 }; slots.push(sl); }
+      if (!sl && slots.length < ATMO.PLUMES) { sl = { x: c.x, y: c.y, z: c.z, s: 0, target: 0, fed: false }; slots.push(sl); }
       if (!sl) { const idle = slots.find((q) => q.s < 0.02); if (idle) { Object.assign(idle, { x: c.x, y: c.y, z: c.z, s: 0 }); sl = idle; } }
-      if (sl) { sl.target = c.s; if (c.y >= 0) sl.y = c.y; }
+      if (sl) {
+        sl.target = c.s; sl.fed = true;
+        // follow the vent as it moves with its plate (the column stays on its source)
+        const kf = 1 - Math.exp(-dt * 2);
+        sl.x += (c.x - sl.x) * kf; sl.z += (c.z - sl.z) * kf;
+        if (c.y >= 0) sl.y = c.y;
+      }
     }
-    // eases in, lingers on the way out (an ending eruption's umbrella thins over ~8 s instead of vanishing)
-    for (const sl of slots) sl.s += (sl.target - sl.s) * (1 - Math.exp(-dt * (sl.target > sl.s ? ATMO.PLUME_RISE : ATMO.PLUME_DECAY)));
+    // eases in, lingers on the way out while its vent still wanes (an ending eruption's umbrella thins over
+    // ~8 s); a plume whose vent is gone fades in ~2 s: with no column under it, it would float detached
+    for (const sl of slots) {
+      const down = sl.fed ? ATMO.PLUME_DECAY : ATMO.PLUME_ORPHAN_DECAY;
+      sl.s += (sl.target - sl.s) * (1 - Math.exp(-dt * (sl.target > sl.s ? ATMO.PLUME_RISE : down)));
+    }
     const yHi = clouds.uniforms.yHi.value;
     clouds.setPlumes(slots.filter((q) => q.s > 0.01).map((q) => {
       const vy = q.y >= 0 ? q.y : groundY() + 0.05;

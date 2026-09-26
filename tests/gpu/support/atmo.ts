@@ -20,6 +20,7 @@ import { createWater } from '../../../src/render/water';
 import { updateRenderColumns, cellToWorld } from '../../../src/render/space';
 import { createAtmosphere, cloudShadowAt, cloudShadowU } from '../../../src/atmo/atmosphere';
 import { ATMO } from '../../../src/atmo/atmoModel';
+import { tSpritePuff, tSpriteStreak } from '../../../src/atmo/plumes';
 import { paintWeather, type Paint } from './atmoWorld';
 
 async function main() {
@@ -231,6 +232,30 @@ async function main() {
       const v = new THREE.Vector3(x, y, z).project(camera), r = renderer.domElement.getBoundingClientRect();
       return [(v.x * 0.5 + 0.5) * r.width, (0.5 - v.y * 0.5) * r.height];
     },
+    /**
+     * Sprite footprints (the shader's own TSL) sampled over the quad: max value on the outer band
+     * (max(|x|, |y|) ≥ 0.92) and at the centre region, for the puff (worst-case noise 1, strongest erosion
+     * setting 0.75) and the ejecta streak.
+     */
+    spriteEdges: async () => {
+      const N = 64;
+      const out = instancedArray(N * N, 'vec2');
+      const k = Fn(() => {
+        const i = THREE.TSL.float(instanceIndex);
+        const q = THREE.TSL.vec2(i.mod(N).add(0.5).div(N).mul(2).sub(1), i.div(N).floor().add(0.5).div(N).mul(2).sub(1));
+        out.element(instanceIndex).assign(THREE.TSL.vec2(tSpritePuff(q, THREE.TSL.float(1), THREE.TSL.float(0.75)), tSpriteStreak(q)));
+      })().compute(N * N);
+      renderer.compute(k);
+      const a = new Float32Array(await renderer.getArrayBufferAsync(out.value as unknown as THREE.StorageBufferAttribute));
+      const r = { puffEdge: 0, streakEdge: 0, puffMax: 0, streakMax: 0 };
+      for (let j = 0; j < N * N; j++) {
+        const x = ((j % N) + 0.5) / N * 2 - 1, y = (Math.floor(j / N) + 0.5) / N * 2 - 1;
+        const edge = Math.max(Math.abs(x), Math.abs(y)) >= 0.92;
+        r.puffMax = Math.max(r.puffMax, a[j * 2]!); r.streakMax = Math.max(r.streakMax, a[j * 2 + 1]!);
+        if (edge) { r.puffEdge = Math.max(r.puffEdge, a[j * 2]!); r.streakEdge = Math.max(r.streakEdge, a[j * 2 + 1]!); }
+      }
+      return r;
+    },
     /** Surface height per column (voxel y). */
     surf: async () => fields.read(renderer, 'surfY'),
     /** Water depth per column (voxel layers). */
@@ -238,7 +263,7 @@ async function main() {
     NCOL, NX,
   };
   // ---- weather / cloud diagnostics (clouds.ts): weather-map and density probes, relief edits, uniform air ----
-  const { texture3D, vec2: tv2, vec4: tv4, float: tf, int: ti } = THREE.TSL;
+  const { texture3D, texture, vec2: tv2, vec4: tv4, float: tf, int: ti } = THREE.TSL;
   const am = await import('../../../src/atmo/atmoModel');
   const { GodTools } = await import('../../../src/sim/godTools');
   const god = new GodTools(fields), derive = createDerivePass(fields);
@@ -252,11 +277,12 @@ async function main() {
     return tv2(a.x.add(ix.add(0.5).div(n).mul(a.z)), a.y.add(iz.add(0.5).div(n).mul(a.z)));
   };
   const weatherK = Fn(() => { const p = gridXZ(); wxOut.element(instanceIndex).assign(atmo.clouds.weatherAt(p.x, p.y)); })().compute(WXN * WXN);
+  const cirK = Fn(() => { const p = gridXZ(); wxOut.element(instanceIndex).assign(texture(atmo.clouds.cirrusMap, p.add(2).div(4)).level(ti(0))); })().compute(WXN * WXN);
   const cu = atmo.clouds.uniforms;
   const densK = Fn(() => {
     const p = gridXZ(), y = arg(1).x;
     const d = texture3D(atmo.clouds.density, vec3(p.x.add(2).div(4), y.sub(cu.yLo).div(cu.yHi.sub(cu.yLo)), p.y.add(2).div(4))).level(ti(0));
-    wxOut.element(instanceIndex).assign(tv4(d.r, d.g, d.b, 0));
+    wxOut.element(instanceIndex).assign(tv4(d.r, d.g, d.b, d.a));
   })().compute(WXN * WXN);
   const runGrid = async (k: THREE.ComputeNode, x0: number, z0: number, size: number, n: number, y = 0) => {
     (wxArg.array[0] as THREE.Vector4).set(x0, z0, size, n); (wxArg.array[1] as THREE.Vector4).set(y, 0, 0, 0);
@@ -266,8 +292,10 @@ async function main() {
   Object.assign(w.at as Record<string, unknown>, {
     /** Weather map (coverage, storm, stratus − congestus, base world y) on an n×n grid (n ≤ 128) over a world square. */
     weatherGrid: (n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(weatherK, x0, z0, size, Math.min(n, WXN)),
-    /** Cloud density volume (density, storm, ash share) on an n×n grid at world height y. */
+    /** Cloud density volume (density, storm, ash share, cirrus share) on an n×n grid at world height y. */
     densityGrid: (y: number, n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(densK, x0, z0, size, Math.min(n, WXN), y),
+    /** Cirrus map (r = where high veils may form) on an n×n grid. */
+    cirrusGrid: (n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(cirK, x0, z0, size, Math.min(n, WXN)),
     /** Slab bounds (world y). */
     slab: () => [cu.yLo.value, cu.yHi.value],
     /** God-tool uplift (voxel columns, immediate) + derive: a real new mountain under the clouds. */
