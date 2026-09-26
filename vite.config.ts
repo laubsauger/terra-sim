@@ -11,5 +11,7 @@ export default defineConfig({
   test: {
     include: ['tests/unit/**/*.test.ts'],
     environment: 'node',
+    // CPU reference / worldgen tests take ~5-8 s on CI runners (half the speed of a dev machine)
+    testTimeout: 30_000,
   },
 });
