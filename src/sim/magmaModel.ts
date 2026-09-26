@@ -49,11 +49,11 @@ export const MAGMA = {
   lidPerVoxel: 4,        // overpressure: an episode starts only with n ≥ 1 + lid / lidPerVoxel chamber voxels
   freezeTau: 10,         // My, mean residence of a chamber voxel before crystallizing (P = n·dt/τ per step)
   reservoirMin: 255 * 256, // melting pauses below this reservoir level (snapshot, deterministic)
-  // Mantle fertility: arc + hotspot melt scale with reservoir / resRef, clamped to [fertMin, fertMax]. The arc
+  // Mantle fertility: arc melt scales with reservoir / resRef, clamped to [fertMin, fertMax]. The arc
   // budget counts nominal slabs; slabs carrying slumped continental debris feed the reservoir faster than that
   // (reservoir 1 → 7 layers/col, land 27 → 13 % in 600 My). Mass-coupled melting returns it as arc crust.
   resRef: 255 * 65536, // 1 layer per column (≈ the generated worlds' starting reservoir)
-  fertMin: 0.25,
+  fertMin: 0,        // an empty reservoir melts nothing (a floor drove it into debt, which stalled all volcanism)
   fertMax: 4,
   silAndesite: 128,      // silica code ≥ this → ANDESITE lava / GRANITE pluton (FLAG_CONTINENTAL)
 } as const;

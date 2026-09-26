@@ -464,7 +464,8 @@ export class MagmaPass {
         arcU.assign(wgt.mul(float(atomicLoad(mctr.element(MCTR.ARCK)))).mul(volc.div(ARC_K_SCALE)));
       });
       const fert = clamp(float(atomicLoad(mctr.element(MCTR.RES_SNAP))).div(M.resRef), M.fertMin, M.fertMax);
-      const melt = hotU.add(arcU).mul(fert).toVar();
+      // fertility drives arc melt only (slab-fed); hotspots are plumes and keep their own rate
+      const melt = hotU.add(arcU.mul(fert)).toVar();
 
       // melt generation: reservoir → pending (gated on a deterministic reservoir snapshot)
       If(atomicLoad(mctr.element(MCTR.RES_SNAP)).greaterThan(int(M.reservoirMin)), () => {
@@ -473,8 +474,8 @@ export class MagmaPass {
         If(n.greaterThan(uint(0)), () => {
           draw(n);
           p.addAssign(n);
-          sw.addAssign(float(n).mul(clamp(arcU.div(max(melt, 1e-6)), 0, 1).mul(255)));
-          If(hotU.greaterThan(arcU), () => { hot.assign(1); });
+          sw.addAssign(float(n).mul(clamp(arcU.mul(fert).div(max(melt, 1e-6)), 0, 1).mul(255)));
+          If(hotU.greaterThan(arcU.mul(fert)), () => { hot.assign(1); });
         });
       });
       const sil = uint(clamp(round(sw.div(max(float(p), 1))), 0, 255));

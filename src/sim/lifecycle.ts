@@ -17,6 +17,12 @@ export const MAX_ALIVE = 12;
 export const ABSORB_AREA = Math.round(NCOL * 0.012);
 export const SPLIT_AREA = Math.round(NCOL * 0.22); // big plates rift, but plate identity should persist for long stretches
 export const SPLIT_COOLDOWN_MY = 45;
+/**
+ * With few plates, rifting comes back sooner: long collisions (jam brake) suture plates faster than the 45 My
+ * cooldown rifted them, and worlds sat at 3-4 plates for hundreds of My.
+ */
+export const FEW_PLATES = 5;
+export const SPLIT_COOLDOWN_FEW_MY = 20;
 export const SUTURE_CONTACT = 96;     // continental boundary cells (broad collision front)
 export const SUTURE_WINDOWS = 25;     // sustained this many windows
 export const RIFT_SPEED = 0.8;        // cells/My each side after a split
@@ -195,7 +201,7 @@ export class Lifecycle {
       const tiny = alive.filter((p) => s.area[p.id]! < ABSORB_AREA).sort((p, q) => s.area[p.id]! - s.area[q.id]! || p.id - q.id)[0];
       if (tiny) return { kind: 'absorb', plate: tiny.id };
     }
-    if (n < MAX_ALIVE && geoMy - this.lastSplitMy >= SPLIT_COOLDOWN_MY) {
+    if (n < MAX_ALIVE && geoMy - this.lastSplitMy >= (n < FEW_PLATES ? SPLIT_COOLDOWN_FEW_MY : SPLIT_COOLDOWN_MY)) {
       let target = forceSplit;
       if (target === undefined) {
         const big = alive.filter((p) => s.area[p.id]! > SPLIT_AREA).sort((p, q) => s.area[q.id]! - s.area[p.id]! || p.id - q.id)[0];

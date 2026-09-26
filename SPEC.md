@@ -99,6 +99,7 @@ V30: ∀ column surfY ≥ deepest initial crust base & y=0 always PERIDOTITE (no
 V31: every GPU test fails on WGSL / pipeline validation errors: a kernel that does not compile must never pass as a sim that merely does less.
 V33: talus throughput ≥ 1 layer / direction / erosion step: walls at convergent fronts slump faster than the front rebuilds them; chamber roofs stay ≥ depthMin below the surface.
 V34: every trench accretes slab excess (continental AND oceanic winners); arc + hotspot melt scale with reservoir fertility (clamp(res / 1 layer·col, 0.25, 4)) — mass-coupled rate, no target value.
+V35: continents persist with live volcanism: over 1000 My continental mass stays ≥ ~75 % of initial, the reservoir ≈ 0-2 layers/col, eruptions never stall for > 100 My; plates stay 4-10 most of the time.
 V32: displayed plate motion moves every frame at ≈ plate speed; sim steps (every TEC_EVERY ticks, bursts at stats-window stalls) glide over the measured step interval.
 V23: ∀ kernel & material ≤ 8 storage buffers bound (WebGPU default `maxStorageBuffersPerShaderStage`). pack fields (uvec2/vec4) & small tables → `uniformArray`.
 
@@ -178,5 +179,7 @@ B18|2026-09-27|diverging continental plates opened one-cell ocean ridge slits in
 B19|2026-09-27|TSL dropped a float cast inside uMax/select (f32 / u32) → tectonics voxel kernel invalid WGSL, never ran; plates, crust and land decayed (cont 0.39 → 0 in 50 My), all tests green|V31
 B21|2026-09-27|talus capped at 63 fill units (0.25 layer) per direction per step + magma chambers growing to the surface (magma cannot slump) → 50-layer walls along every convergent front|V33
 B22|2026-09-27|faster slumping fed trench slabs; ocean-ocean trenches accreted nothing and arc return counted nominal slabs → reservoir 1 → 7 layers/col, land 27 → 13 %|V34
+B23|2026-09-27|collision fronts pinned at the 100-layer cap delaminated ~1/3 of colliding continental crust (jammed plates never slowed below MIN_SPEED, crust flow 1 layer/face) → continents drained into the mantle; reservoir at ~0 with melt floor starved volcanism|V35
+B24|2026-09-27|oceanic trench winners: contMass − bestMass uint underflow stacked OROGENY_MAX per run at every ocean-ocean trench|V34
 B20|2026-09-27|plate display offset followed sim steps instantly; at normal speed a 0.1-0.3 cell step every few frames read as jerking plates|V32
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

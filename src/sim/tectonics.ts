@@ -42,9 +42,17 @@ export const MAX_CRUST_LAYERS = 100;
 /**
  * Fraction of oceanic crust consumed under a continent that is scraped off / underplated onto it
  * (accretionary wedge + arc root). The only steady return path for continental crust that erosion
- * sends to the sea; without it continents thin and drown within ~400 My (B8).
+ * sends to the sea; without it continents thin and drown within ~400 My (B8). The rest melts: it feeds arc
+ * magma (granite on continental plates), the mantle's only steady supply once melting follows the reservoir
+ * (at 0.9 volcanism starved).
  */
-export const ACCRETE_FRAC = 0.9;
+export const ACCRETE_FRAC = 0.7;
+/**
+ * Share accreted where the trench winner is oceanic (island arcs). Lower than ACCRETE_FRAC: ocean-ocean
+ * subduction returns the rest to the mantle, which feeds arc magma; at 0.9 the reservoir starved and
+ * volcanism stalled.
+ */
+export const ACCRETE_FRAC_OCEAN = 0.5;
 /** Rift fill thickness as a fraction of the neighbouring continental crust (B18). */
 export const RIFT_THIN = 0.6;
 /**
@@ -204,11 +212,14 @@ export class Tectonics {
           // continental losers stack fully; oceanic losers accrete ACCRETE_FRAC of what they carry beyond
           // fresh ridge thickness (sediment + aged crust). The ridge share must return to the reservoir:
           // every gap draws RIDGE_MASS, and gaps pair 1:1 with losers, else the reservoir runs into debt (B10).
-          const oceanMass = massSum.sub(contMass);
+          // losers only: an oceanic winner's own mass is in the ocean sum, a continental winner's in contMass
+          const isC = bestCont.equal(uint(1));
+          const contLoss = select(isC, contMass.sub(bestMass), uint(0));
+          const oceanMass = massSum.sub(contMass).sub(select(isC, uint(0), bestMass));
           const oceanLosers = count.sub(uint(1)).sub(contCount.sub(bestCont));
           const ridgeShare = oceanLosers.mul(uint(RIDGE_MASS));
           const excess = select(oceanMass.greaterThan(ridgeShare), oceanMass.sub(ridgeShare), uint(0));
-          const gain0 = contMass.sub(bestMass).add(excess.mul(uint(Math.round(ACCRETE_FRAC * 256))).shiftRight(uint(8)));
+          const gain0 = contLoss.add(excess.mul(select(isC, uint(Math.round(ACCRETE_FRAC * 256)), uint(Math.round(ACCRETE_FRAC_OCEAN * 256)))).shiftRight(uint(8)));
           const gain = uint(float(gain0).mul(stackGate));
           k.assign(uMin(uMin(gain.div(uint(255)), uint(OROGENY_MAX)), uMin(room, floorRoom)));
         });

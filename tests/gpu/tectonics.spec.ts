@@ -188,3 +188,30 @@ test('lower-crust flow spreads a thick root into neighbours without mass change'
   expect(res.b.peak).toBeLessThan(res.a.peak - 20);
   expect(res.b.nb).toBeGreaterThan(res.a.nb);
 });
+
+// B24: at an ocean-ocean trench the winner accretes only part of the slab's excess. A uint underflow
+// (continental loser mass − winner mass with no continental column) once stacked the maximum at every such
+// trench, piling oceanic crust into 60-layer walls.
+test('ocean-ocean convergence accretes little: no crust walls at the trench', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { createDerivePass } = await import('/src/sim/derive.ts');
+    const { Tectonics } = await import('/src/sim/tectonics.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const w = twoPlateWorld([4, 0], [0, 0], { bothOceanic: true });
+    uploadWorld(f, w);
+    const derive = createDerivePass(f); derive.run(r);
+    const tec = new Tectonics(f, w.plates);
+    for (let t = 1; t <= 100; t++) if (tec.tick(r, t, 0.05, { speedMul: 1, isoEvery: 1000 })) derive.run(r);
+    const ci = new Uint32Array(await f.read(r, 'colInfo'));
+    let maxT = 0; for (let i = 1; i < ci.length; i += 2) maxT = Math.max(maxT, ci[i]! / 255);
+    return { maxT };
+  });
+  // 9-layer ocean, 2 layers of excess per consumed column × ACCRETE_FRAC_OCEAN over 25 runs, no erosion in this
+  // rig: ~30 at the front. The underflow stacked OROGENY_MAX per run and hit the 100-layer cap within a few runs.
+  expect(res.maxT).toBeLessThan(50);
+});

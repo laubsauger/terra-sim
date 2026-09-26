@@ -36,7 +36,9 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
     const slab = Math.min(1.5, stats.subducted[p.id]! / (cur * windowMy * side));
     const jam = Math.min(1, (contact?.[p.id]?.reduce((s, v) => s + v, 0) ?? 0) / side);
     let speed = BASE_SPEED * (1 + SLAB_GAIN * slab) * (p.continental ? CONT_DRAG : 1) / (1 + COLLISION_BRAKE * jam);
-    speed = Math.min(MAX_SPEED, Math.max(MIN_SPEED, speed));
+    // the floor brakes too: jammed continents at MIN_SPEED kept grinding into full collision fronts for 50+ My,
+    // and everything past the 100-layer cap delaminated (continents drained, B23)
+    speed = Math.min(MAX_SPEED, Math.max(MIN_SPEED / (1 + COLLISION_BRAKE * 2 * jam), speed));
     // persistent heading: never re-derived from a (possibly tiny, locked or collided) velocity
     let heading = p.heading ?? Math.atan2(p.vel[1], p.vel[0]);
     // Box-Muller from PCG32 keeps the walk deterministic (V2)

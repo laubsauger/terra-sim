@@ -1,4 +1,4 @@
-// Lower-crustal flow: thick continental roots spread into thinner neighbours, one layer per face per run.
+// Lower-crustal flow: thick continental roots spread into thinner neighbours, up to FLOW_FACE_MAX layers per face per run.
 // Into continental neighbours it turns collision fronts into plateaus (B5, V24); into oceanic neighbours it
 // stretches passive margins into thin continental wedges instead of cliffs that slump into the sea (B9).
 // Race-free: an "out" kernel decides per-face transfers from pre-pass data, an "apply" kernel moves whole
@@ -28,6 +28,13 @@ export const FLOW_MIN_THICK_MARGIN = 24;
 export const MARGIN_RECEIVER_MAX = 14;
 /** Receiver never grows past this (layers). */
 export const FLOW_MAX_THICK = 100;
+/**
+ * Layers per face per run (2-bit field). At 1, collision fronts sat at the 100-layer cap and delaminated
+ * about a third of the colliding continental crust into the mantle (continents drained, B23).
+ */
+export const FLOW_FACE_MAX = 3;
+/** Bottom plain layers a column may give per run (all faces together). */
+export const GIVE_MAX = 8;
 
 const DIRS: readonly [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 
@@ -41,11 +48,11 @@ export class CrustFlow {
     this.apply = [this.buildApply(a), this.buildApply(b)];
   }
 
-  /** How many bottom crust layers (≤4) are full, plain crust voxels that may be given away. */
+  /** How many bottom crust layers (≤ GIVE_MAX) are full, plain crust voxels that may be given away. */
   private static givable(vox: StorageNode<'uint'>, x: THREE.Node<'int'>, z: THREE.Node<'int'>, base: THREE.Node<'uint'>) {
     const n = uint(0).toVar();
     const ok = uint(1).toVar();
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < GIVE_MAX; i++) {
       const v = vox.element(tVoxIdx(x, int(base).add(i), z));
       const m = tMat(v);
       const plain = tFill(v).equal(uint(255)).and(m.notEqual(uint(Mat.MAGMA))).and(m.notEqual(uint(Mat.PERIDOTITE))).and(m.notEqual(uint(Mat.AIR)));
@@ -81,10 +88,14 @@ export class CrustFlow {
           const minT = select(ncont, uint(FLOW_MIN_THICK), uint(FLOW_MIN_THICK_MARGIN));
           const recvOk = ncont.or(nthick.lessThan(uint(MARGIN_RECEIVER_MAX)));
           If(budget.greaterThan(uint(0)).and(recvOk).and(thick.greaterThan(minT)).and(thick.greaterThan(nthick.add(uint(FLOW_DIFF))))
-            .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4))).and(nbase.lessThan(uint(NY))), () => {
+            .and(nthick.lessThan(uint(FLOW_MAX_THICK))).and(nbase.greaterThan(uint(4 + 4 * FLOW_FACE_MAX))).and(nbase.lessThan(uint(NY))), () => {
             // nbase = NY means the neighbour has no crust at all: never a receiver (B11, root would land at the ceiling)
-            bits.assign(bits.bitOr(uint(1 << d)));
-            budget.subAssign(1);
+            // steep thickness gradients (collision fronts) flow faster: 1 layer per FLOW_DIFF of difference, ≤ FLOW_FACE_MAX
+            const want = uMin(uMin(thick.sub(nthick).div(uint(FLOW_DIFF)), uint(FLOW_FACE_MAX)), budget);
+            // continental → oceanic margins stay at 1 layer: faster stretching pancaked continents (B15)
+            const n = select(ncont, want, uMin(want, uint(1)));
+            bits.assign(bits.bitOr(n.shiftLeft(uint(2 * d))));
+            budget.subAssign(n);
           });
         }
       });
@@ -103,14 +114,14 @@ export class CrustFlow {
       const { x, z } = tColXZ(c);
       const mine = flowOut.element(c).toVar();
       const loss = uint(0).toVar();
-      Loop(4, ({ i }) => { loss.addAssign(mine.shiftRight(uint(i)).bitAnd(uint(1))); });
+      Loop(4, ({ i }) => { loss.addAssign(mine.shiftRight(uint(i).mul(2)).bitAnd(uint(3))); });
       // a neighbour sending toward me: its face bit pointing back at me
       const gain = uint(0).toVar();
       for (let d = 0; d < 4; d++) {
         const [dx, dz] = DIRS[d]!;
         const back = d ^ 1; // opposite face index
         const n = flowOut.element(tColIdx(x.add(dx), z.add(dz)));
-        gain.addAssign(n.shiftRight(uint(back)).bitAnd(uint(1)));
+        gain.addAssign(n.shiftRight(uint(2 * back)).bitAnd(uint(3)));
       }
       const base = int(colInfo.element(c).x.bitAnd(uint(0xff)));
       // remove `loss` bottom layers, then add `gain` layers below: net shift of the crust base
