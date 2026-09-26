@@ -2,9 +2,9 @@
 import * as THREE from 'three/webgpu';
 import { GpuFields } from '../../../src/core/gpu';
 import { registerSimFields } from '../../../src/sim/fields';
-import { NZ, colIdx, Mat } from '../../../src/sim/layout';
+import { NX, NZ, colIdx, Mat } from '../../../src/sim/layout';
 import { createTerrain } from '../../../src/render/terrain';
-import { createSides } from '../../../src/render/sides';
+import { createSides, createFaceShading, createFaceQuad, setFaceTectonics } from '../../../src/render/sides';
 import { createWater } from '../../../src/render/water';
 import { createLighting } from '../../../src/render/lighting';
 import { HALF, cellToWorld, voxelToWorldY, updateRenderColumns, Y_RENDER_BOTTOM, setRenderMotion } from '../../../src/render/space';
@@ -43,7 +43,9 @@ async function main() {
   const info = fillSynthWorld(fields);
 
   createLighting(scene);
-  scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
+  const sides = createSides(fields).object;
+  scene.add(createTerrain(fields).object, sides, createWater(fields).object);
+  let cap: ReturnType<typeof createFaceQuad> | null = null;
 
   const project = (x: number, y: number, z: number): Pt => {
     const v = new THREE.Vector3(x, y, z).project(camera);
@@ -115,6 +117,30 @@ async function main() {
     setPlateOffset(ox: number, oz: number) {
       setRenderMotion(fields, { runId: 0, plateOffsets(out: Float32Array) { for (let i = 0; i < out.length; i += 2) { out[i] = ox; out[i + 1] = oz; } } });
     },
+    /**
+     * Slice-cap stand-in: the outer faces hidden, a movable cut quad (slice.ts's caps) on the +Z face
+     * plane instead, i.e. the same column row the outer face shows.
+     */
+    showCap(on: boolean) {
+      if (!cap) {
+        cap = createFaceQuad(createFaceShading(fields), 'test-cap');
+        const z = HALF - 1e-4;
+        cap.set(-HALF, z, HALF, z, 0, 1);
+        scene.add(cap.object);
+      }
+      cap.object.visible = on; sides.visible = !on;
+    },
+    /** Two plates split at column `split` (x); plate velocities (cells/My) and the Tectonics face layer. */
+    setPlates(split: number, v0: [number, number], v1: [number, number], opacity: number) {
+      for (const par of [0, 1]) {
+        const pid = fields.cpuArray('plateId', par as 0 | 1) as Uint32Array;
+        for (let c = 0; c < pid.length; c++) pid[c] = (c % NX) < split ? 0 : 1;
+      }
+      fields.markDirty('plateId');
+      setFaceTectonics(opacity, [{ x: v0[0], y: v0[1], z: 1, w: 0 }, { x: v1[0], y: v1[1], z: 1, w: 0 }] as THREE.Vector4[]);
+    },
+    /** Screen point of a face-plane position (x world, voxel y, on the +Z face). */
+    project(x: number, vy: number) { return project(x, voxelToWorldY(vy), HALF); },
     /** Render one frame (after a parity change) without moving the camera. */
     async frame() { await frame(); },
     /** Decode a PNG screenshot and sample it (3×3 mean around each point) + global stats. */

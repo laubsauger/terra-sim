@@ -5,32 +5,65 @@
 // step (organic lines instead of voxel stairs), per-material sheen, micro-normal grooves, glowing
 // magma and a hot, slowly convecting mantle (emissive > 1 → bloom). The water column on the faces
 // is glass-like: refracted scene behind, Beer-Lambert tint by thickness, a meniscus line.
+// The shading is one shared set (createFaceShading) for any vertical cut quad: the outer faces here and
+// the slice caps (src/slice) render the cross-section identically. With the Tectonics layer on
+// (setFaceTectonics) plate boundaries run down the cut: classified like the map lines, dipping under
+// the higher plate at convergent boundaries, each plate's crust faintly tinted with its colour.
 import * as THREE from 'three/webgpu';
 import {
-  Fn, vec2, vec3, vec4, float, int, uint, uniform, positionGeometry, positionWorld, normalGeometry, Discard,
-  mix, smoothstep, saturate, sin, cos, floor, fract, min, max, pow, hash, abs, clamp, texture, normalize, step,
+  Fn, If, vec2, vec3, vec4, float, int, uint, uniform, uniformArray, positionGeometry, positionWorld, normalGeometry, Discard,
+  mix, smoothstep, saturate, sin, cos, exp, floor, fract, min, max, pow, hash, abs, clamp, texture, normalize, step,
   transformNormalToView, dot, screenUV, positionView, viewportSharedTexture,
 } from 'three/tsl';
 import { NX, NY, CELL, VOXEL_H, Mat, Y_SEA_NOMINAL } from '../sim/layout';
 import { tMat, tFill } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
 import { HALF, tWorldY, tVoxelY, tWorldToCell, tWorldToColumn, columnSampler, voxReader, tTopVoxel, ambTime, Y_RENDER_BOTTOM, vertEx, advect, displayBuffers } from './space';
-import { tColIdx } from '../sim/tslLayout';
+import { tColIdx, uMin } from '../sim/tslLayout';
 import { viewDirWorld } from './space';
 import { createPaletteNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
-import { WATER_SCATTER, sceneViewZ, waterTransmit, swell } from './water';
+import { WATER_SCATTER, sceneViewZ, waterTransmit, swell, seabedGlowK } from './water';
 import { skyColor, skyU } from './sky';
 import { CX, CZ, CY } from '../sim/mantleModel';
+import { MAX_PLATES } from '../sim/worldData';
+import { BOUNDARY, PLATE_COLORS } from '../overlay/colormaps';
 import { shadowProxy } from './lighting';
 import { cloudShadowAt } from '../atmo/atmosphere';
 
 type F = THREE.Node<'float'>;
 type I = THREE.Node<'int'>;
+type U = THREE.Node<'uint'>;
 type V3 = THREE.Node<'vec3'>;
+type V4 = THREE.Node<'vec4'>;
 
 /** Voxel layers above the rendered bottom where the mantle glows (narrow, deep, subtle). */
 const HOT_TOP = Y_RENDER_BOTTOM + 14;
+
+/** sRGB hex → linear display colour (the overlay's convention). */
+const linHex = (h: string) => new THREE.Color().setStyle(h, THREE.SRGBColorSpace);
+
+/**
+ * Plate boundaries on the cut faces, shared by every face material. Driven by the overlay module
+ * (setFaceTectonics each frame while the Tectonics layer is visible); 0 opacity = off, no cost.
+ */
+const faceTec = {
+  opacity: uniform(0),
+  vel: uniformArray([...Array(MAX_PLATES)].map(() => new THREE.Vector4()), 'vec4'),
+  colors: uniformArray([...Array(MAX_PLATES)].map((_, i) => linHex(PLATE_COLORS[i % PLATE_COLORS.length]!)), 'color'),
+};
+/**
+ * Tectonics layer on the cut faces: `opacity` 0..1 (the layer's eased fade), plate velocities
+ * (vx, vz, alive, ·) in cells/My by plate id and plate colours (linear), as the overlay module keeps them.
+ */
+export function setFaceTectonics(opacity: number, plateVel?: readonly THREE.Vector4[], plateColors?: readonly THREE.Color[]): void {
+  faceTec.opacity.value = opacity;
+  const v = faceTec.vel.array as THREE.Vector4[], c = faceTec.colors.array as THREE.Color[];
+  if (plateVel) for (let i = 0; i < Math.min(MAX_PLATES, plateVel.length); i++) v[i]!.copy(plateVel[i]!);
+  if (plateColors) for (let i = 0; i < Math.min(MAX_PLATES, plateColors.length); i++) c[i]!.copy(plateColors[i]!);
+}
+/** Cells of horizontal offset per voxel layer of depth for a subducting slab (≈ 30° dip). */
+const SLAB_DIP = 0.55;
 
 /** Five quads; y in voxel units (Y_RENDER_BOTTOM..NY), mapped to world by positionNode so vertEx applies. */
 function createSideGeometry(): THREE.BufferGeometry {
@@ -56,7 +89,21 @@ function createSideGeometry(): THREE.BufferGeometry {
   return g;
 }
 
-export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {}): { object: THREE.Object3D; dispose(): void } {
+/**
+ * Cut-face shading for vertical quads whose vertices hold world x, z and y in voxel units (see
+ * createSideGeometry / createFaceQuad) and an outward normal along ±x or ±z. The quad may sit anywhere
+ * on the grid: the section shows the column just inside it.
+ */
+export interface FaceShading {
+  rock: THREE.MeshStandardNodeMaterial;
+  water: THREE.MeshStandardNodeMaterial;
+  positionNode: THREE.Node;
+  /** Shadow-pass mask: solid below the column surface. */
+  shadowMask: THREE.Node;
+  dispose(): void;
+}
+
+export function createFaceShading(fields: GpuFields, opts: { seaLevel?: number } = {}): FaceShading {
   const S = columnSampler(fields);
   const vox = voxReader(fields);
   const pal = createPaletteNodes();
@@ -70,7 +117,6 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
   const crustT = fields.names().includes('crustTemp') ? fields.pair('crustTemp')[0] : null;
   const tex = lookTextures();
   const seaLevel = uniform(opts.seaLevel ?? Y_SEA_NOMINAL);
-  const geo = createSideGeometry();
   const positionNode = vec3(positionGeometry.x, tWorldY(positionGeometry.y), positionGeometry.z);
 
   const p = positionWorld;
@@ -95,7 +141,8 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
   // the neighbouring column (or, across the torus seam, the far side of the block) whenever it crossed
   // ±0.5, which read as the faces alternating between two cross-sections.
   const oAlong = mix(faceOff.x, faceOff.y, onX);
-  const edgeCol = pick(tWorldToColumn(p.x), tWorldToColumn(p.z)).toVar('sideEdge');
+  // the column just inside the face (outer faces: the edge column; slice caps: the column at the cut)
+  const edgeCol = pick(tWorldToColumn(p.x.sub(normalGeometry.x.mul(CELL * 0.5))), tWorldToColumn(p.z.sub(normalGeometry.z.mul(CELL * 0.5)))).toVar('sideEdge');
 
   // Organic warp so layer boundaries wander instead of following the voxel grid.
   const warpT = texture(tex.detail, vec2(along.mul(0.55), vy.mul(0.018))).toVar('sideWarp');
@@ -163,6 +210,65 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
   const a0 = int(clamp(u0, 0, NX - 1));
   const colWater = S.waterAt(pick(edgeCol, a0), pick(a0, edgeCol)).toVar('sideColWater');
 
+  // Plate boundaries down the cut (Tectonics layer). Along the face on the advected grid (no warp: a
+  // clean line), a boundary sits half-way between two edge columns of different plates (each side two
+  // columns of the same plate, so single-cell noise draws nothing). Classified from the plates'
+  // relative motion along the face like the map lines; at convergent boundaries the line dips under
+  // the higher (overriding) plate as a stylised slab, elsewhere it runs straight down.
+  // tecLine: (line colour, line alpha); tecTint: (plate colour, 1) of the column's plate.
+  const pidPair = fields.names().includes('plateId') ? fields.pair<'uint'>('plateId') : null;
+  const pidParity = uniform(0, 'uint').onRenderUpdate(() => (pidPair ? fields.parity('plateId') : 0));
+  const pid = (a: I): U => {
+    const idx = tColIdx(pick(edgeCol, a), pick(a, edgeCol)).toVar(); // var before the If (BRANCH-FREE NOTE)
+    const v = uint(0).toVar();
+    if (pidPair) If(pidParity.equal(uint(0)), () => { v.assign(pidPair[0].element(idx)); }).Else(() => { v.assign(pidPair[1].element(idx)); });
+    return v;
+  };
+  const uMin4 = (id: U) => uMin(id, uint(MAX_PLATES - 1));
+  const tecLine = Fn(() => {
+    const line = vec4(0).toVar();
+    If(faceTec.opacity.greaterThan(0.001), () => {
+      const uB = tWorldToCell(along).sub(oAlong).toVar();
+      const d = max(depth, 0).toVar();
+      const tan = vec2(float(1).sub(onX), onX); // +u in world xz
+      const velOf = (id: U) => (faceTec.vel.element(uMin4(id)) as unknown as V4).xy;
+      const lc = (h: string) => { const c = linHex(h); return vec3(c.r, c.g, c.b); };
+      const cConv = lc(BOUNDARY.convergent), cDiv = lc(BOUNDARY.divergent), cTr = lc(BOUNDARY.transform);
+      for (const sgn of [0, 1, -1]) {
+        const ub = uB.sub(d.mul(SLAB_DIP * sgn));
+        const j = floor(ub);
+        const ja = int(j);
+        const pA = pid(ja), pB = pid(ja.add(1));
+        const stable = float(pid(ja.sub(1)).equal(pA).and(pid(ja.add(2)).equal(pB)));
+        const isB = float(pA.notEqual(pB)).mul(stable);
+        const rel = velOf(pA).sub(velOf(pB));
+        const closing = dot(rel, tan).div(max(rel.length(), 1e-4));
+        const conv = smoothstep(0.3, 0.45, closing), div = smoothstep(0.3, 0.45, closing.negate());
+        const col = mix(mix(cTr, cConv, conv), cDiv, div);
+        let w: F;
+        if (sgn === 0) w = float(1).sub(conv).mul(float(1).sub(smoothstep(40, 90, d)));
+        else {
+          // dips toward +u (sgn 1) when the plate at +u stands higher: it overrides, the other goes under
+          const hA = S.surfAt(pick(edgeCol, ja), pick(ja, edgeCol)), hB = S.surfAt(pick(edgeCol, ja.add(1)), pick(ja.add(1), edgeCol));
+          const over = sgn > 0 ? step(hA, hB) : float(1).sub(step(hA, hB));
+          w = conv.mul(over).mul(float(1).sub(smoothstep(50, 80, d)));
+        }
+        const dist = abs(ub.sub(j).sub(0.5));
+        const a = float(1).sub(smoothstep(0.18, 0.5, dist)).mul(isB).mul(w);
+        line.assign(vec4(mix(line.rgb, col, a), max(line.a, a)));
+      }
+    });
+    return line;
+  }).once()().toVar('sideTecLine');
+  const tecTint = Fn(() => {
+    const tint = vec3(0).toVar();
+    If(faceTec.opacity.greaterThan(0.001), () => {
+      const own = pid(int(floor(tWorldToCell(along).sub(oAlong).add(0.5))));
+      tint.assign(faceTec.colors.element(uMin4(own)) as unknown as V3);
+    });
+    return tint;
+  }).once()().toVar('sideTecTint');
+
   // Strata grooves: wavy fine bands; their phase also tilts the normal (micro relief on the face).
   const bandPhase = vy.add(warpT.b.sub(0.5).mul(5)).mul(2.2).toVar('sideBandPhase');
   const fineN = texture(tex.detail, vec2(along.mul(0.25), vy.mul(0.1))).toVar('sideFine');
@@ -210,7 +316,10 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
     const warm = smoothstep(Y_RENDER_BOTTOM + 45, Y_RENDER_BOTTOM, vy);
     col = mix(col, col.mul(streak).mul(mix(vec3(1), vec3(1.18, 0.92, 0.8), warm)), periW);
     const hot = pow(smoothstep(HOT_TOP, Y_RENDER_BOTTOM, vy), 1.5).mul(periW);
-    return mix(col, col.mul(vec3(1.3, 0.55, 0.3)), hot.mul(0.7));
+    col = mix(col, col.mul(vec3(1.3, 0.55, 0.3)), hot.mul(0.7));
+    // Tectonics layer: faint plate-colour tint of the crust, dark casing under the boundary lines
+    col = mix(col, col.mul(tecTint.mul(1.8)), faceTec.opacity.mul(0.3).mul(float(1).sub(periW)));
+    return mix(col, col.mul(0.3), tecLine.a.mul(faceTec.opacity).mul(0.6));
   }).once()().toVar('sideColor');
 
   // Heat in cross-section from the sim's half-res 'crustTemp' (°C; pair[0] is current between mantle
@@ -241,7 +350,8 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
     // Display fill so faces turned away from the sun still read as geology, not a black void
     // (sky-tinted, so it fades with the night).
     const fill = color.mul(skyU.zenith.mul(0.35).add(0.07));
-    return blendV(pal.emissive).mul(periGlow).mul(magGlow).add(fill).add(thermal);
+    const tec = tecLine.rgb.mul(tecLine.a.mul(faceTec.opacity).mul(1.3)); // boundary lines read on unlit faces too
+    return blendV(pal.emissive).mul(periGlow).mul(magGlow).add(fill).add(thermal).add(tec);
   })();
 
   // Micro normal: groove tilt from the band phase + grain relief, all in the face plane.
@@ -260,16 +370,11 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
   rockMat.roughnessNode = blendF(pal.rough).mul(mix(0.55, 0.85, grainT.b)).mul(mix(1.0, 0.85, magW));
   rockMat.emissiveNode = emissive;
   rockMat.receivedShadowNode = Fn(([s]: [F]) => s.mul(cloudShadowAt(positionWorld))) as unknown as () => THREE.Node;
-  const rock = new THREE.Mesh(geo, rockMat);
-  rock.name = 'sides';
-  rock.frustumCulled = false;
-  rock.receiveShadow = true;
-  // Shadow proxy with the same silhouette as the colour pass (discard above the column surface).
-  const proxy = shadowProxy(geo, positionNode, Fn(() => {
+  // Shadow proxy mask with the same silhouette as the colour pass (discard above the column surface).
+  const shadowMask = Fn(() => {
     const y = tVoxelY(positionWorld.y);
     return y.lessThanEqual(S.height(S.corners(tWorldToCell(positionWorld.x), tWorldToCell(positionWorld.z))));
-  })());
-  rock.add(proxy);
+  })();
 
   // ---- water on the faces: glass-like column between surfY and the wet water level ----
   const wInfo = Fn(() => {
@@ -290,8 +395,10 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
     const rayScale = positionView.length().div(fragZ.negate().max(1e-4));
     // Thickness to whatever is behind the glass (seabed, or deep into the block), capped.
     const thick = min(fragZ.sub(sceneViewZ(screenUV)).max(0).mul(rayScale), 0.9).toVar('glassThick');
-    const T = waterTransmit(thick.add(CELL * 0.5)).toVar('glassT');
     const V = viewDirWorld;
+    // seafloor magma glow behind the glass passes neutrally, as through the sea sheet (water.ts)
+    const glowK = seabedGlowK(fields, positionWorld.add(V.mul(thick)));
+    const T = mix(waterTransmit(thick.add(CELL * 0.5)), vec3(exp(thick.mul(-3.0))), glowK).toVar('glassT');
     const fres = float(0.02).add(pow(float(1).sub(saturate(dot(normalGeometry, V.negate()))), 5).mul(0.98));
     const refl = skyColor(V.sub(normalGeometry.mul(dot(V, normalGeometry).mul(2))) as V3, false);
     // Meniscus: bright line right at the surface, a thin darker line just below it.
@@ -302,17 +409,62 @@ export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {})
     waterMat.emissiveNode = viewportSharedTexture(screenUV).rgb.mul(T).mul(float(1).sub(fres)).mul(float(1).sub(menDark.mul(0.35)))
       .add(refl.mul(fres)).add(vec3(0.7, 0.9, 1.0).mul(menBright.mul(0.35)));
   }
-  const water = new THREE.Mesh(geo, waterMat);
-  water.name = 'sides-water';
+  return { rock: rockMat, water: waterMat, positionNode, shadowMask, dispose() { rockMat.dispose(); waterMat.dispose(); } };
+}
+
+/** Rock + glass water meshes (and the shadow proxy) of one face geometry drawn with `shading`. */
+function faceMeshes(geo: THREE.BufferGeometry, shading: FaceShading, name: string) {
+  const rock = new THREE.Mesh(geo, shading.rock);
+  rock.name = name;
+  rock.frustumCulled = false;
+  rock.receiveShadow = true;
+  const proxy = shadowProxy(geo, shading.positionNode, shading.shadowMask);
+  rock.add(proxy);
+  const water = new THREE.Mesh(geo, shading.water);
+  water.name = `${name}-water`;
   water.frustumCulled = false;
   water.renderOrder = 3;
   water.receiveShadow = true;
+  return { rock, water, proxy };
+}
 
+export function createSides(fields: GpuFields, opts: { seaLevel?: number } = {}): { object: THREE.Object3D; dispose(): void } {
+  const shading = createFaceShading(fields, opts);
+  const geo = createSideGeometry();
+  const { rock, water, proxy } = faceMeshes(geo, shading, 'sides');
   const group = new THREE.Group();
   group.name = 'sides-group';
   group.add(rock, water);
   return {
     object: group,
-    dispose() { geo.dispose(); rockMat.dispose(); waterMat.dispose(); (proxy.material as THREE.Material).dispose(); },
+    dispose() { geo.dispose(); shading.dispose(); (proxy.material as THREE.Material).dispose(); },
+  };
+}
+
+/**
+ * One movable vertical cut quad with the face shading (slice caps): `set` places it on the plane
+ * x = const (normal ±x) or z = const (normal ±z) between two horizontal endpoints, full slice height.
+ */
+export function createFaceQuad(shading: FaceShading, name: string) {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(12), nrm = new Float32Array(12);
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nrm, 3));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  const { rock, water, proxy } = faceMeshes(geo, shading, name);
+  const group = new THREE.Group();
+  group.name = `${name}-group`;
+  group.add(rock, water);
+  return {
+    object: group,
+    /** a → b along the bottom edge, counter-clockwise seen from the side the normal (nx, nz) points to. */
+    set(ax: number, az: number, bx: number, bz: number, nx: number, nz: number) {
+      const B = Y_RENDER_BOTTOM, H = NY;
+      pos.set([ax, B, az, bx, B, bz, bx, H, bz, ax, H, az]);
+      for (let k = 0; k < 4; k++) nrm.set([nx, 0, nz], k * 3);
+      geo.attributes.position!.needsUpdate = true;
+      geo.attributes.normal!.needsUpdate = true;
+    },
+    dispose() { geo.dispose(); (proxy.material as THREE.Material).dispose(); },
   };
 }

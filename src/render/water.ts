@@ -63,6 +63,19 @@ export function swell(xz: V2, depth: F): V3 {
   })() as V3;
 }
 
+/**
+ * How much the seafloor behind `bed` (world point where a view ray through water meets the bed) glows
+ * with magma: seams, submarine lava, vents (0..1). Where it does, water passes the light neutrally
+ * (see createWater); the glass water on the cut faces does the same.
+ */
+export function seabedGlowK(fields: GpuFields, bed: V3): F {
+  const heat = heatSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
+  const volc = volcanoSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
+  const rg = seamGlow(volc.zw, float(1)); // the seafloor seam it lets through (at full pulse: covers it)
+  const lavaK = smoothstep(0.005, 0.2, heat.y).mul(smoothstep(600, 950, heat.z));
+  return saturate(rg.x.mul(1.2).add(rg.y.mul(2)).add(lavaK).add(smoothstep(0.02, 0.4, volc.x))).mul(RIDGE_HALO) as F;
+}
+
 export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose(): void } {
   const S = columnSampler(fields);
   const tex = lookTextures();
@@ -137,12 +150,7 @@ export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose():
   // light is attenuated neutrally with the path length instead (darker and a little greyer with depth,
   // never green), and the cyan body in front of it thins out so the vent does not read blue. The glow
   // is looked up where the view ray meets the bed (parallax-correct), so nothing floats on the surface.
-  const bed = p.add(V.mul(thick)).toVar('wBed');
-  const heat = heatSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
-  const volc = volcanoSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
-  const rg = seamGlow(volc.zw, float(1)); // the seafloor seam it lets through (at full pulse: covers it)
-  const lavaK = smoothstep(0.005, 0.2, heat.y).mul(smoothstep(600, 950, heat.z));
-  const glowK = saturate(rg.x.mul(1.2).add(rg.y.mul(3)).add(lavaK).add(smoothstep(0.02, 0.4, volc.x))).mul(RIDGE_HALO).toVar('wGlowK');
+  const glowK = seabedGlowK(fields, p.add(V.mul(thick))).toVar('wGlowK');
   const tN = exp(thick.mul(-3.0)); // neutral transmittance of the glow's light
   const Tg = mix(T, vec3(tN), glowK);
   const refrG = mix(refr, vec3(dot(refr, vec3(0.3, 0.59, 0.11))), float(1).sub(tN).mul(0.15).mul(glowK));

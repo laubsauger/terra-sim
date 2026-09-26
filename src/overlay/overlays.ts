@@ -22,6 +22,7 @@ import { createArrows } from './arrows';
 import { createLegend } from './legend';
 import { createTectonicsPill } from './tectonicsUi';
 import { PLATE_COLORS, childColor, hexToLinear } from './colormaps';
+import { setFaceTectonics } from '../render/sides';
 
 export { OVERLAYS } from './defs';
 
@@ -262,6 +263,7 @@ export function createOverlays(o: OverlayOptions) {
     tecFade += ((tec ? 1 : 0) - tecFade) * k;
     if (Math.abs(tecFade - (tec ? 1 : 0)) < 1e-3) tecFade = tec ? 1 : 0;
     U.tecOpacity.value = tecFade;
+    setFaceTectonics(tecFade, prep.plateVel, plateColors); // plate boundaries down the cut faces + slice caps
     tecSheet.visible = tecFade > 0 && d?.id !== 'plates'; // the Plates overlay draws the same lines itself
     fadeClouds(k);
     const plates = showArrows() || d?.id === 'plates' || tecFade > 0;

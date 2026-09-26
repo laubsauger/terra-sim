@@ -239,3 +239,49 @@ test('rain films on land never lift the water sheet; sea and streams still draw'
   expect(flank, 'stream flank samples').toBeGreaterThan(20);
   expect(drawn / flank, `stream drawn on ${drawn}/${flank} flank samples`).toBeGreaterThan(0.8);
 });
+
+// User: "cutting away with the handles leaves the sides rendering differently and missing the mantle magma
+// effect". The slice caps share the outer faces' shading: a cap on the same column row as the +Z face must
+// look the same pixel for pixel (strata, smoothing, mantle glow), not flat voxel blocks.
+test('a slice cap shows the same cross-section as the outer face on that row', async ({ page }) => {
+  mkdirSync(OUT, { recursive: true });
+  await page.goto('/tests/gpu/support/render.html');
+  await page.waitForFunction(() => (window as any).rt?.ready === true, null, { timeout: 60_000 });
+  const pts: FrontPts = await page.evaluate(() => (window as any).rt.view('front'));
+  const all = [...pts.strata, pts.rockUnderLand];
+  const face = await shoot(page, 'cap-face', all);
+  await page.evaluate(() => { (window as any).rt.showCap(true); return (window as any).rt.frame(); });
+  const cap = await shoot(page, 'cap-cap', all);
+  expect(distinct(cap.samples), `cap strata ${JSON.stringify(cap.samples)}`).toBeGreaterThanOrEqual(5);
+  cap.samples.forEach((c, k) => expect(dist(c, face.samples[k]!), `sample ${k} (y ${all[k]!.y}): cap ${c} face ${face.samples[k]}`).toBeLessThan(18));
+});
+
+// User: "see plate boundaries into the depth … in the cut-outs on the sides". With the Tectonics layer on,
+// a boundary crossing the face draws a line down the cut (divergent: straight, cyan like the map lines);
+// with the layer off the face is untouched.
+test('plate boundaries run down the cut face only while the Tectonics layer is on', async ({ page }) => {
+  mkdirSync(OUT, { recursive: true });
+  await page.goto('/tests/gpu/support/render.html');
+  await page.waitForFunction(() => (window as any).rt?.ready === true, null, { timeout: 60_000 });
+  const meta = await page.evaluate(() => (window as any).rt.meta);
+  await page.evaluate(() => (window as any).rt.view('front'));
+  const SPLIT = 64; // under the land crest (LAND_X)
+  const pts = await page.evaluate(([s, top]) => {
+    const rt = (window as any).rt, CELL = 4 / 256, x0 = (s + 0.5) * CELL - 2 - CELL / 2; // half-way between columns s-1 and s
+    return [rt.project(x0, top - 12), rt.project(x0, top - 30), rt.project(x0 + 12 * CELL, top - 12)];
+  }, [SPLIT, meta.landSurf]);
+  const run = async (opacity: number, tag: string) => {
+    await page.evaluate(([s, o]) => { (window as any).rt.setPlates(s, [-1, 0], [1, 0], o); return (window as any).rt.frame(); }, [SPLIT, opacity]);
+    return (await shoot(page, `tec-${tag}`, pts)).samples;
+  };
+  const off = await run(0, 'off');
+  const on = await run(1, 'on');
+  for (const k of [0, 1]) {
+    expect(dist(on[k]!, off[k]!), `boundary pixel ${k}: on ${on[k]} off ${off[k]}`).toBeGreaterThan(60);
+    expect(on[k]![2]!, `divergent line is cyan: ${on[k]}`).toBeGreaterThan(on[k]![0]!);
+  }
+  // away from the boundary only the faint plate tint changes
+  expect(dist(on[2]!, off[2]!), `off-boundary pixel: on ${on[2]} off ${off[2]}`).toBeLessThan(dist(on[0]!, off[0]!) / 2);
+  const offAgain = await run(0, 'off2');
+  offAgain.forEach((c, k) => expect(dist(c, off[k]!), `layer off again, pixel ${k}`).toBeLessThan(12));
+});

@@ -389,8 +389,10 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     return ridgeGlowC.add(lavaGlow).add(craterGlow);
   })();
   // Crust albedo: black basalt under lava; old channels stay dark basalt ribbons after the flow stops.
-  // Fresh basalt along spreading seams (the glow sits on dark rock, not on pale sediment).
-  const lavaCrust = max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)), smoothstep(0.08, 0.5, volcS.z).mul(0.6));
+  // Fresh basalt along spreading seams, a little wider than the crack: the glow sits on dark rock, and
+  // where the sea passes the glow light neutrally (water.ts) it shows basalt, never a pale sand band.
+  const lavaCrust = max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)),
+    max(smoothstep(0.1, 0.5, volcS.z), smoothstep(0.1, 0.5, volcS.w).mul(0.7)).mul(0.9));
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   mat.positionNode = positionNode;

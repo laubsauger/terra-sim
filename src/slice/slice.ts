@@ -1,13 +1,10 @@
 // Slice inspection (game UI): move the cut planes on X and Z with 3D brass grips on the pedestal edge.
 // Everything that belongs to the block is reparented into a ClippingGroup (pedestal/backdrop stay whole);
-// cap faces at the cut show the voxel cross-section there (strata, magma, water column).
+// cap faces at the cut show the voxel cross-section there with the same shading as the outer cut faces.
 import * as THREE from 'three/webgpu';
-import { Fn, If, Discard, float, int, uint, vec3, vec4, positionWorld, mix, fract, floor, clamp, smoothstep, uniform, sin } from 'three/tsl';
 import type { GpuFields } from '../core/gpu';
-import { NX, NY, CELL, Mat } from '../sim/layout';
-import { tColIdx, tMat } from '../sim/tslLayout';
-import { HALF, voxelToWorldY, tVoxelY, voxReader, Y_RENDER_BOTTOM } from '../render/space';
-import { createPaletteNodes } from '../render/palette';
+import { HALF } from '../render/space';
+import { createFaceShading, createFaceQuad } from '../render/sides';
 import { TRAY_H } from '../render/backdrop';
 import type { Stage } from '../render/stage';
 
@@ -40,57 +37,11 @@ export function createSlice(stage: Stage, fields: GpuFields): Slice {
   };
   adopt();
 
-  // ---- cap faces: cross-section at the cut ----
-  const cutU = { x: uniform(HALF), z: uniform(HALF) };
-  const pal = createPaletteNodes();
-  const vox = voxReader(fields);
-  const surfY = fields.cur('surfY');
-  const water = fields.cur('water');
-  const yBot = voxelToWorldY(Y_RENDER_BOTTOM), yTop = voxelToWorldY(NY);
-  function capMaterial(axis: 'x' | 'z') {
-    const m = new THREE.MeshStandardNodeMaterial({ roughness: 0.8, side: THREE.DoubleSide });
-    const shade = Fn(() => {
-      // column on the cut plane: fixed coordinate from the cut, the other from the fragment
-      const cx = axis === 'x' ? cutU.x.sub(0.5 * CELL) : positionWorld.x;
-      const cz = axis === 'z' ? cutU.z.sub(0.5 * CELL) : positionWorld.z;
-      const x = int(clamp(floor(cx.add(HALF).div(CELL)), 0, NX - 1));
-      const z = int(clamp(floor(cz.add(HALF).div(CELL)), 0, NX - 1));
-      const c = tColIdx(x, z);
-      const vy = tVoxelY(positionWorld.y).toVar();
-      const s = surfY.element(c).toVar();
-      const lvl = s.add(water.element(c));
-      If(vy.greaterThan(lvl), () => { Discard(); });
-      const out = vec4(0.13, 0.36, 0.48, 1).toVar(); // water column
-      If(vy.lessThanEqual(s), () => {
-        const v = vox(x, int(floor(vy)), z);
-        const mat = tMat(v);
-        const band = sin(vy.mul(6.2831).add(float(x).mul(0.37))).mul(0.5).add(0.5).mul(pal.band(mat)).mul(0.6);
-        const depthDark = smoothstep(float(0), float(40), s.sub(vy)).mul(0.25);
-        const base = pal.color(mat).mul(float(1).sub(band).sub(depthDark));
-        out.assign(vec4(mix(base, base.mul(0.6), fract(vy).mul(0.08)), 1));
-      });
-      return out;
-    });
-    m.colorNode = shade();
-    m.emissiveNode = Fn(() => {
-      const cx = axis === 'x' ? cutU.x.sub(0.5 * CELL) : positionWorld.x;
-      const cz = axis === 'z' ? cutU.z.sub(0.5 * CELL) : positionWorld.z;
-      const x = int(clamp(floor(cx.add(HALF).div(CELL)), 0, NX - 1));
-      const z = int(clamp(floor(cz.add(HALF).div(CELL)), 0, NX - 1));
-      const v = vox(x, int(floor(tVoxelY(positionWorld.y))), z);
-      const mat = tMat(v);
-      // soft fill so the section reads like the lit cut faces (they use a sky-tinted fill too)
-      const fill = pal.color(mat).mul(0.28).mul(vec3(1.0, 0.95, 0.9));
-      const periLift = vec3(0.09, 0.075, 0.06).mul(float(mat.equal(uint(Mat.PERIDOTITE))));
-      return pal.emissive(mat).mul(float(mat.equal(uint(Mat.MAGMA))).mul(0.6)).add(fill).add(periLift);
-    })();
-    return m;
-  }
-  const capX = new THREE.Mesh(new THREE.PlaneGeometry(1, 1).rotateY(Math.PI / 2), capMaterial('x'));
-  const capZ = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), capMaterial('z'));
-  for (const cap of [capX, capZ]) { cap.frustumCulled = false; cap.visible = false; cap.castShadow = true; cap.receiveShadow = true; }
-  capX.name = 'slice-cap-x'; capZ.name = 'slice-cap-z';
-  scene.add(capX, capZ);
+  // ---- cap faces: cross-section at the cut, with the outer cut faces' shading (render/sides.ts) ----
+  const capShading = createFaceShading(fields);
+  const capX = createFaceQuad(capShading, 'slice-cap-x'); // plane x = cut.x, facing +x
+  const capZ = createFaceQuad(capShading, 'slice-cap-z'); // plane z = cut.z, facing +z
+  for (const cap of [capX, capZ]) { cap.object.visible = false; scene.add(cap.object); }
 
   // ---- grips ----
   const gripMat = new THREE.MeshStandardNodeMaterial({ color: 0xc9a25a, metalness: 0.85, roughness: 0.3 });
@@ -115,15 +66,11 @@ export function createSlice(stage: Stage, fields: GpuFields): Slice {
   function apply() {
     px.constant = cut.x + (cut.x >= HALF - 1e-4 ? 0.01 : 0);
     pz.constant = cut.z + (cut.z >= HALF - 1e-4 ? 0.01 : 0);
-    cutU.x.value = cut.x; cutU.z.value = cut.z;
-    const h = yTop - yBot;
-    // cap X lives on the plane x = cut.x spanning z ∈ [-HALF, cut.z]
-    capX.visible = cut.x < HALF - 1e-4;
-    capX.scale.set(1, h, cut.z + HALF);
-    capX.position.set(cut.x, (yTop + yBot) / 2, (cut.z - HALF) / 2);
-    capZ.visible = cut.z < HALF - 1e-4;
-    capZ.scale.set(cut.x + HALF, h, 1);
-    capZ.position.set((cut.x - HALF) / 2, (yTop + yBot) / 2, cut.z);
+    // cap X lives on the plane x = cut.x spanning z ∈ [-HALF, cut.z], cap Z on z = cut.z for x ∈ [-HALF, cut.x]
+    capX.object.visible = cut.x < HALF - 1e-4;
+    capX.set(cut.x, cut.z, cut.x, -HALF, 1, 0);
+    capZ.object.visible = cut.z < HALF - 1e-4;
+    capZ.set(-HALF, cut.z, cut.x, cut.z, 0, 1);
     gripX.position.set(cut.x, gripY, HALF + GRIP_OFFSET);
     gripZ.position.set(HALF + GRIP_OFFSET, gripY, cut.z);
   }
