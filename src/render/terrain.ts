@@ -38,7 +38,7 @@ export const blackbody = (T: F): V3 => {
 };
 
 /** Magma orange (linear), the hue of rift and ridge glow on land and seen through the sea (water.ts). */
-export const MAGMA_ORANGE = [1.0, 0.3, 0.045] as const;
+export const MAGMA_ORANGE = [1.0, 0.24, 0.03] as const;
 
 /**
  * Slow patchy intensity along spreading seams (0.45..1.15): two world-space noise layers drifting in
@@ -344,12 +344,13 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     const wet = S.level(S.corners(tWorldToCell(p.x), tWorldToCell(p.z))).wet;
     const subaerial = float(1).sub(step(0, uwDepth)).mul(float(1).sub(smoothstep(0.0, 0.15, wet)));
     const submerged = step(0, uwDepth);
-    // magma-orange core → dim halo of the same hue (kept moderate: little bloom)
-    const ridgeCol = vec3(...MAGMA_ORANGE).mul(rg.x.mul(1.6).add(rg.y.mul(0.8)));
-    // Seafloor seam: same field without the fissure pattern, a little dimmer; water.ts lets this light
-    // through the sea (see there).
+    // magma-orange core → dim halo of the same hue; peaks stay near the bloom threshold, so the crack
+    // does not bloom into a wide band
+    const ridgeCol = vec3(...MAGMA_ORANGE).mul(rg.x.mul(1.2).add(rg.y.mul(0.5)));
+    // Seafloor seam: same field without the fissure pattern and without a halo (in warm low sun a halo
+    // over the seabed reads as a sandy road); water.ts lets this light through the sea (see there).
     const rgSea = seamGlow(volcS.zw, pulse);
-    const seaCol = vec3(...MAGMA_ORANGE).mul(rgSea.x.mul(1.4).add(rgSea.y));
+    const seaCol = vec3(...MAGMA_ORANGE).mul(rgSea.x.mul(1.1));
     const ridgeGlowC = ridgeCol.mul(subaerial).add(seaCol.mul(submerged));
     // Lava as molten rock (display-eased depth / temperature / channel memory): black crust plates
     // drifting downhill (two-phase flow map along the slope), glowing cracks between them, an
@@ -392,7 +393,7 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
   // Fresh basalt along spreading seams, a little wider than the crack: the glow sits on dark rock, and
   // where the sea passes the glow light neutrally (water.ts) it shows basalt, never a pale sand band.
   const lavaCrust = max(max(lavaMask.mul(0.97), volcS.y.mul(float(1).sub(lavaMask)).mul(0.75)),
-    max(smoothstep(0.1, 0.5, volcS.z), smoothstep(0.1, 0.5, volcS.w).mul(0.7)).mul(0.9));
+    max(smoothstep(0.1, 0.5, volcS.z), smoothstep(0.08, 0.4, volcS.w).mul(0.85)).mul(0.92));
 
   const mat = new THREE.MeshStandardNodeMaterial({ metalness: 0 });
   mat.positionNode = positionNode;

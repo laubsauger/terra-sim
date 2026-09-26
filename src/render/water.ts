@@ -73,7 +73,7 @@ export function seabedGlowK(fields: GpuFields, bed: V3): F {
   const volc = volcanoSampler(fields)(tWorldToCell(bed.x), tWorldToCell(bed.z));
   const rg = seamGlow(volc.zw, float(1)); // the seafloor seam it lets through (at full pulse: covers it)
   const lavaK = smoothstep(0.005, 0.2, heat.y).mul(smoothstep(600, 950, heat.z));
-  return saturate(rg.x.mul(1.2).add(rg.y.mul(2)).add(lavaK).add(smoothstep(0.02, 0.4, volc.x))).mul(RIDGE_HALO) as F;
+  return saturate(rg.x.mul(1.2).add(lavaK).add(smoothstep(0.02, 0.4, volc.x))).mul(RIDGE_HALO) as F;
 }
 
 export function createWater(fields: GpuFields): { object: THREE.Mesh; dispose(): void } {

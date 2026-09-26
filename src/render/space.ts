@@ -223,7 +223,7 @@ function display(fields: GpuFields): Display {
   // (2d) volcano activity + lava channel memory; z, w = spreading-seam glow (see seamGlow) from crust age.
   // Core: a thin crack about a cell wide on the seam axis. Crust ages come quantised by the tectonics
   // steps (the youngest seam cells are 0, 0.25 or 0.5 My depending on the step phase), so the core is
-  // measured against the local youngest age over 5×5, e^(−(age − min)/0.3 My) over a 3×3 binomial, and
+  // measured against the local youngest age over 5×5, e^(−(age − min)/0.12 My) over a 3×3 binomial, and
   // gated by how young that minimum is (active seams only). Halo: e^(−age/1 My) over a 5×5 binomial.
   // Blurred first, the seam is a soft curved line instead of a per-cell staircase.
   const volcF = has('volcano') ? fields.cur<'vec4'>('volcano') : null;
@@ -243,7 +243,7 @@ function display(fields: GpuFields): Display {
         for (let dz = -2; dz <= 2; dz++) for (let dx = -2; dx <= 2; dx++) {
           const a = ages[(dz + 2) * 5 + dx + 2]!;
           hs = hs.add(exp(a.div(-1.0)).mul(b5[dx + 2]! * b5[dz + 2]! / 256));
-          if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) cs = cs.add(exp(a.sub(m).div(-0.3)).mul((dx === 0 ? 2 : 1) * (dz === 0 ? 2 : 1) / 16));
+          if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) cs = cs.add(exp(a.sub(m).div(-0.12)).mul((dx === 0 ? 2 : 1) * (dz === 0 ? 2 : 1) / 16));
         }
         halo.assign(hs); core.assign(cs.mul(smoothstep(1.2, 0.5, m)));
       };
@@ -400,8 +400,9 @@ export function advect(fields: GpuFields) {
  * intensity, see terrain.ts seamPulse), faint wide halo. Returns (core, halo) 0..1.
  */
 export function seamGlow(seam: THREE.Node<'vec2'>, pulse: F): THREE.Node<'vec2'> {
-  const core = smoothstep(0.25, 0.7, seam.x);
-  return vec2(core.mul(pulse), seam.y.mul(0.08).mul(pulse.mul(0.5).add(0.5))) as unknown as THREE.Node<'vec2'>;
+  // ≈ 1 cell FWHM: ages grow ~0.25 My per cell off the axis, so a cell away the blurred core is ~0.3
+  const core = smoothstep(0.3, 0.55, seam.x);
+  return vec2(core.mul(pulse), seam.y.mul(0.05).mul(pulse.mul(0.5).add(0.5))) as unknown as THREE.Node<'vec2'>;
 }
 
 /** Bilinear read of the heat display (age, lava layers, lava °C, snow) at a rendered cell coordinate. */

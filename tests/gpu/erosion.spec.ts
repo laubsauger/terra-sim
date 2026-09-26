@@ -168,7 +168,7 @@ test('high ground relaxes to a gentler talus than the coast', async ({ page }) =
     const E = await import('/src/sim/erosion.ts');
     const r = await makeRenderer();
     // rig sea level is 76: a ramp far above it (95 → 125) and one just above it (76 → 88), both 6 layers/cell
-    const rig = await R.makeHydroRig(r, R.voxFromHeights((x: number, z: number) => {
+    const rig = await R.makeHydroRig(r, R.voxFromHeights((_x: number, z: number) => {
       const hi = z < 128, d = Math.max(0, 16 - Math.abs((z % 128) - 64)) * 6;
       return Math.min(hi ? 95 + d : 76 + d, hi ? 125 : 88);
     }));
