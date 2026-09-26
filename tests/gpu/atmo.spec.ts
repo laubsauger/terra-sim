@@ -405,6 +405,45 @@ test('submarine vents throw no incandescent ejecta: a shallow one opens with dar
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('plumes stay with their vent: small sources low and close, big columns attached to their umbrella', async ({ page }) => {
+  // user: 'some smaller smoke plumes are now high in the sky and not around their source at all' (the upper
+  // wind regime carried long-lived puffs across the block)
+  const problems = watchProblems(page);
+  const vent = { x: 200, z: 60 };
+  const vx = cellW(vent.x), vz = cellW(vent.z);
+  const survey = async (erupt: boolean, seconds: number, burst = false) => {
+    await open(page, 'world=paint&look=0');
+    await page.evaluate((v) => (window as any).at.paint({ lava: v }), { ...vent, erupt });
+    if (burst) await page.evaluate((v) => (window as any).at.trigger({ kind: 'volcano', x: v.x, z: v.z, magnitude: 1.5 }), vent);
+    let dist = 0, top = 0, n = 0;
+    const vy0 = { y: NaN };
+    for (let i = 0; i < seconds; i++) {
+      await page.evaluate(() => (window as any).at.frames(30, 1 / 30));
+      const st = await page.evaluate(() => (window as any).at.particles());
+      if (Number.isNaN(vy0.y) && st.ventCount > 0) vy0.y = st.vents[1];
+      for (const p of st.live) {
+        if (p.kind > 1.5) continue; // ash and steam (the drifting plume kinds)
+        n++;
+        dist = Math.max(dist, Math.hypot(p.x - vx, p.z - vz));
+        top = Math.max(top, p.y - vy0.y);
+      }
+    }
+    return { dist, top, n };
+  };
+  const small = await survey(false, 30); // a plain hot lava pool: degassing wisps
+  const vent1 = await survey(true, 30);  // an erupting vent: ash column (the cloud volume draws it above ~0.3)
+  const big = await survey(true, 30, true); // plus a strong eruption burst (god tool): the biggest column
+  const fmt = (r: typeof small) => `${r.n} samples, farthest ${r.dist.toFixed(3)}, highest ${r.top.toFixed(3)} above the vent`;
+  console.log(`plume reach over 30 s: degassing pool ${fmt(small)}; erupting vent ${fmt(vent1)}; strong eruption ${fmt(big)}`);
+  expect(small.n, 'the pool degasses').toBeGreaterThan(50);
+  expect(small.dist, 'small plumes stay near their vent').toBeLessThan(0.35);
+  expect(small.top, 'and low').toBeLessThan(0.25);
+  expect(vent1.dist, 'an ordinary eruption column too').toBeLessThan(0.4);
+  expect(vent1.top, 'its particles hand over to the volume column instead of drifting on unseen').toBeLessThan(0.35);
+  expect(big.dist, 'a big column trails further downwind but stays attached (no puffs across the block)').toBeLessThan(0.8);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');

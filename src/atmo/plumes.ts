@@ -203,7 +203,8 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       If(is(PK.ASH), () => { // ASH: billowing column from a slim crater
         const j = dir.mul(rr.mul(rad).mul(0.3).add(0.003));
         p0.assign(vec4(o.x.add(j.x), o.y.add(0.006), o.z.add(j.y), 0));
-        p1.assign(vec4(j.x.mul(0.8), rnd(14).mul(0.06).add(heat.mul(0.08)).add(0.1).mul(mag), j.y.mul(0.8), rnd(15).mul(7).add(11)));
+        // life by source strength: degassing / weak vents give short-lived wisps that stay by the vent
+        p1.assign(vec4(j.x.mul(0.8), rnd(14).mul(0.06).add(heat.mul(0.08)).add(0.1).mul(mag), j.y.mul(0.8), rnd(15).mul(7).add(11).mul(mix(float(0.45), float(1), smoothstep(0.5, 0.9, heat.mul(mag))))));
         p2.assign(vec4(float(PK.ASH), seed, heat.mul(mag).min(1.3), o.y));
       }).ElseIf(is(PK.STEAM), () => { // STEAM: blasts / boiling sea / degassing (heat = strength)
         const j = dir.mul(rr.mul(rad).mul(0.6).add(0.004));
@@ -382,7 +383,14 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const seaY = tWorldY(u.seaLevel).toVar();
       const seed = p2.y, heat = p2.z, oy = p2.w;
       const hAbove = pos.y.sub(oy).toVar();
-      const wind = tWind(pos.z, tWindHF(pos.y)).mul(1.6).toVar(); // visual exaggeration: the diorama's plumes read as bent
+      // plume wind: the low-level bands (the aloft regime would carry puffs across the whole block), bent a
+      // little more than real for the diorama, and capped so a puff never drifts far from its vent within
+      // its life. Only strong eruption columns (burst strength > 1: blasts, god-tool eruptions) feel more
+      // of the upper wind and trail further.
+      const big = kind.lessThan(0.5).select(smoothstep(0.95, 1.25, heat), float(0));
+      const wRaw = tWind(pos.z, min(tWindHF(pos.y), mix(float(ATMO.PLUME_HF), float(1), big))).mul(1.6);
+      const wCap = mix(float(ATMO.PLUME_DRIFT_MAX), float(ATMO.PLUME_DRIFT_MAX * 2.5), big);
+      const wind = wRaw.mul(min(float(1), wCap.div(max(length(wRaw), 1e-5)))).toVar();
       const turb = vec2(sin(pos.y.mul(9).add(u.time.mul(1.3)).add(seed.mul(20))), cos(pos.x.mul(7).add(u.time.mul(1.1)).add(seed.mul(13)))).mul(0.03).toVar();
       const sdir = vec2(cos(seed.mul(TAU)), sin(seed.mul(TAU))).toVar();
       const isK = (k: number) => step(abs(kind.sub(k)), 0.5);
@@ -398,7 +406,8 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         const wUp = heat.mul(0.08).add(0.1).mul(rise).sub(umb.mul(0.008));
         vel.y.assign(mix(vel.y, wUp, float(1).sub(exp(dt.mul(-1.2)))));
         const entrain = smoothstep(0, hnb, hAbove).mul(1.1).add(0.25);
-        const target = wind.add(turb).add(sdir.mul(umb.mul(0.08)));
+        // (umbrella spread slow: the volume umbrella carries the wide canopy; particles stay near the column)
+        const target = wind.add(turb).add(sdir.mul(umb.mul(0.02)));
         vel.xz.assign(mix(vel.xz, target, float(1).sub(exp(dt.mul(entrain).negate()))));
       }).ElseIf(kind.lessThan(1.5), () => { // STEAM: rises, bends early, fades fast
         vel.y.assign(vel.y.mul(exp(dt.mul(-0.6))));
@@ -456,6 +465,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       });
       pos.y.assign(mix(max(pos.y, ground), pos.y, max(underwater, floating)));
       // leaving the block or reaching the water surface: die (the render fades them before that)
+      // ash above its fade height (0.3 above the vent, see the shading) is invisible: the cloud volume carries
+      // the upper column and umbrella from there, so the particle retires instead of drifting on unseen
+      If(kind.lessThan(0.5).and(hAbove.greaterThan(0.32)), () => { age.assign(life); });
       If(max(abs(pos.x), abs(pos.z)).greaterThan(HALF).or(underwater.greaterThan(0.5).and(pos.y.greaterThan(p2.z))), () => { age.assign(life); });
       p0.assign(vec4(pos, age));
       p1.assign(vec4(vel, life));

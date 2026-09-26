@@ -177,6 +177,14 @@ export const ATMO = {
   PLUMES: 6,
   /** Volume plumes: umbrella drift length (× the wind-based length), ease-in / fade-out rates (1/s). */
   PLUME_DRIFT: 1.7, PLUME_RISE: 0.35, PLUME_DECAY: 0.1,
+  /** Longest umbrella trail (world): the aloft wind is fast, and an endless canopy reads as detached cloud. */
+  PLUME_LEN_MAX: 0.9,
+  /**
+   * Plume particles steer with the wind at height fraction ≤ PLUME_HF (below the aloft regime) and drift at
+   * most PLUME_DRIFT_MAX world/s (× 2.5 for strong eruption bursts): a small plume stays within ~0.3 world of
+   * its vent over its life, a big column trails further but stays attached to its umbrella.
+   */
+  PLUME_HF: 0.45, PLUME_DRIFT_MAX: 0.035,
   /** Steam (degassing wisps, sea blasts): particle lifetime multiplier, so plumes trail off downwind. */
   STEAM_LIFE: 1.6,
   // hydrothermal vents on spreading ridges (young crust)

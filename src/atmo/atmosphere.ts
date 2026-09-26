@@ -228,7 +228,7 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
       const top = Math.min(vy + 0.2 + 0.32 * Math.min(q.s, 1.2), yHi - 0.12);
       const w = windProfile(q.z, Math.min(1, (top - groundY()) / ATMO.WIND_H));
       const sp = Math.hypot(w.u, w.v) || 1e-6;
-      return { x: q.x, y: vy, z: q.z, s: Math.min(q.s, 1.2), dx: w.u / sp, dz: w.v / sp, len: (0.35 + Math.min(0.8, sp * 8) * Math.min(1, q.s)) * ATMO.PLUME_DRIFT, top };
+      return { x: q.x, y: vy, z: q.z, s: Math.min(q.s, 1.2), dx: w.u / sp, dz: w.v / sp, len: Math.min(ATMO.PLUME_LEN_MAX, (0.35 + Math.min(0.8, sp * 8) * Math.min(1, q.s)) * ATMO.PLUME_DRIFT), top };
     }));
   }
 
