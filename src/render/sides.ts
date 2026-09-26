@@ -103,7 +103,14 @@ export interface FaceShading {
   dispose(): void;
 }
 
-export function createFaceShading(fields: GpuFields, opts: { seaLevel?: number } = {}): FaceShading {
+/**
+ * Interaction light on a cut quad (slice caps): `glow` 0..1 lights the cut's top edge and lays a thin
+ * light sheet on the face; `sweep` 0..1 runs a scanline from the top to the bottom (≤ 0 / ≥ 1: none).
+ * Zero when idle (a few ALU ops, no extra reads).
+ */
+export interface CutFx { glow: THREE.UniformNode<'float', number>; sweep: THREE.UniformNode<'float', number> }
+
+export function createFaceShading(fields: GpuFields, opts: { seaLevel?: number; cutFx?: CutFx } = {}): FaceShading {
   const S = columnSampler(fields);
   const vox = voxReader(fields);
   const pal = createPaletteNodes();
@@ -351,7 +358,18 @@ export function createFaceShading(fields: GpuFields, opts: { seaLevel?: number }
     // (sky-tinted, so it fades with the night).
     const fill = color.mul(skyU.zenith.mul(0.35).add(0.07));
     const tec = tecLine.rgb.mul(tecLine.a.mul(faceTec.opacity).mul(1.3)); // boundary lines read on unlit faces too
-    return blendV(pal.emissive).mul(periGlow).mul(magGlow).add(fill).add(thermal).add(tec);
+    let fx = vec3(0) as V3;
+    if (opts.cutFx) {
+      const { glow, sweep } = opts.cutFx;
+      // warm edge line along the cut's top (the terrain silhouette), a faint cool sheet over the face
+      const edge = float(1).sub(smoothstep(0.0, 1.4, depth)).mul(glow);
+      const sheet = glow.mul(0.05).mul(float(1).sub(smoothstep(20, 90, depth)));
+      // scanline: top of the slice → render bottom as sweep goes 0 → 1, soft ±2 layers
+      const ySweep = mix(float(NY), float(Y_RENDER_BOTTOM), sweep);
+      const scan = exp(vy.sub(ySweep).div(2.0).pow(2).negate()).mul(step(0.001, sweep)).mul(step(sweep, 0.999));
+      fx = vec3(1.0, 0.82, 0.55).mul(edge.mul(1.6)).add(vec3(0.55, 0.75, 1.0).mul(sheet.add(scan.mul(0.6))));
+    }
+    return blendV(pal.emissive).mul(periGlow).mul(magGlow).add(fill).add(thermal).add(tec).add(fx);
   })();
 
   // Micro normal: groove tilt from the band phase + grain relief, all in the face plane.

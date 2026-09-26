@@ -311,3 +311,56 @@ test('an active vent shows a glowing summit lava lake, an idle one does not', as
   expect(pool, `pool pixels ${JSON.stringify(lake.slice(0, 9))} idle ${JSON.stringify(idle.slice(0, 9))}`).toBeGreaterThanOrEqual(5);
   expect(dist(lake[9]!, idle[9]!), `3 cells away stays terrain: ${lake[9]} vs ${idle[9]}`).toBeLessThan(40);
 });
+
+// User: "show some arrow or indication on the drag handles … and maybe some fx for the slice". In the app:
+// hovering a grip lights its chevrons and shows the first-use tip; dragging still moves the cut, lights
+// the cut edge, and releasing sweeps a scanline; all without GPU errors.
+test('slice grips: hover cue, drag moves the cut with edge glow, release sweeps', async ({ page }) => {
+  test.setTimeout(180_000);
+  const problems: string[] = [];
+  page.on('pageerror', (e) => problems.push('pageerror: ' + e.message));
+  page.on('console', (m) => { if (m.type() === 'error' && !/favicon/.test(m.location().url)) problems.push(m.text()); });
+  await page.goto('/?seed=3&speed=1');
+  await page.waitForFunction(() => (window as any).terraReady === true, null, { timeout: 90_000 });
+  await page.evaluate(() => {
+    const t = (window as any).terra; t.clock.paused = true;
+    t.stage.renderer.domElement.dispatchEvent(new KeyboardEvent('keydown', { key: 'Shift' })); // hold off the ambient camera
+    t.stage.camera.position.set(2.9, 0.9, 3.5); t.stage.controls.target.set(1.6, 0, 2.0); t.stage.controls.update();
+  });
+  await page.waitForTimeout(2500); // orbit damping settles over a few frames
+  const gripAt = () => page.evaluate(() => {
+    const t = (window as any).terra;
+    const v = t.stage.scene.getObjectByName('slice-grip-x').position.clone().project(t.stage.camera);
+    const r = t.stage.renderer.domElement.getBoundingClientRect();
+    return { x: r.left + (v.x * 0.5 + 0.5) * r.width, y: r.top + (-v.y * 0.5 + 0.5) * r.height };
+  });
+  const fxs = () => page.evaluate(() => (window as any).terra.slice.fxState);
+  const p = await gripAt();
+  const idle = await fxs();
+  expect(idle.gripX, 'idle chevrons dim').toBeLessThan(0.1);
+  expect(idle.tip, 'no tip before hover').toBe(false);
+  await page.mouse.move(p.x - 1, p.y + 1);
+  await page.mouse.move(p.x, p.y + 2);
+  await page.waitForTimeout(1200);
+  const hov = await fxs();
+  expect(hov.gripX, 'hovered grip lights its chevrons').toBeGreaterThan(0.8);
+  expect(hov.gripZ, 'the other grip stays dim').toBeLessThan(0.1);
+  expect(hov.tip, 'first hover shows the tip').toBe(true);
+  await page.mouse.down();
+  for (let k = 1; k <= 10; k++) { await page.mouse.move(p.x - k * 20, p.y + 2 - k * 5); await page.waitForTimeout(30); }
+  await page.waitForTimeout(300);
+  const mid = await fxs();
+  const cut = await page.evaluate(() => (window as any).terra.slice.cut);
+  expect(cut.x, 'dragging moved the X cut').toBeLessThan(1.8);
+  expect(mid.glow, 'cut edge glows while dragging').toBeGreaterThan(0.6);
+  await page.mouse.up();
+  await page.waitForTimeout(150);
+  const rel = await fxs();
+  expect(rel.sweep, 'release sweeps a scanline').toBeGreaterThan(0);
+  expect(rel.tip, 'tip gone after the first drag').toBe(false);
+  await page.waitForTimeout(1500);
+  const after = await fxs();
+  expect(after.glow, 'fx off when not interacting').toBeLessThan(0.05);
+  expect(after.sweep).toBe(0);
+  expect(problems).toEqual([]);
+});
