@@ -158,3 +158,26 @@ test('a 40-layer wall slumps to a slope within ~4 My of erosion steps', async ({
   expect(res.after, `max slope ${res.after.toFixed(1)} layers/cell`).toBeLessThan(12);
   expect(res.m1).toBe(res.m0);
 });
+
+// Mountain fronts read as walls at the coastal talus (2.5 layers/cell ≈ 70° on the diorama). High ground slumps at
+// talusHigh; coasts keep the steeper talus so margins do not slump into the sea (B9).
+test('high ground relaxes to a gentler talus than the coast', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const E = await import('/src/sim/erosion.ts');
+    const r = await makeRenderer();
+    // rig sea level is 76: a ramp far above it (95 → 125) and one just above it (76 → 88), both 6 layers/cell
+    const rig = await R.makeHydroRig(r, R.voxFromHeights((x: number, z: number) => {
+      const hi = z < 128, d = Math.max(0, 16 - Math.abs((z % 128) - 64)) * 6;
+      return Math.min(hi ? 95 + d : 76 + d, hi ? 125 : 88);
+    }));
+    rig.params.set('erosionRate', 0);
+    for (let t = 0; t < 300; t++) rig.tick(1);
+    const s = await rig.readF('surfY');
+    const slope = (z0: number, z1: number) => { let m = 0; for (let z = z0; z < z1; z++) for (let x = 0; x < R.NX; x++) m = Math.max(m, Math.abs(s[R.idx(x, z)]! - s[R.idx(x, z + 1)]!)); return m; };
+    return { hi: slope(20, 108), lo: slope(148, 236), D: E.EROSION_DEFAULTS };
+  });
+  expect(res.hi, `high ground ${res.hi.toFixed(2)}`).toBeLessThan(res.D.talusHigh + 0.3);
+  expect(res.lo, `coast ${res.lo.toFixed(2)}`).toBeGreaterThan(res.D.talusHigh + 0.4); // coast keeps its steeper talus
+});

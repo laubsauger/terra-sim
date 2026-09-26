@@ -88,8 +88,8 @@ export class Sim {
     initPlateMotion(this.tectonics.plates);
     this.lifecycle = new Lifecycle(fields);
     this.hydro = createHydroPass(fields, params);
-    this.erosion = createErosionPass(fields, params);
     this.climate = createClimatePass(fields, params);
+    this.erosion = createErosionPass(fields, params, { seaLevel: this.climate.uniforms.seaLevel });
     this.biome = createBiomePass(fields);
     this.worldStats = createWorldStats(fields);
     this.diagenesis = new Diagenesis(fields);

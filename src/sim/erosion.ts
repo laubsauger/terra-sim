@@ -37,7 +37,7 @@
 // saturates at high rates: transport-limited), sheet-flow flanks ~6× less; vegetated (veg 1) ≈ 0.4× bare.
 // Steep mountain channels hit maxExchange = 64 fill units per erosion step.
 import type * as THREE from 'three/webgpu';
-import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, floor, instanceIndex, uniform, uniformArray, select, ceil, exp } from 'three/tsl';
+import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, floor, instanceIndex, uniform, uniformArray, select, ceil, exp, mix, smoothstep } from 'three/tsl';
 import { ReaderKernel, type GpuFields } from '../core/gpu';
 import type { Params } from '../core/params';
 import { NCOL, NY, Mat, MAT_COUNT, MAT_ERODIBILITY, FLAG_CONTINENTAL } from './layout';
@@ -57,6 +57,11 @@ export const EROSION_DEFAULTS = {
   kDep: 0.5,         // fraction of excess suspended load settling per tick
   maxExchange: 64,   // fill units per column per tick, hydraulic
   talus: 2.5,        // layers per cell before slumping (≈ 7° real at 250 m layers, 20 km cells); 1.2 (≈0.9°) flattened every margin into the sea (B9)
+  // high ground slumps at a gentler talus: 2.5 layers/cell renders ~70° on the diorama, so mountain fronts read as
+  // walls. Coasts keep `talus` (margins must not slump into the sea, B9); fades in between these heights above sea.
+  talusHigh: 1.5,
+  talusHighFrom: 4,
+  talusHighTo: 14,
   thermalRate: 0.5,  // fraction of talus excess relaxed per tick (× 'thermalErosion'), clamped to 1
   // fill units per direction per tick (byte-packed). 63 (0.25 layer) let convergent fronts rebuild 50-layer walls
   // faster than they slumped; receivers take up to 4 new voxels, senders give from their top 4 crust voxels
@@ -161,7 +166,8 @@ export interface ErosionPass {
   };
 }
 
-export function createErosionPass(fields: GpuFields, params: Params): ErosionPass {
+/** seaLevel: shared with climate (saved state); a rig without one uses a fixed level. */
+export function createErosionPass(fields: GpuFields, params: Params, opts: { seaLevel?: THREE.UniformNode<'float', number> } = {}): ErosionPass {
   const D = EROSION_DEFAULTS;
   const surfY = fields.cur('surfY');
   const water = fields.cur('water');
@@ -174,6 +180,7 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
   const kCap = uniform(D.kCap);
   const kDep = uniform(D.kDep);
   const talus = uniform(D.talus);
+  const seaLevel = opts.seaLevel ?? uniform(76);
   const thermalRate = uniform(D.thermalRate);
   const erosionScale = uniform(params.get('erosionRate') as number);
   const thermalScale = uniform(params.get('thermalErosion') as number);
@@ -240,7 +247,9 @@ export function createErosionPass(fields: GpuFields, params: Params): ErosionPas
     const h = surfY.element(i).toVar();
     // submarine slopes stand steeper (real continental slopes ≈ 4° ≈ 5 layers/cell here); a subaerial talus
     // underwater slumped every continental margin into the ocean (B9)
-    const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talus).toVar();
+    const above = h.sub(seaLevel);
+    const talAir = mix(talus, float(D.talusHigh), smoothstep(D.talusHighFrom, D.talusHighTo, above));
+    const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talAir).toVar();
     const nbs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     const ex = nbs.map(([dx, dz]) => {
       const hn = surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))));
