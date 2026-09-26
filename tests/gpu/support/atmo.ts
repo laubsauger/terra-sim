@@ -96,8 +96,8 @@ async function main() {
   /** Live particles by kind with positions. */
   async function particles() {
     const P0 = await f32(atmo.plumes.P0), P1 = await f32(atmo.plumes.P1), P2 = await f32(atmo.plumes.P2);
-    const live: { x: number; y: number; z: number; age: number; kind: number; vy: number; ceil: number }[] = [];
-    for (let i = 0; i < P0.length / 4; i++) if (P0[i * 4 + 3]! < P1[i * 4 + 3]!) live.push({ x: P0[i * 4]!, y: P0[i * 4 + 1]!, z: P0[i * 4 + 2]!, age: P0[i * 4 + 3]!, kind: P2[i * 4]!, vy: P1[i * 4 + 1]!, ceil: P2[i * 4 + 2]! });
+    const live: { x: number; y: number; z: number; age: number; kind: number; vx: number; vy: number; vz: number; seed: number; ceil: number }[] = [];
+    for (let i = 0; i < P0.length / 4; i++) if (P0[i * 4 + 3]! < P1[i * 4 + 3]!) live.push({ x: P0[i * 4]!, y: P0[i * 4 + 1]!, z: P0[i * 4 + 2]!, age: P0[i * 4 + 3]!, kind: P2[i * 4]!, vx: P1[i * 4]!, vy: P1[i * 4 + 1]!, vz: P1[i * 4 + 2]!, seed: P2[i * 4 + 1]!, ceil: P2[i * 4 + 2]! });
     const vents = await f32(atmo.plumes.vents);
     const ctr = new Int32Array(await renderer.getArrayBufferAsync(atmo.plumes.ctr.value as unknown as THREE.StorageBufferAttribute));
     return { live, ventCount: ctr[0]!, hydroCount: ctr[2]!, vents: Array.from(vents.slice(0, Math.min(ctr[0]!, 16) * 4)),
@@ -224,6 +224,8 @@ async function main() {
     setCut: (x: number, z: number) => atmo.setCut(x, z),
     shadowParams: () => ({ key: cloudShadowU.keyDir.value.toArray(), planeY: cloudShadowU.planeY.value, on: cloudShadowU.on.value }),
     colWorld: (x: number, z: number) => [cellToWorld(x), cellToWorld(z)],
+    /** Water depth per column (voxel layers). */
+    water: async () => Array.from(new Float32Array(await fields.read(renderer, 'water'))),
     NCOL, NX,
   };
   w.atReady = true;

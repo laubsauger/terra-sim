@@ -176,6 +176,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
   const ventK = new ReaderKernel<'float'>(fields, 'crustAge', buildVentK);
 
   // ---- particles ----
+  // TSL codegen rule for these kernels: a plain node used in more than one If/ElseIf branch is emitted as a
+  // temp var declared at the top of main() but assigned only inside the first branch that builds it; every
+  // other branch reads it zero-initialised (it left the PDCs, tephra, bubbles, turbid clouds, pumice, slicks
+  // with no jitter, no spawn velocity and seed 0, and haze / pumice / PDC with no wind). So every value
+  // computed before a branch chain and read inside it is .toVar()'d: declared and assigned right there.
   const G = ATMO.GRAVITY;
   const groundAt = (x: F, z: F): F => tWorldY((clouds.sampleSummary(x, z) as V4).w);
   const buildPart = (count: number) => Fn(() => {
@@ -189,9 +194,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
      * radius. Shared by lava vents and eruption bursts so both look the same.
      */
     const emit = (kind: F, o: V3, heat: F, mag: F, rad: F, surf: F) => {
-      const a = rnd(12).mul(TAU), rr = rnd(13);
-      const dir = vec2(cos(a), sin(a));
-      const seed = rnd(16);
+      // shared by the kind branches below, hence .toVar() (see the note at '---- particles ----')
+      heat = heat.toVar(); mag = mag.toVar(); rad = rad.toVar();
+      const a = rnd(12).mul(TAU).toVar(), rr = rnd(13).toVar();
+      const dir = vec2(cos(a), sin(a)).toVar();
+      const seed = rnd(16).toVar();
       const is = (k: number) => abs(kind.sub(k)).lessThan(0.5);
       If(is(PK.ASH), () => { // ASH: billowing column from a slim crater
         const j = dir.mul(rr.mul(rad).mul(0.3).add(0.003));
@@ -245,16 +252,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       }).Else(() => { // PDC: pyroclastic density current from the crater rim. Most is the dense ground-hugging base
         // (a radial surge whose speed varies smoothly with azimuth: lobate fronts, a few fast fingers), a
         // PDC_LOFT share the ash cloud that lofts off its top
-        // (own azimuth as a var: the shared dir/rr nodes read back 0 in this branch, which left every
-        // current sitting on the vent as one smooth blob)
-        const pa = rnd(30).mul(TAU).toVar();
-        const pd = vec2(cos(pa), sin(pa)).toVar();
-        const r0 = rnd(31).mul(0.025).add(0.01);
-        p0.assign(vec4(o.x.add(pd.x.mul(r0)), o.y.add(0.01), o.z.add(pd.y.mul(r0)), 0));
-        const lobe = pow(sin(pa.mul(5).add(o.x.mul(37)).add(o.z.mul(23))).mul(0.5).add(0.5), 2);
-        const out = pd.mul(lobe.mul(0.15).add(0.04).mul(rnd(14).mul(0.6).add(0.7))).mul(mag);
-        // own hash stream for the split (the rnd salts correlate with the burst pick that got us here)
-        const loft = step(hash(fid.mul(3.917).add(u.frame.mul(0.731)).add(5.3)), PDC_LOFT);
+        const r0 = rr.mul(0.025).add(0.01);
+        p0.assign(vec4(o.x.add(dir.x.mul(r0)), o.y.add(0.01), o.z.add(dir.y.mul(r0)), 0));
+        const lobe = pow(sin(a.mul(5).add(o.x.mul(37)).add(o.z.mul(23))).mul(0.5).add(0.5), 2);
+        const out = dir.mul(lobe.mul(0.15).add(0.04).mul(rnd(14).mul(0.6).add(0.7))).mul(mag);
+        const loft = step(rnd(30), PDC_LOFT);
         p1.assign(vec4(out.x, 0, out.y, mix(rnd(15).mul(2).add(4), rnd(15).mul(3).add(6), loft)));
         p2.assign(vec4(float(PK.PDC), seed, heat.min(1).add(loft.mul(2)), o.y));
       });
@@ -272,9 +274,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       If(nV.greaterThan(int(0)), () => {
         const vi = iMin(int(floor(rnd(1).mul(float(nV)))), nV.sub(1));
         const v = vents.element(uint(vi)).toVar();
-        const code = floor(v.w.mul(0.5));
-        const heat = v.w.sub(code.mul(2));
-        const wdep = code.mod(64).div(4), pc = floor(code.div(64)).mod(4), coast = floor(code.div(256)).div(3);
+        const code = floor(v.w.mul(0.5)).toVar();
+        const heat = v.w.sub(code.mul(2)).toVar();
+        const wdep = code.mod(64).div(4).toVar(), pc = floor(code.div(64)).mod(4).toVar(), coast = floor(code.div(256)).div(3).toVar();
         // plain lava pools only puff now and then; eruption episodes get the budget
         If(rnd(2).lessThan(mix(heat.mul(0.2), heat.add(0.15), step(0.5, pc))), () => {
           // strict budget: beyond VENTS_EMIT vents the same total rate is shared (big eruptions stay readable)
@@ -282,11 +284,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
           const slot = atomicAdd(ctr.element(CTR_VSPAWN), int(1));
           If(slot.lessThan(allowed), () => {
             spawned.assign(1);
-            const r = rnd(6), r2 = rnd(9);
+            const r = rnd(6).toVar(), r2 = rnd(9).toVar();
             const kind = float(PK.ASH).toVar();
             const origin = v.xyz.toVar();
-            const floorY = v.y.sub(wdep.mul(VOXEL_H).mul(vertEx));
-            const active = step(1.5, pc).mul(step(pc, 2.5));
+            const floorY = v.y.sub(wdep.mul(VOXEL_H).mul(vertEx)).toVar();
+            const active = step(1.5, pc).mul(step(pc, 2.5)).toVar();
             If(wdep.greaterThan(VENT_DEEP), () => { // deep submarine: turbid cloud + bubbles below, slick + pumice on top
               If(r.lessThan(0.07), () => { kind.assign(PK.PUMICE); })
                 .ElseIf(r.lessThan(0.16), () => { kind.assign(PK.SLICK); })
@@ -347,8 +349,8 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
             const A = (bA.element(bi) as unknown as V4).toVar(), B = (bB.element(bi) as unknown as V4).toVar();
             A.y.assign(max(A.y, groundAt(A.x, A.z)));
             const kind = A.w, mag = B.z, rad = B.w;
-            const a = rnd(12).mul(TAU), rr = rnd(13);
-            const dir = vec2(cos(a), sin(a));
+            const a = rnd(12).mul(TAU).toVar(), rr = rnd(13).toVar();
+            const dir = vec2(cos(a), sin(a)).toVar();
             If(kind.lessThan(0.5), () => { emit(float(PK.ASH), A.xyz, float(1), mag, rad, A.y); })
               .ElseIf(kind.lessThan(1.5), () => { // DUST ring (meteor)
                 const ring = rad.mul(rr.mul(0.3).add(0.15));
@@ -374,16 +376,16 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const kind = p2.x;
       const pos = p0.xyz.toVar(), vel = p1.xyz.toVar();
       const life = p1.w.toVar();
-      const seaY = tWorldY(u.seaLevel);
+      const seaY = tWorldY(u.seaLevel).toVar();
       const seed = p2.y, heat = p2.z, oy = p2.w;
-      const hAbove = pos.y.sub(oy);
-      const wind = tWind(pos.z, tWindHF(pos.y)).mul(1.6); // visual exaggeration: the diorama's plumes read as bent
-      const turb = vec2(sin(pos.y.mul(9).add(u.time.mul(1.3)).add(seed.mul(20))), cos(pos.x.mul(7).add(u.time.mul(1.1)).add(seed.mul(13)))).mul(0.03);
-      const sdir = vec2(cos(seed.mul(TAU)), sin(seed.mul(TAU)));
+      const hAbove = pos.y.sub(oy).toVar();
+      const wind = tWind(pos.z, tWindHF(pos.y)).mul(1.6).toVar(); // visual exaggeration: the diorama's plumes read as bent
+      const turb = vec2(sin(pos.y.mul(9).add(u.time.mul(1.3)).add(seed.mul(20))), cos(pos.x.mul(7).add(u.time.mul(1.1)).add(seed.mul(13)))).mul(0.03).toVar();
+      const sdir = vec2(cos(seed.mul(TAU)), sin(seed.mul(TAU))).toVar();
       const isK = (k: number) => step(abs(kind.sub(k)), 0.5);
-      const underwater = step(3.5, kind).mul(step(kind, 6.5));
-      const ballistic = isK(PK.FOUNTAIN).add(isK(PK.BOMB)).add(isK(PK.TEPHRA));
-      const floating = isK(PK.PUMICE).add(isK(PK.SLICK));
+      const underwater = step(3.5, kind).mul(step(kind, 6.5)).toVar();
+      const ballistic = isK(PK.FOUNTAIN).add(isK(PK.BOMB)).add(isK(PK.TEPHRA)).toVar();
+      const floating = isK(PK.PUMICE).add(isK(PK.SLICK)).toVar();
       If(kind.lessThan(0.5), () => {
         // ASH: momentum-driven jet near the vent, buoyant rise that slows toward the neutral-buoyancy
         // height, entrainment bends it downwind as it climbs, then it spreads into a drifting umbrella.

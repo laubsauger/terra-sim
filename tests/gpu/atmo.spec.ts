@@ -152,6 +152,68 @@ test('a pyroclastic density current spreads away from the vent: a ground-hugging
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('every particle kind spawns with its own seed, jitter and launch velocity (no clones stacked on the emitter)', async ({ page }) => {
+  // TSL emits a plain node shared by several If branches as a temp assigned only in the first branch that
+  // builds it; the others read 0. That once gave tephra, turbid clouds, bubbles, pumice, slicks, fountain
+  // spray, bombs and PDCs seed 0, no jitter and no sideways launch (straight vertical jets, blobs of
+  // identical puffs), and haze / pumice / PDC no wind. Each kind here comes from the emitter that makes it.
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  const site = (lo: number, hi: number) => {
+    for (let z = 20; z < 236; z++) for (let x = 20; x < 236; x++) {
+      let ok = true;
+      for (let dz = -2; dz <= 2 && ok; dz++) for (let dx = -2; dx <= 2 && ok; dx++) { const w = water[(z + dz) * 256 + x + dx]!; ok = w > lo && w < hi; }
+      if (ok) return { x, z };
+    }
+    return null;
+  };
+  const young: Record<number, any[]> = {};
+  const sample = async (n: number) => {
+    for (let i = 0; i < n; i++) {
+      await page.evaluate(() => (window as any).at.frames(4, 1 / 30));
+      for (const p of (await page.evaluate(() => (window as any).at.particles())).live) if (p.age < 0.14) (young[Math.round(p.kind)] ??= []).push(p);
+    }
+  };
+  // dry erupting vent: ash, fountain spray, bombs; a triggered eruption adds its PDC, impact / flood basalt the haze
+  await page.evaluate(() => (window as any).at.paint({ lava: { x: 200, z: 60 } }));
+  await page.evaluate(() => { const at = (window as any).at; at.trigger({ kind: 'volcano', x: 60, z: 200, magnitude: 1 }); at.trigger({ kind: 'meteor', x: 120, z: 128, magnitude: 1 }); });
+  await page.evaluate(() => (window as any).at.frames(80, 1 / 30)); // the PDC starts 2.5 s in
+  await sample(20);
+  // submarine vents: Surtseyan (tephra, steam), boiling sea (steam, slick, pumice), deep (turbid, bubbles, slick, pumice)
+  for (const [lo, hi] of [[0.15, 0.9], [1.3, 3.6], [6, 60]] as const) {
+    const s = site(lo, hi);
+    expect(s, `the painted world has a ${lo}-${hi} layer deep sea patch`).not.toBeNull();
+    await page.evaluate((v) => (window as any).at.paint({ lava: v }), s);
+    await page.evaluate(() => (window as any).at.frames(20, 1 / 30));
+    await sample(20);
+  }
+  // hydrothermal rift: smokers
+  await page.evaluate(() => (window as any).at.paint({ rift: { z: 120, x0: 0, x1: 255 } }));
+  await sample(15);
+  const NAMES = ['ash', 'steam', 'dust', 'haze', 'bubble', 'smoker', 'turbid', 'fountain', 'bomb', 'pdc', 'pumice', 'tephra', 'slick'];
+  const sd = (xs: number[]) => { const m = avg(xs); return Math.sqrt(avg(xs.map((v) => (v - m) ** 2))); };
+  const rows: string[] = [];
+  for (const [k, ps] of Object.entries(young)) {
+    // spawn jitter: offsets from the emitter (particles binned per emitter, 0.12 world)
+    const bins = new Map<string, any[]>();
+    for (const p of ps) { const key = `${Math.round(p.x / 0.12)},${Math.round(p.z / 0.12)}`; (bins.get(key) ?? bins.set(key, []).get(key)!).push(p); }
+    const offs: number[] = [];
+    for (const b of bins.values()) if (b.length >= 3) { const mx = avg(b.map((p) => p.x)), mz = avg(b.map((p) => p.z)); for (const p of b) offs.push(Math.hypot(p.x - mx, p.z - mz)); }
+    const r = { kind: NAMES[+k], n: ps.length, seed: sd(ps.map((p) => p.seed)), off: avg(offs), vxz: avg(ps.map((p) => Math.hypot(p.vx, p.vz))), vy: sd(ps.map((p) => p.vy)) };
+    rows.push(`${r.kind} n ${r.n} seed sd ${r.seed.toFixed(3)} jitter ${r.off.toFixed(4)} |v_xz| ${r.vxz.toFixed(4)} v_y sd ${r.vy.toFixed(4)}`);
+    if (r.n < 6) continue;
+    expect(r.seed, `${r.kind}: every particle its own seed`).toBeGreaterThan(0.1);
+    expect(r.off, `${r.kind}: spawns jittered around its emitter, not all on one point`).toBeGreaterThan(0.001);
+    // kinds launched sideways (sprays, ballistic ejecta, surges)
+    if (['fountain', 'bomb', 'tephra', 'pdc'].includes(r.kind ?? '')) expect(r.vxz, `${r.kind}: launched outward, not straight up`).toBeGreaterThan(0.02);
+  }
+  console.log('young particles by kind:\n  ' + rows.join('\n  '));
+  const seen = rows.map((r) => r.split(' ')[0]);
+  for (const k of ['ash', 'steam', 'haze', 'bubble', 'smoker', 'turbid', 'fountain', 'bomb', 'pdc', 'pumice', 'tephra', 'slick']) expect(seen, `${k} covered`).toContain(k);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');
