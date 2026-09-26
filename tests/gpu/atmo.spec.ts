@@ -122,6 +122,36 @@ test('an erupting vent (volcano.x) spawns an ash column that rises, plus fountai
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('a pyroclastic density current spreads away from the vent: a ground-hugging base, an ash cloud lofting off it, then gone', async ({ page }) => {
+  // user: 'pinkish smooth tubes lying on the ground' — the currents used to sit on the vent as one blob
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  const vent = { x: 200, z: 60 };
+  await page.evaluate((v) => (window as any).at.trigger({ kind: 'volcano', x: v.x, z: v.z, magnitude: 1 }), vent);
+  const vx = cellW(vent.x), vz = cellW(vent.z);
+  const pdc = async () => (await page.evaluate(() => (window as any).at.particles())).live.filter((p: any) => Math.abs(p.kind - 9) < 0.5);
+  await page.evaluate(() => (window as any).at.frames(75 + 50, 1 / 30)); // the current starts 2.5 s after the eruption
+  const a = await pdc();
+  const dist = a.map((p: any) => Math.hypot(p.x - vx, p.z - vz)).sort((x: number, y: number) => x - y);
+  console.log(`PDC ~1.7 s in: ${a.length} puffs, radial median ${dist[dist.length >> 1]?.toFixed(3)}, max ${dist[dist.length - 1]?.toFixed(3)} world`);
+  expect(a.length, 'the eruption sends a current').toBeGreaterThan(40);
+  expect(dist[dist.length >> 1], 'it runs out from the vent, not a blob on it').toBeGreaterThan(0.03);
+  expect(dist[dist.length - 1], 'with fast lobes at the front').toBeGreaterThan(0.1);
+  expect(dist[dist.length - 1], 'but stays a flank-scale flow').toBeLessThan(1.2);
+  await page.evaluate(() => (window as any).at.frames(90, 1 / 30));
+  const b = await pdc();
+  const base = b.filter((p: any) => p.ceil < 1.5), loft = b.filter((p: any) => p.ceil >= 1.5); // loft flag: heat + 2
+  const baseY = avg(base.map((p: any) => p.y)), loftY = avg(loft.map((p: any) => p.y));
+  console.log(`PDC ~4.7 s in: base ${base.length} (mean y ${baseY.toFixed(3)}), lofting ${loft.length} (mean y ${loftY.toFixed(3)})`);
+  expect(base.length, 'a dense base').toBeGreaterThan(20);
+  expect(loft.length, 'and an ash cloud').toBeGreaterThan(10);
+  expect(loftY, 'that lofts well above the ground-hugging base').toBeGreaterThan(baseY + 0.04);
+  await page.evaluate(() => (window as any).at.frames(315, 1 / 30));
+  expect((await pdc()).length, 'the current thins out and is gone').toBe(0);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');

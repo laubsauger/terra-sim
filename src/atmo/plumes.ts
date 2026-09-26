@@ -22,14 +22,14 @@ import * as THREE from 'three/webgpu';
 import {
   Fn, If, Return, float, int, uint, vec2, vec3, vec4, uniform, uniformArray, instanceIndex, instancedArray,
   hash, sin, cos, exp, mix, smoothstep, saturate, max, min, floor, abs, length, normalize, dot, pow, sqrt,
-  atomicAdd, atomicLoad, atomicStore, uv, varying, cameraViewMatrix, cameraPosition, step, round, atan, texture3D,
+  atomicAdd, atomicLoad, atomicStore, uv, varying, cameraViewMatrix, cameraPosition, step, round, atan, texture3D, screenUV,
 } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { ReaderKernel } from '../core/gpu';
 import { NX, CELL, VOXEL_H } from '../sim/layout';
 import { tColIdx, iMin } from '../sim/tslLayout';
 import { tLavaTemp, tLavaDepth } from '../sim/magmaTsl';
-import { tWorldY, vertEx } from '../render/shared';
+import { tWorldY, vertEx, sceneViewZ } from '../render/shared';
 import { skyU } from '../render/sky';
 import { ATMO, HALF, PK, BURST, VENT_DEEP, VENT_SHALLOW } from './atmoModel';
 import { cloudShadowU, type Clouds } from './clouds';
@@ -48,6 +48,8 @@ const CTR_VENTS = 0, CTR_VSPAWN = 1, CTR_HVENTS = 2, CTR_HSPAWN = 3, CTR_BURST =
 const CTR_N = CTR_BURST + ATMO.BURSTS_MAX;
 /** vents buffer: [0, VENTS_MAX) lava vents, [VENTS_MAX, +HYDRO_MAX) hydrothermal vents. */
 const HV0 = ATMO.VENTS_MAX;
+/** Share of PDC particles in the lofting ash cloud (flagged as heat + 2 in P2.z); the rest is the dense base. */
+const PDC_LOFT = 0.4;
 
 export interface Burst { x: number; y: number; z: number; kind: number; t0: number; dur: number; mag: number; radius: number; rate: number }
 
@@ -201,7 +203,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         const out = dir.mul(rnd(14).mul(0.06).mul(heat));
         p0.assign(vec4(o.x.add(j.x), o.y.add(0.006), o.z.add(j.y), 0));
         // weak sources (degassing) give short low wisps; strong ones (sea blasts) tall billows
-        p1.assign(vec4(out.x, rnd(15).mul(0.16).mul(heat).add(0.05), out.y, rnd(17).mul(1.6).add(2).mul(heat.mul(0.8).add(0.35).min(1))));
+        p1.assign(vec4(out.x, rnd(15).mul(0.16).mul(heat).add(0.05), out.y, rnd(17).mul(1.6).add(2).mul(heat.mul(0.8).add(0.35).min(1)).mul(ATMO.STEAM_LIFE)));
         p2.assign(vec4(float(PK.STEAM), seed, heat.max(0.35), o.y));
       }).ElseIf(is(PK.BUBBLE), () => { // BUBBLE: from a submarine vent up to the surface
         const j = dir.mul(rr.mul(0.02));
@@ -240,12 +242,21 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         p0.assign(vec4(o.x.add(d.x), surf.add(0.001), o.z.add(d.y), 0));
         p1.assign(vec4(0, 0, 0, rnd(15).mul(10).add(12)));
         p2.assign(vec4(float(PK.PUMICE), seed, surf, surf));
-      }).Else(() => { // PDC: pyroclastic density current, starts at the crater rim, rolls down the flanks
-        const r0 = rr.mul(0.02).add(0.01);
-        p0.assign(vec4(o.x.add(dir.x.mul(r0)), o.y.add(0.01), o.z.add(dir.y.mul(r0)), 0));
-        const out = dir.mul(rnd(14).mul(0.08).add(0.05)).mul(mag);
-        p1.assign(vec4(out.x, 0, out.y, rnd(15).mul(3).add(4)));
-        p2.assign(vec4(float(PK.PDC), seed, heat, o.y));
+      }).Else(() => { // PDC: pyroclastic density current from the crater rim. Most is the dense ground-hugging base
+        // (a radial surge whose speed varies smoothly with azimuth: lobate fronts, a few fast fingers), a
+        // PDC_LOFT share the ash cloud that lofts off its top
+        // (own azimuth as a var: the shared dir/rr nodes read back 0 in this branch, which left every
+        // current sitting on the vent as one smooth blob)
+        const pa = rnd(30).mul(TAU).toVar();
+        const pd = vec2(cos(pa), sin(pa)).toVar();
+        const r0 = rnd(31).mul(0.025).add(0.01);
+        p0.assign(vec4(o.x.add(pd.x.mul(r0)), o.y.add(0.01), o.z.add(pd.y.mul(r0)), 0));
+        const lobe = pow(sin(pa.mul(5).add(o.x.mul(37)).add(o.z.mul(23))).mul(0.5).add(0.5), 2);
+        const out = pd.mul(lobe.mul(0.15).add(0.04).mul(rnd(14).mul(0.6).add(0.7))).mul(mag);
+        // own hash stream for the split (the rnd salts correlate with the burst pick that got us here)
+        const loft = step(hash(fid.mul(3.917).add(u.frame.mul(0.731)).add(5.3)), PDC_LOFT);
+        p1.assign(vec4(out.x, 0, out.y, mix(rnd(15).mul(2).add(4), rnd(15).mul(3).add(6), loft)));
+        p2.assign(vec4(float(PK.PDC), seed, heat.min(1).add(loft.mul(2)), o.y));
       });
     };
     If(p0.w.greaterThanEqual(p1.w), () => {
@@ -406,14 +417,21 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         vel.xz.assign(mix(vel.xz, wind.mul(0.12).add(turb.mul(0.2)), float(1).sub(exp(dt.mul(-0.4)))));
         vel.y.assign(0);
         pos.y.assign(p2.w);
-      }).Else(() => { // PDC: hugs the ground, accelerates downhill, drags, spreads
+      }).Else(() => { // PDC: the base hugs the ground, runs downhill, drags, spreads and thickens; the loft rises off it
         const e = 0.05;
         const gx = groundAt(pos.x.add(e), pos.z).sub(groundAt(pos.x.sub(e), pos.z)).div(2 * e);
         const gz = groundAt(pos.x, pos.z.add(e)).sub(groundAt(pos.x, pos.z.sub(e))).div(2 * e);
-        vel.xz.assign(vel.xz.sub(vec2(gx, gz).mul(dt.mul(0.25))).mul(exp(dt.mul(-0.8))).add(wind.mul(dt.mul(0.25))).add(turb.mul(dt.mul(3))).add(sdir.mul(dt.mul(0.03))));
+        vel.xz.assign(vel.xz.sub(vec2(gx, gz).mul(dt.mul(0.4))).mul(exp(dt.mul(-0.85))).add(wind.mul(dt.mul(0.25))).add(turb.mul(dt.mul(4))).add(sdir.mul(dt.mul(0.02))));
         const g = groundAt(pos.x, pos.z);
-        pos.y.assign(mix(pos.y, g.add(float(0.015).add(p0.w.mul(0.012))), float(1).sub(exp(dt.mul(-5)))));
-        vel.y.assign(0);
+        If(heat.lessThan(1.5), () => { // dense base (heat slot < 2: not lofting)
+          pos.y.assign(mix(pos.y, g.add(seed.mul(0.04).add(0.01).add(p0.w.mul(0.015))), float(1).sub(exp(dt.mul(-5))))); // a billowing layer that thickens
+          vel.y.assign(0);
+        }).Else(() => { // co-ignimbrite ash: rides the current for ~1 s, then lifts off, slows and drifts downwind
+          const lift = smoothstep(0.5, 1.5, p0.w);
+          vel.y.assign(mix(vel.y, lift.mul(seed.mul(0.05).add(0.04)), float(1).sub(exp(dt.mul(-1.5)))));
+          vel.xz.assign(mix(vel.xz, wind.mul(0.8).add(turb), float(1).sub(exp(dt.mul(lift.mul(-0.6))))));
+          pos.y.assign(max(pos.y, mix(g.add(0.012), pos.y, lift)));
+        });
       });
       pos.addAssign(vel.mul(dt));
       const ground = groundAt(pos.x, pos.z).add(0.004);
@@ -459,10 +477,12 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     const streak = kC.x.add(kC.y).add(kC.z);
     // start size and growth per kind; ash widens with height above its (slim) vent
     const hAb = q0.y.sub(q2.w);
+    const pdcLoft = step(1.5, q2.z);
     const size0 = dot(kA, vec4(0.016, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
-      .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.02, 0.035)))
+      .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.02, mix(float(0.04), float(0.05), pdcLoft))))
       .add(dot(kC, vec3(0.007, 0.011, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
-    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB, vec4(0.001, 0.06, 0.09, 0.12))).add(kD.y.mul(0.28));
+    // a PDC widens as it runs out (base) and billows up as it lofts
+    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.09))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.28));
     const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.3))));
     // ejecta streak along their screen-space velocity (ember trails)
     const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
@@ -482,15 +502,18 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     const vH = varying(vec2(hAb, speed), 'vPlumeH');
     const vXZ = varying(q0.xz, 'vPlumeXZ');
     const vPos = varying(q0.xyz, 'vPlumePos');
+    const vView = varying(vec2(cameraViewMatrix.mul(vec4(q0.xyz, 1)).z, size), 'vPlumeView');
 
     const shade = Fn(() => {
       const k = vKA, kb = vKB, kc = vKC, kd = vKD, t = vLife.x, age = vLife.y, heat = vLife.z, seed = vLife.w;
+      const loftF = step(1.5, heat); // PDC: lofting ash cloud (heat + 2) vs dense base
       const quv = uv();
       const q = quv.mul(2).sub(1);
       const rr = length(q);
       // billowy puff: Perlin-Worley eats the disc edge, evolving with age (soft, noise-eroded sprites)
-      const n3 = texture3D(noise, vec3(q.mul(0.32).add(seed.mul(5.7)), age.mul(0.03).add(seed.mul(3.1)))).r;
-      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(0.75)).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
+      // (PDC: slightly finer, faster-churning noise and deeper erosion: lumpy lobes, not smooth tubes)
+      const n3 = texture3D(noise, vec3(q.mul(mix(float(0.32), float(0.38), kb.w)).add(seed.mul(5.7)), age.mul(mix(float(0.03), float(0.07), kb.w)).add(seed.mul(3.1)))).r;
+      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(mix(float(0.75), float(0.88), kb.w))).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
       const ring = smoothstep(1.0, 0.75, rr).mul(smoothstep(0.35, 0.8, rr)).add(smoothstep(0.35, 0.0, length(q.sub(vec2(-0.3, 0.3)))).mul(0.8));
       const speck = smoothstep(1.0, 0.4, rr);
       // ember streak: hot head at +x (direction of motion), trail fading behind
@@ -508,11 +531,15 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const albedo = ashCol.mul(k.x)
         .add(vec3(0.93, 0.94, 0.96).mul(k.y)).add(vec3(0.56, 0.45, 0.33).mul(k.z)).add(vec3(0.6, 0.55, 0.48).mul(k.w))
         .add(vec3(0.8, 0.92, 1.0).mul(kb.x.mul(1.1))).add(vec3(0.05, 0.05, 0.06).mul(kb.y)).add(vec3(0.11, 0.09, 0.075).mul(kb.z))
-        .add(vec3(0.46, 0.43, 0.4).mul(kb.w)).add(vec3(0.78, 0.74, 0.64).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
-      const lit = albedo.mul(amb.add(keyCol.mul(wrap).mul(0.3)));
+        .add(mix(vec3(0.19, 0.17, 0.155), vec3(0.44, 0.41, 0.38), loftF).mul(kb.w)).add(vec3(0.78, 0.74, 0.64).mul(kd.x)).add(vec3(0.42, 0.52, 0.38).mul(kd.y));
+      const litC = albedo.mul(amb.add(keyCol.mul(wrap).mul(0.3)));
+      // a PDC keeps its ash grey: a third of the warm sky / low-sun tint is taken out (no pink tubes)
+      const lit = mix(litC, vec3(dot(litC, vec3(0.3, 0.55, 0.15))), kb.w.mul(0.35));
       // orange underglow from the lava: ash just above the crater, turbid clouds at a submarine vent
       const glow = vec3(1.0, 0.33, 0.07).mul(exp(max(vH.x, 0).mul(-24)).mul(min(heat, 1).mul(k.x).add(kb.z.mul(0.5)))
-        .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1))).mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
+        .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1)))
+        .add(kb.w.mul(float(1).sub(loftF)).mul(0.1).mul(exp(age.mul(-1.4))).mul(min(heat, 1))) // PDC base: faint heat near the vent
+        .mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
       // incandescent ejecta cooling from yellow to deep red; tephra is black rock with a brief hot head
       const cool = mix(exp(age.mul(-1.1)), exp(age.mul(-0.3)), kc.y);
       const ember = mix(vec3(0.8, 0.1, 0.02), vec3(1.0, 0.5, 0.12), cool).mul(mix(float(1.5), float(4.5), cool)).mul(mix(float(0.7), float(1), kc.y));
@@ -520,13 +547,13 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const streakCol = mix(ember, tephra, kc.z);
       const shimmer = sin(age.mul(9).add(seed.mul(30))).mul(0.2).add(0.8);
       const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.38)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
-        .add(k.y.mul(pow(float(1).sub(t), 2.2).mul(0.36)).mul(min(heat.add(0.3), 1)))
+        .add(k.y.mul(pow(float(1).sub(t), 1.6).mul(0.36)).mul(min(heat.add(0.3), 1)))
         .add(k.z.mul(pow(float(1).sub(t), 1.5).mul(0.75)))
         .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)))
         .add(kb.x.mul(0.45).mul(float(1).sub(pow(t, 4))))
         .add(kb.y.mul(pow(float(1).sub(t), 1.5).mul(0.5)).mul(shimmer))
         .add(kb.z.mul(pow(float(1).sub(t), 1.3).mul(0.38)))
-        .add(kb.w.mul(pow(float(1).sub(t), 1.2).mul(0.34)))
+        .add(kb.w.mul(mix(pow(float(1).sub(t), 1.4).mul(0.4), smoothstep(0, 0.2, t).mul(pow(float(1).sub(t), 1.2)).mul(0.3), loftF)))
         .add(isStreak.mul(mix(float(0.9), float(1), kc.y)).mul(float(1).sub(pow(t, 6))))
         .add(kd.x.mul(0.85).mul(smoothstep(1, 0.85, t)))
         .add(kd.y.mul(sin(t.mul(Math.PI)).mul(0.22)));
@@ -535,7 +562,9 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       // drawn after the cloud composite: hidden by cloud opacity only where the particle is behind the cloud front
       const occ = under ? float(1) : clouds.occlusion(vPos);
       const near = smoothstep(0.12, 0.55, length(vPos.sub(cameraPosition))); // no balloon particles in the lens
-      const a = shapeA.mul(alpha).mul(fadeIn).mul(edge).mul(occ).mul(near).mul(tCutHard(vPos));
+      // soft contact with the terrain (ground-hugging currents, ash at the vent): no hard intersection lines
+      const soft = under ? float(1) : mix(saturate(vView.x.sub(sceneViewZ(screenUV)).div(max(vView.y.mul(0.5), 1e-3))), float(1), isStreak.add(kd.x).add(kd.y).min(1));
+      const a = shapeA.mul(alpha).mul(fadeIn).mul(edge).mul(occ).mul(near).mul(soft).mul(tCutHard(vPos));
       return vec4(mix(lit.add(glow), streakCol, isStreak), a);
     })();
     mat.colorNode = vec4(shade.rgb, 1);

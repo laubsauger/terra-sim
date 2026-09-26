@@ -179,15 +179,15 @@ export function createAtmosphere(fields: GpuFields, renderer: THREE.WebGPURender
       if (!sl) { const idle = slots.find((q) => q.s < 0.02); if (idle) { Object.assign(idle, { x: c.x, y: c.y, z: c.z, s: 0 }); sl = idle; } }
       if (sl) { sl.target = c.s; if (c.y >= 0) sl.y = c.y; }
     }
-    const k = 1 - Math.exp(-dt * 0.35);
-    for (const sl of slots) sl.s += (sl.target - sl.s) * k;
+    // eases in, lingers on the way out (an ending eruption's umbrella thins over ~8 s instead of vanishing)
+    for (const sl of slots) sl.s += (sl.target - sl.s) * (1 - Math.exp(-dt * (sl.target > sl.s ? ATMO.PLUME_RISE : ATMO.PLUME_DECAY)));
     const yHi = clouds.uniforms.yHi.value;
     clouds.setPlumes(slots.filter((q) => q.s > 0.01).map((q) => {
       const vy = q.y >= 0 ? q.y : groundY() + 0.05;
       const top = Math.min(vy + 0.2 + 0.32 * Math.min(q.s, 1.2), yHi - 0.12);
       const w = windProfile(q.z, Math.min(1, (top - groundY()) / ATMO.WIND_H));
       const sp = Math.hypot(w.u, w.v) || 1e-6;
-      return { x: q.x, y: vy, z: q.z, s: Math.min(q.s, 1.2), dx: w.u / sp, dz: w.v / sp, len: 0.35 + Math.min(0.8, sp * 8) * Math.min(1, q.s), top };
+      return { x: q.x, y: vy, z: q.z, s: Math.min(q.s, 1.2), dx: w.u / sp, dz: w.v / sp, len: (0.35 + Math.min(0.8, sp * 8) * Math.min(1, q.s)) * ATMO.PLUME_DRIFT, top };
     }));
   }
 

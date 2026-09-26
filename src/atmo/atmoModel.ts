@@ -118,6 +118,10 @@ export const ATMO = {
   BURSTS_MAX: 12,
   /** Big eruption plumes rendered in the cloud volume (column + umbrella). */
   PLUMES: 6,
+  /** Volume plumes: umbrella drift length (× the wind-based length), ease-in / fade-out rates (1/s). */
+  PLUME_DRIFT: 1.7, PLUME_RISE: 0.35, PLUME_DECAY: 0.1,
+  /** Steam (degassing wisps, sea blasts): particle lifetime multiplier, so plumes trail off downwind. */
+  STEAM_LIFE: 1.6,
   // hydrothermal vents on spreading ridges (young crust)
   /** crustAge (My) below which a column counts as a fresh rift / ridge axis. */
   HYDRO_AGE: 1,
