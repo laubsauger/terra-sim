@@ -9,6 +9,7 @@ import { createPanel } from './ui/panel';
 import { createTimebar, type ClockLike } from './ui/timebar';
 import { createDayPill } from './ui/dayPill';
 import { createGuide } from './ui/guide';
+import { createEventLog } from './ui/eventLog';
 
 /** Time of day an ambient session opens at (0.5 = noon). */
 const AMBIENT_START_TOD = 0.34;
@@ -125,11 +126,15 @@ async function main() {
   const audio = new Ambience();
   // first-visit guide + sound / help buttons; no auto-open for automation (tests) or ambient sessions
   const guide = createGuide(audio, { autoOpen: !navigator.webdriver && !(params.get('ambientMode') as boolean) });
+  const eventLog = createEventLog({
+    get geoMy() { return sim.geoMy; }, get events() { return sim.events.log; },
+    get lifecycle() { return sim.lifecycle.log; }, get phase() { return sim.wilson.state.phase; },
+  });
   let volcanic = 0, seenEvents = 0, seenBlasts = 0;
   fx.onQuake((q) => { if (q.kind === 'impact') audio.impact(q.mag); });
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); dayPill.setVisible(uiVisible); guide.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); dayPill.setVisible(uiVisible); guide.setVisible(uiVisible); eventLog.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
     ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean)); };
   // ambient mode runs a slow day; leaving it stops the cycle (the Day pill can restart it). Not on H: that
   // must not undo the pill's choice.
@@ -165,6 +170,7 @@ async function main() {
     saves.frame();
     savePanel.update();
     timebar.update();
+    eventLog.update(dt);
     dayPill.update();
     probe.update(dt);
     god.update(dt);

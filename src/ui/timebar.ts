@@ -45,7 +45,8 @@ const CSS = `
 }
 .tb-btn:hover { background: rgba(255, 255, 255, 0.18); }
 .tb-btn svg { width: 12px; height: 12px; fill: currentColor; }
-.tb-time { min-width: 86px; font-size: 13px; letter-spacing: 0.04em; color: #fff; }
+.tb-time { min-width: 96px; font-size: 13px; letter-spacing: 0.04em; color: #fff; display: flex; flex-direction: column; gap: 2px; }
+.tb-time small { font-size: 10px; letter-spacing: 0.08em; color: rgba(236, 240, 247, 0.6); }
 .tb-range {
   -webkit-appearance: none; appearance: none; width: 150px; height: 3px; margin: 0;
   border-radius: 2px; background: rgba(255, 255, 255, 0.18); outline: none; cursor: pointer;
@@ -66,18 +67,24 @@ const CSS = `
 const ICON_PLAY = '<svg viewBox="0 0 12 12"><path d="M2.5 1.2v9.6L10.5 6z"/></svg>';
 const ICON_PAUSE = '<svg viewBox="0 0 12 12"><path d="M2 1h3v10H2zM7 1h3v10H7z"/></svg>';
 
-/** "3.142 My" / "1 234.5 My" / "12.31 Gy" (thin-space digit grouping). */
-export function formatGeoTime(my: number): string {
+/** Geologic time in plain words: { value, unit } e.g. 550 / "thousand years", 12.3 / "million years". */
+export function geoTimeParts(my: number): { value: string; unit: string } {
   const a = Math.abs(my);
-  if (a >= 10000) return `${(my / 1000).toFixed(2)} Gy`;
-  const s = my.toFixed(a < 10 ? 3 : 1);
-  const [int = '', frac] = s.split('.');
-  const grouped = int.replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
-  return `${frac !== undefined ? `${grouped}.${frac}` : grouped} My`;
+  if (a < 1) return { value: String(Math.round(my * 1000)), unit: 'thousand years' };
+  if (a < 1000) return { value: my.toFixed(a < 10 ? 2 : a < 100 ? 1 : 0), unit: 'million years' };
+  return { value: (my / 1000).toFixed(2), unit: 'billion years' };
 }
 
+/** "550 thousand years" / "12.3 million years" / "1.23 billion years". */
+export function formatGeoTime(my: number): string {
+  const p = geoTimeParts(my);
+  return `${p.value} ${p.unit}`;
+}
+
+/** Speed as years of geology per real second: "300k yrs/s", "2.7M yrs/s". */
 export function formatSpeed(v: number): string {
-  return `${Number(v.toPrecision(3))} My/s`;
+  if (v < 1) return `${Number((v * 1000).toPrecision(3))}k yrs/s`;
+  return `${Number(v.toPrecision(3))}M yrs/s`;
 }
 
 export function createTimebar(clock: ClockLike, opts: { minSpeed: number; maxSpeed: number }): Timebar {
@@ -111,6 +118,7 @@ export function createTimebar(clock: ClockLike, opts: { minSpeed: number; maxSpe
 
   const time = document.createElement('span');
   time.className = 'tb-time';
+  time.title = 'Geologic time simulated so far (1 My = 1 million years)';
 
   const range = document.createElement('input');
   range.type = 'range';
@@ -118,7 +126,7 @@ export function createTimebar(clock: ClockLike, opts: { minSpeed: number; maxSpe
   range.min = '0';
   range.max = String(SLIDER_RES);
   range.step = '1';
-  range.title = 'geo speed (log)';
+  range.title = 'Speed: years of geology per real second';
   let dragging = false;
   range.addEventListener('pointerdown', () => (dragging = true));
   range.addEventListener('pointerup', () => (dragging = false));
@@ -158,19 +166,23 @@ export function createTimebar(clock: ClockLike, opts: { minSpeed: number; maxSpe
       el.classList.toggle('paused', paused);
     }
     const t = formatGeoTime(clock.geoTime);
-    if (t !== lastTime) time.textContent = lastTime = t;
+    if (t !== lastTime) {
+      lastTime = t;
+      const p = geoTimeParts(clock.geoTime);
+      time.innerHTML = `<span>${p.value}</span><small>${p.unit} since start</small>`;
+    }
 
     const r = clock.requestedSpeed;
-    const rs = `req ${formatSpeed(r)}`;
+    const rs = `${formatSpeed(r)}`;
     if (rs !== lastReq) req.textContent = lastReq = rs;
     const e = clock.effectiveSpeed;
-    const es = paused ? 'paused' : `eff ${formatSpeed(e)}`;
+    const es = paused ? 'paused' : `now ${formatSpeed(e)}`;
     if (es !== lastEff) eff.textContent = lastEff = es;
     const capped = !paused && e < 0.95 * r;
     if (capped !== lastCapped) {
       lastCapped = capped;
       speed.classList.toggle('capped', capped);
-      speed.title = capped ? 'effective speed capped by sim budget' : '';
+      speed.title = capped ? 'the GPU can not keep up: running slower than requested' : 'years of geology per real second';
     }
 
     if (!dragging) {
