@@ -42,7 +42,7 @@ import {
   Fn, If, Return, Loop, Break, float, int, uint, vec2, vec3, vec4, uvec2, uvec3, uniform, uniformArray, instanceIndex,
   instancedArray, exp, mix, smoothstep, saturate, max, min, floor, fract, abs, length, normalize, dot, pow,
   sign, textureStore, texture, texture3D, positionWorld, cameraPosition, cameraViewMatrix, step,
-  screenUV, uv, property, outputStruct,
+  screenUV, uv, property, outputStruct, floatBitsToUint, select,
 } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { NX, NZ, CELL, BLOCK_SIZE } from '../sim/layout';
@@ -431,7 +431,7 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       // surface pushed in and out by the 3D billow noise (cauliflower bulges); flat base at the
       // condensation level. Fair cumulus / flat stratus / towering cumulonimbus by type.
       const Hmax = mix(mix(mix(float(0.3), float(0.07), strat), float(0.5), cong), float(0.78), storm);
-      const top = Hmax.mul(pow(cov, 0.6)).mul(mix(float(0.5), float(1.35), bn)).mul(mix(float(1), float(0.7), strat));
+      const top = Hmax.mul(pow(max(cov, 1e-4), 0.6)).mul(mix(float(0.5), float(1.35), bn)).mul(mix(float(1), float(0.7), strat));
       // bases undulate per cloud (thin cells float higher, big ones sag) and are ragged, not a ruler line
       const hb = p.y.sub(base).sub(bn.sub(0.5).mul(0.1)).sub(float(0.5).sub(cov).mul(0.06));
       const hl = hb.div(max(top, 1e-3));
@@ -515,6 +515,9 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   };
   const rts = [mkRT(), mkRT()];
   const histColor = texture(rts[1]!.textures[0]!), histFront = texture(rts[1]!.textures[1]!);
+  /** NaN / Inf guard by exponent bits (GPU fast-math may fold x != x and comparisons with NaN). */
+  const finite1 = (x: F, fallback: F): F => select((floatBitsToUint(x) as unknown as THREE.Node<'uint'>).bitAnd(uint(0x7f800000)).equal(uint(0x7f800000)), fallback, x) as F;
+  const finite4 = (v: V4, fb: V4): V4 => vec4(finite1(v.x, fb.x), finite1(v.y, fb.y), finite1(v.z, fb.z), finite1(v.w, fb.w)) as V4;
   const hg = (c: F, g: number) => float(1 - g * g).div(pow(float(1 + g * g).sub(c.mul(2 * g)), 1.5));
   const colField = property('vec4'), frontField = property('vec4');
   const marchFn = Fn(() => {
@@ -612,14 +615,15 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
         If(T.lessThan(0.02).or(t.greaterThan(t1)), () => { Break(); });
       });
     });
-    const cur = vec4(acc, float(1).sub(T));
+    const cur = finite4(vec4(acc, float(1).sub(T)), vec4(0));
     // temporal accumulation: reproject the history at the cloud's front depth
     const wp = ro.add(rd.mul(front));
     const pc = cam.prevViewProj.mul(vec4(wp, 1));
     const puv = vec2(pc.x.div(pc.w).mul(0.5).add(0.5), float(0.5).sub(pc.y.div(pc.w).mul(0.5)));
     const valid = step(0, puv.x).mul(step(puv.x, 1)).mul(step(0, puv.y)).mul(step(puv.y, 1)).mul(step(0, pc.w));
-    const hc = histColor.sample(puv);
-    const hf = histFront.sample(puv).x;
+    // a NaN / Inf that once reached the history would stay forever (mix(nan, cur, 1) is nan): sanitise both
+    const hc = finite4(histColor.sample(puv), cur);
+    const hf = finite1(histFront.sample(puv).x, front);
     // reject history on disocclusion (front depth jumped) as well as off-screen
     const agree = step(abs(hf.sub(front)), front.mul(0.12).add(0.02));
     const k = mix(float(1), mix(float(0.7), cam.blend, agree), valid);
