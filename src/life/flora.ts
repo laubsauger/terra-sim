@@ -388,7 +388,9 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
     const baseY = tWorldY(st.x.sub(FLORA.SINK_SET[set]!)).toVar();
     // fine ground cover: thinned with distance by the cull kernel; survivors widen to keep coverage
     const lodW = set === 2
-      ? select(uCull.equal(uint(1)), float(1).div(sqrt(tLodKeep(vec3(x, baseY, z).sub(cameraPosition).length()))), float(1))
+      // own height expression, not baseY: TSL assigns a material-scope var where it is first used, and here that
+      // would be inside this branch, leaving the plant base at y = 0 whenever uCull is off
+      ? select(uCull.equal(uint(1)), float(1).div(sqrt(tLodKeep(vec3(x, tWorldY(st.x.sub(FLORA.SINK_SET[set]!)), z).sub(cameraPosition).length()))), float(1))
       : float(1);
     const size = asF(spSize.element(sp)).mul(mix(st.y, st.z, uBlend)).mul(logn).toVar();
     const yaw = r(H.YAW).mul(TAU).toVar();
@@ -431,7 +433,7 @@ export function createFlora(fields: GpuFields, opts: { highQuality?: boolean } =
       const palI = uint(min(floor(pc.mul(PETAL_PALETTES.length)), PETAL_PALETTES.length - 1));
       const petal = petals.element(palI.mul(uint(3)).add(uint(min(floor(r(H.PETAL).mul(3)), 2)))) as unknown as V3;
       const accent = select(sp.equal(uint(Sp.CACTUS)), col3(0xff7fa8), select(uint(k).equal(uint(Kind.ROCK)), trunk, petal));
-      const isTrunk = part.lessThan(0.5), isPetal = part.greaterThan(1.5).and(part.lessThan(2.5)), isBlade = part.greaterThan(2.5);
+      const isTrunk = part.lessThan(0.5).toVar(), isPetal = part.greaterThan(1.5).and(part.lessThan(2.5)).toVar(), isBlade = part.greaterThan(2.5).toVar();
       // ~4% of temperate broadleaf trees wear autumn colours
       const autumn = sp.equal(uint(Sp.BROADLEAF)).and(r(H.PETAL).greaterThan(0.96));
       const folA = select(autumn, mix(col3(0xe0782a), col3(0xd9b13b), r(H.SCALE)), select(sp.equal(uint(Sp.TUSSOCK)), tussockCol, fol0));
