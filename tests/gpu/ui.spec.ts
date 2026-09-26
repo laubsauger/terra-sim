@@ -80,3 +80,21 @@ test('camera can sit just above the ground over the block, never inside it', asy
   expect(r.low, 'stays low (was pushed to the grid ceiling)').toBeLessThan(r.g + 0.1);
   expect(r.inside, 'pushed out of the terrain').toBeGreaterThan(r.g);
 });
+
+// First visitors get a short guide (what they are watching + quick keys); it shows once and reopens from '?'.
+test('first-visit guide shows once and reopens from the help button', async ({ page }) => {
+  await page.addInitScript(() => Object.defineProperty(navigator, 'webdriver', { get: () => false }));
+  await page.goto('/?seed=4');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  const card = page.locator('.tg-card');
+  await expect(card).toBeVisible();
+  await expect(card).toContainText('Space');
+  await card.locator('.tg-btn').click();
+  await expect(card).toHaveCount(0);
+  await page.reload();
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  await page.waitForTimeout(500);
+  await expect(page.locator('.tg-card'), 'seen: not again').toHaveCount(0);
+  await page.locator('.tg-dock .tg-round').last().click();
+  await expect(page.locator('.tg-card')).toBeVisible();
+});

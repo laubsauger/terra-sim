@@ -25,7 +25,8 @@ function fmtLog(x: number): string {
 }
 
 export function createPanel(params: Params, container?: HTMLElement): Panel {
-  const pane = new Pane({ container, title: 'terra-sim' });
+  // dev panel starts collapsed (click the title to open); the game UI is the time bar and pills
+  const pane = new Pane({ container, title: 'terra-sim', expanded: false });
   pane.registerPlugin(EssentialsPlugin);
 
   const folders = {} as Record<PanelFolder, FolderApi>;

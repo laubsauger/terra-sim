@@ -7,6 +7,7 @@ import { DualClock } from './core/clock';
 import { createPanel } from './ui/panel';
 import { createTimebar, type ClockLike } from './ui/timebar';
 import { createDayPill } from './ui/dayPill';
+import { createGuide } from './ui/guide';
 
 /** Time of day an ambient session opens at (0.5 = noon). */
 const AMBIENT_START_TOD = 0.34;
@@ -115,10 +116,13 @@ async function main() {
   createOverlayPanel(panel.folders.Overlays, overlays);
   const ambientCam = createAmbientCam(stage.camera, stage.controls, stage.renderer.domElement);
   const audio = new Ambience();
-  let volcanic = 0, seenEvents = 0;
+  // first-visit guide + sound / help buttons; no auto-open for automation (tests) or ambient sessions
+  const guide = createGuide(audio, { autoOpen: !navigator.webdriver && !(params.get('ambientMode') as boolean) });
+  let volcanic = 0, seenEvents = 0, seenBlasts = 0;
+  fx.onQuake((q) => { if (q.kind === 'impact') audio.impact(q.mag); });
 
   let uiVisible = !(params.get('ambientMode') as boolean);
-  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); dayPill.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
+  const applyUi = () => { panel.setVisible(uiVisible); timebar.setVisible(uiVisible); dayPill.setVisible(uiVisible); guide.setVisible(uiVisible); hud.setVisible(uiVisible); probe.setVisible(uiVisible); overlays.setLabelVisible(uiVisible); slice.setVisible(uiVisible);
     ambientCam.setEnabled(!uiVisible || (params.get('ambientMode') as boolean)); };
   // ambient mode runs a slow day; leaving it stops the cycle (the Day pill can restart it). Not on H: that
   // must not undo the pill's choice.
@@ -134,7 +138,7 @@ async function main() {
     faster: () => params.set('speed', (params.get('speed') as number) * 2),
     slower: () => params.set('speed', (params.get('speed') as number) / 2),
     overlay: (n) => { overlays.set(n); },
-    mute: () => audio.toggleMute(),
+    mute: () => { audio.toggleMute(); guide.updateSound(); },
   });
 
   stage.onFrame((dt) => {
@@ -169,6 +173,8 @@ async function main() {
     const camH = stage.camera.position.y;
     audio.set({ ocean: 1 - land, wind: 0.35 + 0.3 * Math.min(1, camH / 6), volcanic, life: land * 1.2, closeness: Math.max(0, 1 - (camH - 0.3) / 4) });
     audio.update(dt);
+    // event sounds: eruption blasts (atmosphere counts them)
+    if (atmo.stats.blasts > seenBlasts) { audio.blast(); seenBlasts = atmo.stats.blasts; }
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });

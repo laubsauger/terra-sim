@@ -1,5 +1,7 @@
-// Procedural ambient audio (§T.46): wind, surf, rain, deep rumble, lava pops, birdsong. No assets.
-// Reads sim-derived levels only (V15). Starts on the first user gesture; mute persists (V14).
+// Procedural ambient audio (§T.46): nature (breaking waves, rain while it rains, birdsong) and event sounds
+// (lava pops, eruption blasts, meteor impacts). No continuous drones: the wind / surf / rumble noise beds and the
+// pad read as a constant hum and were removed (user). No assets.
+// Reads sim-derived levels only (V15). Starts on the first user gesture, muted by default; mute persists (V14).
 const MUTE_KEY = 'terra-sim.muted';
 
 export interface AmbienceLevels {
@@ -33,13 +35,13 @@ function safeSet(k: string, v: string): void { try { localStorage.setItem(k, v);
 export class Ambience {
   private ctx: AudioContext | null = null;
   private master!: GainNode;
-  private layers: Record<'wind' | 'surf' | 'rain' | 'rumble', { gain: GainNode; filter: BiquadFilterNode }> = {} as never;
-  private muted = safeGet(MUTE_KEY) === '1';
+  private layers: Record<'rain', { gain: GainNode; filter: BiquadFilterNode }> = {} as never;
+  // muted until the listener turns sound on (M / sound button); the choice persists (V14)
+  private muted = safeGet(MUTE_KEY) !== '0';
   private t = 0;
   private nextBird = 4;
   private nextPop = 1;
   private nextWave = 3;
-  private padGain: GainNode | null = null;
   private levels: AmbienceLevels = { wind: 0.4, ocean: 0.5, rain: 0, volcanic: 0, life: 0.3, closeness: 0.3 };
 
   constructor() {
@@ -78,12 +80,8 @@ export class Ambience {
       src.start(ctx.currentTime + Math.random() * 0.1);
       return { gain, filter };
     };
-    // beds are brown/pink noise, heavily low-passed: the earlier white/highpass layers read as hiss
-    this.layers.wind = loop('brown', 'bandpass', 320, 0.8);
-    this.layers.surf = loop('brown', 'lowpass', 260, 0.6);
+    // the only bed: rain, audible only while it rains
     this.layers.rain = loop('pink', 'bandpass', 1400, 0.5);
-    this.layers.rumble = loop('brown', 'lowpass', 55, 0.9);
-    this.startPad();
   }
 
   set(levels: Partial<AmbienceLevels>): void { Object.assign(this.levels, levels); }
@@ -92,18 +90,10 @@ export class Ambience {
     const ctx = this.ctx;
     if (!ctx) return;
     this.t += dt;
-    const L = this.levels, now = ctx.currentTime, tc = 0.8;
-    const gust = 0.6 + 0.4 * Math.sin(this.t * 0.23) * Math.sin(this.t * 0.071 + 1);
-    this.layers.wind.gain.gain.setTargetAtTime(0.1 * L.wind * gust * (0.6 + 0.4 * (1 - L.closeness)), now, tc);
-    this.layers.wind.filter.frequency.setTargetAtTime(220 + 260 * gust, now, tc);
-    // surf: a slow swell bed plus separate wave-break swooshes (see wave())
-    const swell = 0.5 + 0.5 * Math.sin(this.t * 0.45) ** 2;
-    this.layers.surf.gain.gain.setTargetAtTime(0.12 * L.ocean * swell * (0.4 + 0.6 * L.closeness), now, 0.6);
-    this.layers.rain.gain.gain.setTargetAtTime(0.06 * L.rain, now, 1.5);
+    const L = this.levels, now = ctx.currentTime;
+    this.layers.rain.gain.gain.setTargetAtTime(0.04 * L.rain, now, 1.5);
     if (L.ocean > 0.2 && this.t > this.nextWave) { this.wave(0.5 + 0.5 * L.closeness); this.nextWave = this.t + 5 + Math.random() * 6; }
-    this.padGain?.gain.setTargetAtTime(0.05, now, 3);
-    this.layers.rumble.gain.gain.setTargetAtTime(0.5 * L.volcanic, now, 1.2);
-    if (L.volcanic > 0.05 && this.t > this.nextPop) { this.pop(); this.nextPop = this.t + 0.3 + Math.random() * 2.5 / (0.2 + L.volcanic); }
+    if (L.volcanic > 0.2 && this.t > this.nextPop) { this.pop(); this.nextPop = this.t + 0.8 + Math.random() * 4 / (0.2 + L.volcanic); }
     if (L.life > 0.2 && this.t > this.nextBird) { this.chirp(); this.nextBird = this.t + 3 + Math.random() * 14 / L.life; }
   }
 
@@ -117,23 +107,38 @@ export class Ambience {
     src.connect(f).connect(g).connect(pan).connect(this.master); src.start(t); src.stop(t + 3.6);
   }
 
-  /** Quiet evolving pad (open fifths, slow filter drift) that glues the soundscape into something musical. */
-  private startPad(): void {
-    const ctx = this.ctx!;
-    const g = ctx.createGain(); g.gain.value = 0;
-    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 700; lp.Q.value = 0.3;
-    const lfo = ctx.createOscillator(); lfo.frequency.value = 0.03;
-    const lfoGain = ctx.createGain(); lfoGain.gain.value = 350; lfo.connect(lfoGain).connect(lp.frequency); lfo.start();
-    for (const [f, det] of [[110, -6], [164.8, 4], [220, 7], [329.6, -3]] as const) {
-      const o = ctx.createOscillator(); o.type = 'triangle'; o.frequency.value = f; o.detune.value = det;
-      const og = ctx.createGain(); og.gain.value = 0.25;
-      o.connect(og).connect(lp); o.start();
-    }
-    lp.connect(g).connect(this.master);
-    this.padGain = g;
+  /** Meteor impact: a deep falling boom, a noise blast and a rolling tail (mag ~5-9). */
+  impact(mag: number): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const k = Math.min(1, Math.max(0.2, (mag - 4) / 4)), t = ctx.currentTime;
+    const o = ctx.createOscillator(), og = ctx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(90, t); o.frequency.exponentialRampToValueAtTime(28, t + 1.6);
+    og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.5 * k, t + 0.03); og.gain.exponentialRampToValueAtTime(0.0001, t + 2.4);
+    o.connect(og).connect(this.master); o.start(t); o.stop(t + 2.5);
+    this.noiseBurst(t, 0.35 * k, 1800, 220, 2.8);
   }
 
-  /** Lava bubble: short low sine drop. */
+  /** Eruption blast (explosive opening): a shorter boom and crack. */
+  blast(): void {
+    const ctx = this.ctx;
+    if (!ctx) return;
+    const t = ctx.currentTime, o = ctx.createOscillator(), og = ctx.createGain();
+    o.frequency.setValueAtTime(70, t); o.frequency.exponentialRampToValueAtTime(32, t + 0.9);
+    og.gain.setValueAtTime(0.0001, t); og.gain.exponentialRampToValueAtTime(0.28, t + 0.02); og.gain.exponentialRampToValueAtTime(0.0001, t + 1.3);
+    o.connect(og).connect(this.master); o.start(t); o.stop(t + 1.4);
+    this.noiseBurst(t, 0.18, 1400, 300, 1.6);
+  }
+
+  /** Band-limited noise burst whose low-pass sweeps down (debris / rolling tail). */
+  private noiseBurst(t: number, peak: number, f0: number, f1: number, len: number): void {
+    const ctx = this.ctx!;
+    const src = ctx.createBufferSource(); src.buffer = noiseBuffer(ctx, 'brown', Math.ceil(len + 0.2));
+    const f = ctx.createBiquadFilter(); f.type = 'lowpass'; f.frequency.setValueAtTime(f0, t); f.frequency.exponentialRampToValueAtTime(f1, t + len);
+    const g = ctx.createGain(); g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(peak, t + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t + len);
+    src.connect(f).connect(g).connect(this.master); src.start(t); src.stop(t + len + 0.1);
+  }
+
   private pop(): void {
     const ctx = this.ctx!, o = ctx.createOscillator(), g = ctx.createGain(), t = ctx.currentTime;
     o.frequency.setValueAtTime(90 + Math.random() * 60, t);

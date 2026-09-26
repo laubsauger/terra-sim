@@ -27,7 +27,7 @@ const U32_MAX = 4294967295;
 export const PARAM_DEFS: readonly ParamDef[] = [
   // Sim
   { key: 'seed', group: 'Sim', label: 'seed', default: 1, min: 0, max: U32_MAX, step: 1, persist: true, url: 'seed' },
-  { key: 'speed', group: 'Sim', label: 'speed', default: 1, min: 0.001, max: 100, unit: 'My/s', persist: false, log: true, url: 'speed' },
+  { key: 'speed', group: 'Sim', label: 'speed', default: 0.3, min: 0.001, max: 100, unit: 'My/s', persist: false, log: true, url: 'speed' },
   { key: 'autosaveMinutes', group: 'Sim', label: 'autosave', default: 5, min: 0, max: 60, step: 1, unit: 'min', persist: true },
   // Tectonics
   { key: 'initialPlates', group: 'Tectonics', label: 'initial plates', default: 7, min: 3, max: 12, step: 1, persist: true },
