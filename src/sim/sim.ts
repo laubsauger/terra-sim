@@ -23,7 +23,7 @@ import { MagmaPass } from './magma';
 import { LavaPass } from './lava';
 import { LAVA } from './magmaModel';
 import { PLUME, type Plume } from './mantleModel';
-import { colIdx } from './layout';
+import { colIdx, NX, NZ } from './layout';
 import { EventScheduler, iceAgeForcing, type GeoEvent, type EventKind } from './events';
 import type { WorldData } from './worldData';
 // save/load (T50)
@@ -189,7 +189,7 @@ export class Sim {
       const my = this.geoMy, windowMy = STATS_WINDOW * this.dtGeo;
       this.wilson.update(plates, life, my);
       const tstats = Tectonics.parseStats(buf);
-      updateKinematics(plates, tstats, this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact);
+      updateKinematics(plates, tstats, this.prevRuns, windowMy, this.rng, this.wilson.bias, life.contact, life.centroid, [NX, NZ]);
 
       this.stats = parseWorldStats(buf);
       const q = new Int32Array(buf).subarray(CTR_QUAKE);

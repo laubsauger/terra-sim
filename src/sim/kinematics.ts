@@ -14,6 +14,13 @@ export const CONT_DRAG = 0.7;
 export const COLLISION_BRAKE = 2.5;
 export const RELAX_MY = 40; // speed changes play out over tens of My (10 read as random speed changes)
 export const HEADING_SIGMA = 0.04; // rad / sqrt(My): plates keep a direction for ~100s of My
+/**
+ * Continental collision: share of the approach speed between two plates in continental contact that is
+ * removed each window, reached at COLLISION_CONTACT_FULL contact cells. Continents are too buoyant to subduct:
+ * with only the speed brake, colliding continents kept converging and one slid under / through the other.
+ */
+export const COLLISION_STOP = 0.6;
+export const COLLISION_CONTACT_FULL = 24;
 
 export interface Bias { heading?: number; strength: number } // per plate, from controller
 
@@ -25,7 +32,7 @@ export interface Bias { heading?: number; strength: number } // per plate, from 
  * they subduct more per window (that feedback saturates every plate at MAX_SPEED).
  */
 export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: number, windowMy: number, rng: PCG32,
-  bias?: (p: Plate) => Bias | undefined, contact?: number[][]): void {
+  bias?: (p: Plate) => Bias | undefined, contact?: number[][], centroids?: [number, number][], world?: [number, number]): void {
   const a = Math.min(1, windowMy / RELAX_MY);
   for (const p of plates) {
     if (!p.alive) continue;
@@ -55,7 +62,36 @@ export function updateKinematics(plates: Plate[], stats: TectonicsStats, runs: n
     p.vel[1] += (tz - p.vel[1]) * a;
   }
   // No velocity averaging between colliding plates: averaging opposite vectors stalled every plate and
-  // rotated headings (B16). Collisions act only through the jam brake on speed above; plates keep course.
+  // rotated headings (B16). Instead only the APPROACH component along the line between two colliding plates is
+  // damped (split by area, heavier plate moves less); motion along the suture (transform slip) is untouched.
+  if (contact && centroids && world) stopCollisions(plates, stats, runs, contact, centroids, world);
+}
+
+function stopCollisions(plates: Plate[], stats: TectonicsStats, runs: number, contact: number[][],
+  centroids: [number, number][], [nx, nz]: [number, number]): void {
+  const wrap = (d: number, n: number) => ((d + n / 2) % n + n) % n - n / 2;
+  for (const p of plates) {
+    if (!p.alive) continue;
+    for (const q of plates) {
+      if (!q.alive || q.id <= p.id) continue;
+      const c = (contact[p.id]?.[q.id] ?? 0) + (contact[q.id]?.[p.id] ?? 0);
+      if (c <= 0) continue;
+      const cp = centroids[p.id], cq = centroids[q.id];
+      if (!cp || !cq) continue;
+      let dx = wrap(cq[0] - cp[0], nx), dz = wrap(cq[1] - cp[1], nz);
+      const len = Math.hypot(dx, dz);
+      if (len < 1e-6) continue;
+      dx /= len; dz /= len;
+      const rel = (q.vel[0] - p.vel[0]) * dx + (q.vel[1] - p.vel[1]) * dz; // < 0: closing
+      if (rel >= 0) continue;
+      const s = COLLISION_STOP * Math.min(1, c / COLLISION_CONTACT_FULL);
+      const wp = Math.max(1, stats.area[p.id]! / Math.max(1, runs)), wq = Math.max(1, stats.area[q.id]! / Math.max(1, runs));
+      const dRel = -rel * s; // raise rel toward 0
+      const kp = wq / (wp + wq), kq = wp / (wp + wq);
+      p.vel[0] -= dx * dRel * kp; p.vel[1] -= dz * dRel * kp;
+      q.vel[0] += dx * dRel * kq; q.vel[1] += dz * dRel * kq;
+    }
+  }
 }
 
 /**

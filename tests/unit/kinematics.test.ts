@@ -84,3 +84,37 @@ describe('no net motion (user: all plates walk the same way)', () => {
     expect(Math.hypot(plates[0]!.vel[0] - plates[1]!.vel[0], plates[0]!.vel[1] - plates[1]!.vel[1])).toBeGreaterThan(0.1);
   });
 });
+
+// User: "continents wander through each other ... they would fold up mountain ranges rather than glide through".
+// Continents are too buoyant to subduct: colliding continental plates must (nearly) stop closing, while sliding
+// past each other along the suture stays free (blanket braking stalled plates, B16).
+describe('continental collision', () => {
+  const run = (vA: [number, number], vB: [number, number], contactCells: number) => {
+    const { plates, stats } = setup();
+    plates[0]!.vel = [...vA]; plates[1]!.vel = [...vB];
+    plates[0]!.heading = Math.atan2(vA[1], vA[0]); plates[1]!.heading = Math.atan2(vB[1], vB[0]);
+    const contact = Array.from({ length: 16 }, () => new Array(16).fill(0));
+    contact[0]![1] = contactCells;
+    const centroids: [number, number][] = Array.from({ length: 16 }, () => [0, 0]);
+    centroids[0] = [100, 128]; centroids[1] = [156, 128]; // B lies +x of A
+    updateKinematics(plates, stats, 40, 2, new PCG32(9), undefined, contact, centroids, [256, 256]);
+    return { a: plates[0]!.vel, b: plates[1]!.vel };
+  };
+  it('head-on continents slow sharply instead of gliding through each other', () => {
+    const before = 1.2 - -1.2;
+    const { a, b } = run([1.2, 0], [-1.2, 0], 40);
+    const closing = a[0] - b[0];
+    expect(closing).toBeLessThan(before * 0.5); // per window; compounding keeps a colliding front near stalled
+    expect(closing).toBeGreaterThanOrEqual(-1e-6); // stopped, not bounced apart
+  });
+  it('sliding along the suture is untouched', () => {
+    const noC = run([0, 1.2], [0, -1.2], 0), withC = run([0, 1.2], [0, -1.2], 40);
+    // only the existing jam speed brake applies (a few %), no approach damping of the slip
+    expect(Math.abs(withC.a[1] / noC.a[1] - 1)).toBeLessThan(0.05);
+    expect(Math.abs(withC.b[1] / noC.b[1] - 1)).toBeLessThan(0.05);
+  });
+  it('without continental contact nothing changes', () => {
+    const noC = run([1.2, 0], [-1.2, 0], 0);
+    expect(noC.a[0] - noC.b[0]).toBeGreaterThan(1.5);
+  });
+});
