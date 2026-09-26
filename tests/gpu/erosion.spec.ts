@@ -106,7 +106,9 @@ test('thermal erosion relaxes cliffs to talus and leaves gentle slopes untouched
     const gentle = (z: number) => 80 + 0.25 * Math.min(z, 256 - z) * 0.2; // slope 0.05 ≪ talus
     const w = (x: number) => Math.min(1, Math.max(0, (Math.abs(x - 64) - 40) / 16)); // 0 in cliff zone, 1 in gentle zone
     const height = (x: number, z: number) => step(z) * (1 - w(x)) + gentle(z) * w(x);
-    const rig = await R.makeHydroRig(r, R.voxFromHeights(height));
+    // granite: plain rock (fresh basalt / andesite stand steeper, EROSION_DEFAULTS.volcanicTalusMul)
+    const L = await import('/src/sim/layout.ts');
+    const rig = await R.makeHydroRig(r, R.voxFromHeights(height, () => L.Mat.GRANITE));
     const talus = E.EROSION_DEFAULTS.talus;
     const maxSlope = (s: Float32Array) => {
       let m = 0;
@@ -166,12 +168,13 @@ test('high ground relaxes to a gentler talus than the coast', async ({ page }) =
     const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
     const R = await import('/src/sim/hydroRig.ts');
     const E = await import('/src/sim/erosion.ts');
+    const L = await import('/src/sim/layout.ts');
     const r = await makeRenderer();
     // rig sea level is 76: a ramp far above it (95 → 125) and one just above it (76 → 88), both 6 layers/cell
     const rig = await R.makeHydroRig(r, R.voxFromHeights((_x: number, z: number) => {
       const hi = z < 128, d = Math.max(0, 16 - Math.abs((z % 128) - 64)) * 6;
       return Math.min(hi ? 95 + d : 76 + d, hi ? 125 : 88);
-    }));
+    }, () => L.Mat.GRANITE)); // plain rock: fresh lava rock stands steeper
     rig.params.set('erosionRate', 0);
     for (let t = 0; t < 300; t++) rig.tick(1);
     const s = await rig.readF('surfY');
@@ -205,4 +208,26 @@ test('waves cut sea cliffs back to a beach, never below the water surface', asyn
   });
   expect(res.edge, `cliff edge column ${res.edge.toFixed(1)}`).toBeLessThan(res.SEA + res.talusWave + 2);
   expect(res.minLand, 'no dry land cut below the sea').toBeGreaterThan(res.SEA - 0.5);
+});
+
+// Volcanic cones and seamounts must be able to build up: fresh lava rock (basalt / andesite) is coherent and
+// stands steeper than plain rock, which spread submarine cones flat (they stalled at +2-4 layers).
+test('fresh lava rock stands steeper than plain rock', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const R = await import('/src/sim/hydroRig.ts');
+    const L = await import('/src/sim/layout.ts');
+    const r = await makeRenderer();
+    const h = (_x: number, z: number) => (z >= 64 && z < 192 ? 110 : 80);
+    const run = async (mat: number) => {
+      const rig = await R.makeHydroRig(r, R.voxFromHeights(h, () => mat));
+      rig.params.set('erosionRate', 0);
+      for (let t = 0; t < 300; t++) rig.tick(1);
+      const s = await rig.readF('surfY');
+      let m = 0; for (let z = 40; z < 90; z++) for (let x = 0; x < R.NX; x++) m = Math.max(m, Math.abs(s[R.idx(x, z)]! - s[R.idx(x, z + 1)]!));
+      return m;
+    };
+    return { basalt: await run(L.Mat.BASALT), granite: await run(L.Mat.GRANITE) };
+  });
+  expect(res.basalt, `basalt ${res.basalt.toFixed(2)} vs granite ${res.granite.toFixed(2)}`).toBeGreaterThan(res.granite * 1.4);
 });

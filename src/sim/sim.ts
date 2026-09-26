@@ -198,7 +198,7 @@ export class Sim {
       // reservoir snapshot gates crust stacking (see Tectonics.stackGate)
       // full stacking unless the reservoir is in real debt (magma keeps it near 0 in normal operation)
       this.tectonics.stackGate.value = Math.min(1, Math.max(0, 1 + this.lastCounters[0]! / RES_GATE_UNITS));
-      if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); }
+      if (Number.isFinite(this.stats.seaLevel)) { this.climate.setSeaLevel(this.stats.seaLevel); this.biome.setSeaLevel(this.stats.seaLevel); this.magma.uniforms.seaLevel.value = this.stats.seaLevel; }
       const op = this.lifecycle.decide(plates, life, my, this.rng, this.godSplit ?? this.wilson.riftRequest);
       this.godSplit = undefined;
       if (op) {
@@ -341,6 +341,7 @@ export class Sim {
     this.lastCounters = s.lastCounters ? Int32Array.from(s.lastCounters) : null;
     this.stats = this.lastCounters ? parseWorldStats(this.lastCounters.buffer as ArrayBuffer) : null;
     this.climate.setSeaLevel(s.uniforms.climateSeaLevel);
+    this.magma.uniforms.seaLevel.value = s.uniforms.climateSeaLevel;
     this.climate.uniforms.iceAge.value = s.uniforms.iceAge;
     this.biome.setSeaLevel(s.uniforms.biomeSeaLevel);
     this.tectonics.stackGate.value = s.uniforms.stackGate ?? 1;

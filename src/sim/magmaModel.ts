@@ -71,8 +71,8 @@ export const VOLC = {
   tWane: 1.5,          // My, effusion and activity ramp down
   repose: [2, 6] as const,  // My between episodes
   effuseMin: 600,      // units/My minimum effusion while active; otherwise the chamber drains over the episode
-  minCharge: 4,        // full-voxel equivalents of magma needed to start an episode (few, large volcanoes)
-  ventRadius: 2,       // a vent is the chamber-mass maximum over (2r+1)² columns with no erupting neighbour
+  minCharge: 6,        // full-voxel equivalents of magma needed to start an episode (few, large volcanoes; 4 gave dense clusters)
+  ventRadius: 3,       // a vent is the chamber-mass maximum over (2r+1)² columns with no erupting neighbour (2: dense clusters)
   craterDepth: 1.5,    // layers below the lowest rim neighbour
   craterMax: 3,        // layers carved at most per carve event
 } as const;

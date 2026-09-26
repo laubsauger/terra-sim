@@ -41,7 +41,7 @@ import { Fn, If, Loop, Break, Return, float, int, uint, vec2, max, min, clamp, f
 import { ReaderKernel, type GpuFields } from '../core/gpu';
 import type { Params } from '../core/params';
 import { NCOL, NY, Mat, MAT_COUNT, MAT_ERODIBILITY, FLAG_CONTINENTAL } from './layout';
-import { tMat, tFill, tAge, tFlags, tPack, tVoxIdx, tColIdx, tColXZ, uMin, uMax } from './tslLayout';
+import { tMat, tFill, tAge, tFlags, tPack, tVoxIdx, tColIdx, tColXZ, uMin, uMax, iMax } from './tslLayout';
 import { createDerivePass } from './derive';
 import { VEG_ERODIBILITY_K } from './biomeModel';
 
@@ -64,6 +64,9 @@ export const EROSION_DEFAULTS = {
   // so sea cliffs are cut back to beaches and the rubble fills the shelf, but no column is ever cut below sea
   // level (the B9 drowning came from slumping margins toward the seabed). Low coastal land also slumps gentler.
   talusWave: 1.0,
+  // fresh lava rock (basalt / andesite on top) is coherent and stands steeper: seamounts and cones can build up
+  // instead of spreading flat (submarine vents never breached: cones stalled at +2-4 layers)
+  volcanicTalusMul: 1.8,
   talusCoastLow: 1.2, // subaerial talus right above sea level, blending to `talus` by coastBlendTo layers up
   coastBlendTo: 6,
   talusHighFrom: 4,
@@ -257,7 +260,10 @@ export function createErosionPass(fields: GpuFields, params: Params, opts: { sea
     const talLow = mix(float(D.talusCoastLow), talus, smoothstep(0, D.coastBlendTo, above));
     const talAir = mix(talLow, float(D.talusHigh), smoothstep(D.talusHighFrom, D.talusHighTo, above));
     const dry = water.element(i).lessThan(0.5);
-    const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talAir).toVar();
+    const topM = tMat(vox.element(tVoxIdx(x, iMax(int(ceil(h)).sub(int(1)), int(0)), z))).toVar();
+    const volcanic = topM.equal(uint(Mat.BASALT)).or(topM.equal(uint(Mat.ANDESITE)));
+    const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talAir)
+      .mul(select(volcanic, float(D.volcanicTalusMul), float(1))).toVar();
     const nbs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     const ex = nbs.map(([dx, dz]) => {
       const n = tColIdx(x.add(int(dx)), z.add(int(dz))).toVar();

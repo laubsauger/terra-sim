@@ -88,6 +88,8 @@ export class MagmaPass {
     volcanism: uniform(1),
     decayTrench: uniform(1),        // per relax iteration
     decayRecent: uniform(1),
+    // sea level (voxel-y), set by the orchestrator with the climate's (saved there): submarine vents carve no crater
+    seaLevel: uniform(76) as THREE.UniformNode<'float', number>,
   };
   private relaxK: [[THREE.ComputeNode, THREE.ComputeNode], [THREE.ComputeNode, THREE.ComputeNode]]; // [dir][pidParity]
   private focusK: [[THREE.ComputeNode, THREE.ComputeNode], [THREE.ComputeNode, THREE.ComputeNode]]; // [voxPar][pidPar]
@@ -646,8 +648,10 @@ export class MagmaPass {
             });
           });
         };
-        // summit crater: carve the vent below its lowest rim neighbour (reservoir +); next tick's focus kernel deposits spatter
-        const carve = () => {
+        // summit crater: carve the vent below its lowest rim neighbour (reservoir +); next tick's focus kernel deposits spatter.
+        // Not under water: a crater of up to craterMax layers per episode took back everything a seamount gained,
+        // so submarine volcanoes never grew past ~3 layers of relief (never breached).
+        const carve = () => If(surfY.element(i).greaterThanEqual(this.uniforms.seaLevel.sub(0.5)), () => {
           const rimMin = float(1e9).toVar();
           for (const [dx, dz] of N8) rimMin.assign(min(rimMin, surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))))));
           const topV = vox.element(tVoxIdx(x, top, z)).toVar();
@@ -658,7 +662,7 @@ export class MagmaPass {
             atomicAdd(ctr.element(CTR_RESERVOIR), int(got));
             carveW.assign(uMin(got.mul(uint(2)).add(felsic), uint(2047)));
           });
-        };
+        });
         const lid = top.sub(chTop);
         const charged = int(ch.add(uint(254)).div(uint(255))).toVar(); // full-voxel equivalents of magma
         const need = lid.div(int(M.lidPerVoxel)).add(int(1)).toVar();
