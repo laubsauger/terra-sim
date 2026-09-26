@@ -16,6 +16,14 @@ import { iMax, iMin } from './tslLayout';
 export const OPEN_DEPTH = 3;
 /** Relaxation fraction per tick. */
 export const LEVEL_RATE = 0.5;
+/**
+ * Groundwater seepage: standing water (lakes, > SEEP_MIN_DEPTH) whose surface is more than SEEP_ABOVE above sea
+ * level loses SEEP_FRAC per tick to the ocean pool (half-life ≈ 2 My). Uplift lifts whole basins with their lakes;
+ * without an outlet only evaporation drained them, and highland lakes piled up on rising ranges.
+ */
+export const SEEP_FRAC = 0.017;
+export const SEEP_ABOVE = 2;
+export const SEEP_MIN_DEPTH = 0.3;
 const FIX = 1024;        // level quantum for the mean (1/1024 voxel), summed exactly as hi/lo int32 pairs
 const OFFSET = 64;       // levels measured from y = 64 → |q| ≤ 2^16
 const Q = 2 ** -17;      // water quantum for exact adds
@@ -31,6 +39,7 @@ export function registerOceanFields(f: GpuFields): void {
 }
 
 export class OceanLevel {
+  private seep: THREE.ComputeNode;
   private clear: THREE.ComputeNode;
   private reduce: THREE.ComputeNode;
   private apply: THREE.ComputeNode;
@@ -56,6 +65,23 @@ export class OceanLevel {
     };
     const meanOf = (n: THREE.Node<'int'>) =>
       float(atomicLoad(acc.element(S_HI))).mul(1024).add(float(atomicLoad(acc.element(S_LO)))).div(float(n).mul(FIX)).add(OFFSET);
+
+    // seepage in whole 2^-10 units into the pool (spread over open ocean by apply below): Σ water unchanged (V4)
+    this.seep = Fn(() => {
+      const c = instanceIndex;
+      If(c.greaterThanEqual(uint(NCOL)), () => { Return(); });
+      If(hasPrev().not(), () => { Return(); });
+      const w = water.element(c).toVar();
+      const s = surfY.element(c).toVar();
+      const sea = float(atomicLoad(acc.element(S_PREV))).div(FIX).add(OFFSET);
+      If(w.greaterThan(SEEP_MIN_DEPTH).and(s.add(w).greaterThan(sea.add(SEEP_ABOVE))).and(isOcean(s, w).not()), () => {
+        const units = int(w.mul(SEEP_FRAC * 1024).floor()).toVar();
+        If(units.greaterThan(int(0)), () => {
+          water.element(c).assign(w.sub(float(units).div(1024)));
+          atomicAdd(acc.element(OCEAN_POOL), units);
+        });
+      });
+    })().compute(NCOL);
 
     this.reduce = Fn(() => {
       const c = instanceIndex;
@@ -114,6 +140,7 @@ export class OceanLevel {
   }
 
   step(renderer: THREE.WebGPURenderer): void {
+    renderer.compute(this.seep);
     renderer.compute(this.clear);
     renderer.compute(this.reduce);
     renderer.compute(this.apply);

@@ -115,3 +115,35 @@ test('quake sites sit on the active subduction front', async ({ page }) => {
   // so 'at the boundary' means within ~12 cells (plates here are > 100 cells across)
   expect(res.near <= 12 || res.recentOp, `site ${JSON.stringify(res)}`).toBe(true);
 });
+
+// User: "at higher sim speeds the water ends up raised to the sky by mountains". Uplift lifts closed basins
+// with their lakes; groundwater seepage must drain highland lakes into the sea over a few My, conserving water.
+test('highland lakes seep into the ocean (half-life ~2 My) with total water unchanged', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const { registerSimFields } = await import('/src/sim/fields.ts');
+    const { OceanLevel } = await import('/src/sim/oceanLevel.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const surf = f.cpuArray('surfY') as Float32Array, water = f.cpuArray('water') as Float32Array;
+    const lake = (i: number) => (i % 256) < 64 && Math.floor(i / 256) < 64;
+    for (let i = 0; i < 65536; i++) {
+      const x = i % 256;
+      if (lake(i)) { surf[i] = 100; water[i] = 2; }          // basin 24+ layers above the sea (< OPEN_DEPTH: not ocean on tick 1)
+      else if (x < 128) { surf[i] = 60; water[i] = 16; }     // open ocean, level 76
+      else { surf[i] = 90; water[i] = 0; }                   // dry land
+    }
+    f.markDirty('surfY'); f.markDirty('water');
+    const ocean = new OceanLevel(f);
+    // pool remainder (oceanSum[7], 2^-10 units) is part of the water budget until paid out (B14)
+    const sum = async () => { const a = new Float32Array(await f.read(r, 'water')); let t = 0; for (const v of a) t += v; return t + new Int32Array(await f.read(r, 'oceanSum'))[7]! / 1024; };
+    const lakeW = async () => { const a = new Float32Array(await f.read(r, 'water')); let t = 0; for (let i = 0; i < 65536; i++) if (lake(i)) t += a[i]!; return t; };
+    const W0 = await sum(), L0 = await lakeW();
+    for (let t = 0; t < 40; t++) ocean.step(r); // 40 ticks = 2 My
+    return { W0, W1: await sum(), L0, L1: await lakeW() };
+  });
+  expect(res.L1 / res.L0, 'half the lake gone after ~2 My').toBeLessThan(0.6);
+  expect(res.L1 / res.L0).toBeGreaterThan(0.35); // seepage, not instant removal
+  expect(Math.abs(res.W1 - res.W0) / res.W0).toBeLessThan(1e-5);
+});
