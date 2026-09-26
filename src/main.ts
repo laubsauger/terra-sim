@@ -1,4 +1,5 @@
 import { checkWebGPU, showErrorScreen } from './ui/errorScreen';
+import { loaderStep, loaderDone, loaderRemove, loaderYield } from './ui/loader';
 import { createStage } from './render/stage';
 import { createPerfHud } from './ui/perfHud';
 import { GpuFields } from './core/gpu';
@@ -37,16 +38,20 @@ import { createGodPanel } from './ui/godPanel';
 export const DT_GEO = 0.05;
 
 async function main() {
+  loaderStep('waking the GPU…');
   const gpu = await checkWebGPU();
   if (!gpu.ok) {
+    loaderRemove();
     showErrorScreen('WebGPU unavailable', gpu.reason);
     return;
   }
   const app = document.getElementById('app')!;
   let stage;
   try {
+    loaderStep('starting the renderer…');
     stage = await createStage(app, gpu.adapter);
   } catch (e) {
+    loaderRemove();
     showErrorScreen('Renderer failed to start', (e as Error).message);
     return;
   }
@@ -70,6 +75,7 @@ async function main() {
   const fields = new GpuFields();
   registerSimFields(fields);
   fields.freeze();
+  await loaderYield('shaping the crust…');
   const world = generateWorld(params.get('seed') as number, { plates: params.get('initialPlates') as number });
   uploadWorld(fields, world);
   const sim = new Sim(stage.renderer, fields, world, params, DT_GEO);
@@ -83,6 +89,7 @@ async function main() {
   const loadSlot = new URLSearchParams(location.search).get('load'); // ?load=<slot key>|latest
   if (loadSlot) await saves.loadSlot(loadSlot).catch(() => {}); // failure is toasted; the fresh world keeps running
 
+  await loaderYield('painting the diorama…');
   const look = createLook(stage, fields, { highQuality: params.get('highQuality') as boolean, motion: sim.tectonics });
   const life = createLife(fields, stage.renderer, stage.scene, { highQuality: params.get('highQuality') as boolean, seed: params.get('seed') as number, camera: stage.camera });
   const slice = createSlice(stage, fields);
@@ -178,7 +185,9 @@ async function main() {
     hud.frame(dt, stage.cpuMs);
     panel.fps.end();
   });
+  loaderStep('compiling shaders…');
   stage.start();
+  loaderDone();
 
   (window as unknown as { terra: unknown }).terra = { params, clock, fields, stage, sim, world, probe, overlays, audio, god, saves, look, life, atmo, slice, fx,
     save: async () => (await saves.exportFile()).blob, load: (blob: Blob) => saves.loadBlob(blob) };

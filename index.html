@@ -9,6 +9,20 @@
   </head>
   <body>
     <div id="app"></div>
+    <!-- loader: inline so it shows before any script or stylesheet arrives; src/ui/loader.ts updates and removes it -->
+    <div id="terra-loader" style="position:fixed;inset:0;z-index:50;display:grid;place-items:center;background:radial-gradient(circle at 50% 42%,#1c2230,#0d0f14 70%);transition:opacity .5s ease">
+      <style>
+        @keyframes tl-bob { 0%,100% { transform: translateY(0) } 50% { transform: translateY(-6px) } }
+        @keyframes tl-glow { 0%,100% { opacity: .55 } 50% { opacity: 1 } }
+        #terra-loader .tl-icon { width: 72px; height: 72px; animation: tl-bob 2.4s ease-in-out infinite; filter: drop-shadow(0 10px 18px rgba(240,118,58,.35)) }
+        #terra-loader .tl-text { margin-top: 18px; font: 500 13px/1.4 ui-sans-serif, system-ui, sans-serif; letter-spacing: .06em; color: rgba(236,240,247,.78); text-align: center }
+        #terra-loader .tl-step { display: block; margin-top: 4px; font-size: 11px; color: rgba(255,207,122,.8); animation: tl-glow 1.6s ease-in-out infinite }
+      </style>
+      <div style="display:grid;justify-items:center">
+        <img class="tl-icon" src="/favicon.svg" alt="" />
+        <div class="tl-text">growing a little planet<span class="tl-step" id="terra-loader-step">waking the GPU…</span></div>
+      </div>
+    </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
