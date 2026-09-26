@@ -56,7 +56,7 @@ async function main() {
     scene.add(createTerrain(fields).object, createSides(fields).object, createWater(fields).object);
   }
   const quality = q.get('quality') !== 'low';
-  const atmo = createAtmosphere(fields, renderer, scene, camera, { highQuality: quality });
+  const atmo = createAtmosphere(fields, renderer, scene, camera, { highQuality: quality, lightning: q.get('lightning') !== '0' });
   for (const name of (q.get('hide') ?? '').split(',').filter(Boolean)) { const o = atmo.object.getObjectByName(name); if (o) o.visible = false; }
 
   // Integration demo (what render/ would do): terrain + water receive the cloud shadow on the sun term.
@@ -296,6 +296,18 @@ async function main() {
     densityGrid: (y: number, n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(densK, x0, z0, size, Math.min(n, WXN), y),
     /** Cirrus map (r = where high veils may form) on an n×n grid. */
     cirrusGrid: (n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(cirK, x0, z0, size, Math.min(n, WXN)),
+    /** GPU ms per cloud compute kernel (each run alone n×, median), for perf work. */
+    kernelTimes: async (n = 40) => {
+      const ks = (atmo.clouds as unknown as { kernels?: Record<string, THREE.ComputeNode> }).kernels ?? {};
+      const out: Record<string, number> = {};
+      await renderer.resolveTimestampsAsync('compute');
+      for (const [name, k] of Object.entries(ks)) {
+        const v: number[] = [];
+        for (let i = 0; i < n; i++) { renderer.compute(k); v.push((await renderer.resolveTimestampsAsync('compute')) ?? 0); }
+        v.sort((a, b) => a - b); out[name] = +v[v.length >> 1]!.toFixed(4);
+      }
+      return JSON.stringify(out);
+    },
     /** Slab bounds (world y). */
     slab: () => [cu.yLo.value, cu.yHi.value],
     /** God-tool uplift (voxel columns, immediate) + derive: a real new mountain under the clouds. */

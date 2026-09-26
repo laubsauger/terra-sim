@@ -47,11 +47,11 @@ import {
   Fn, If, Return, Loop, Break, float, int, uint, vec2, vec3, vec4, uvec2, uvec3, uniform, uniformArray, instanceIndex,
   instancedArray, exp, mix, smoothstep, saturate, max, min, floor, fract, abs, length, normalize, dot, pow,
   sign, textureStore, texture, texture3D, positionWorld, cameraPosition, cameraViewMatrix, step,
-  screenUV, uv, property, outputStruct, floatBitsToUint, select,
+  screenUV, uv, property, outputStruct, floatBitsToUint, select, clamp,
 } from 'three/tsl';
 import type { GpuFields, StorageNode } from '../core/gpu';
 import { NX, NZ, CELL, BLOCK_SIZE } from '../sim/layout';
-import { tColIdx } from '../sim/tslLayout';
+import { tColIdx, iMin, iMax } from '../sim/tslLayout';
 import { CLIMATE } from '../sim/climateModel';
 import { tWorldY, sceneViewZ } from '../render/shared';
 import { skyU } from '../render/sky';
@@ -111,6 +111,8 @@ export interface Clouds {
   /** Weather probe grid (CELLS² vec4: coverage, storm, base world y, ground world y) for lightning + tests. */
   cells: StorageNode<'vec4'>;
   weather: THREE.StorageTexture;
+  /** The compute passes (perf probes in tests). */
+  kernels: Record<string, THREE.ComputeNode>;
   /** Cirrus map (r: where thin high veils may form, 0..1; bounded by the frontal bands). */
   cirrusMap: THREE.StorageTexture;
   density: THREE.Storage3DTexture;
@@ -145,6 +147,10 @@ const STEP = NX / S;
 const W = ATMO.WEATHER_RES;
 const VX = ATMO.VX, VY = ATMO.VY;
 const NC = ATMO.CELLS;
+/** Occupancy grid: cells of OCC_XZ × OCC_Y × OCC_XZ voxels. */
+const OCC_XZ = 8, OCC_Y = 16, OX = VX / OCC_XZ, OY = VY / OCC_Y;
+/** The march's in-cloud threshold on the filtered density, and the (slightly lower, f16-safe) occupancy mark. */
+const MARCH_EPS = 0.004, OCC_EPS = 0.0039;
 
 export function createClouds(fields: GpuFields, opts: { highQuality: boolean; renderer: THREE.WebGPURenderer }): Clouds {
   const vapor = fields.cur('vapor'), precip = fields.cur('precip'), surfTemp = fields.cur('surfTemp');
@@ -154,6 +160,18 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   /** Terrain summary (SUM² vec4): mean ground voxel-y (ocean at sea level), wet fraction, relative humidity, 0. */
   const terrain = instancedArray(S * S, 'vec4') as unknown as StorageNode<'vec4'>;
   terrain.setName('atmoTerrain');
+  /** The weather map's blurs, done once on the SUM² grid (bilinear lookups commute with whole-cell shifts, so
+   *  one lookup of the blurred grid equals the blur of lookups): summary 7×7 Gaussian, terrain 3×3. */
+  const sumBlur = instancedArray(S * S, 'vec4') as unknown as StorageNode<'vec4'>;
+  sumBlur.setName('atmoSummaryBlur');
+  const terBlur = instancedArray(S * S, 'vec4') as unknown as StorageNode<'vec4'>;
+  terBlur.setName('atmoTerrainBlur');
+  /**
+   * Coarse occupancy of the density volume (OX·OY·OX cells of 8×16×8 voxels, 1 = some voxel within one voxel of
+   * the cell holds density above the march's threshold). The march strides over empty cells in one go.
+   */
+  const occ = instancedArray(OX * OY * OX, 'uint') as unknown as StorageNode<'uint'>;
+  occ.setName('cloudOccupancy');
   const cells = instancedArray(NC * NC, 'vec4') as unknown as StorageNode<'vec4'>;
   cells.setName('atmoCells');
   const noise = cloudNoiseTexture();
@@ -328,20 +346,28 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     const w2 = float(0.4).mul(float(1).sub(stormW));
     return saturate(n1.r.mul(float(1).sub(w2)).add(n2.r.mul(w2)).sub(0.6).div(0.18)) as F;
   };
+  const blurK = Fn(() => {
+    If(instanceIndex.greaterThanEqual(uint(S * S)), () => { Return(); });
+    const sx = int(instanceIndex.mod(uint(S))), sz = int(instanceIndex.div(uint(S)));
+    const at = (buf: StorageNode<'vec4'>, dx: number, dz: number) => buf.element(
+      uint(sx.add(int(dx + S)).mod(int(S)).add(sz.add(int(dz + S)).mod(int(S)).mul(int(S))))) as unknown as V4;
+    const bl = vec4(0).toVar(), tb = vec4(0).toVar();
+    for (const [dx, dz, w] of taps) {
+      bl.addAssign(at(summary, dx, dz).mul(w / wsum));
+      if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) tb.addAssign(at(terrain, dx, dz).mul(w / tsum));
+    }
+    sumBlur.element(instanceIndex).assign(bl);
+    terBlur.element(instanceIndex).assign(tb);
+  })().compute(S * S);
   const weatherK = Fn(() => {
     If(instanceIndex.greaterThanEqual(uint(W * W)), () => { Return(); });
     const tx = instanceIndex.mod(uint(W)), ty = instanceIndex.div(uint(W));
     const x = float(tx).add(0.5).div(W).mul(BLOCK_SIZE).sub(HALF).toVar();
     const z = float(ty).add(0.5).div(W).mul(BLOCK_SIZE).sub(HALF).toVar();
-    const bl = vec4(0).toVar();
-    const tb = vec4(0).toVar();
+    const bl = bilinear(sumBlur, x, z).toVar();
+    const tb = bilinear(terBlur, x, z).toVar();
     const gmax = float(-1e9).toVar();
-    for (const [dx, dz, w] of taps) {
-      const s = sampleSummary(x.add(dx * cell), z.add(dz * cell)).toVar();
-      bl.addAssign(s.mul(w / wsum));
-      if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) gmax.assign(max(gmax, s.w));
-      if (Math.abs(dx) <= 1 && Math.abs(dz) <= 1) tb.addAssign(sampleTerrain(x.add(dx * cell), z.add(dz * cell)).mul(w / tsum));
-    }
+    for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) gmax.assign(max(gmax, sampleSummary(x.add(dx * cell), z.add(dz * cell)).w));
     // ---- terrain coupling: the relief under the low-level drift (mean ground, ocean flat at sea level) ----
     const vel = bandVel(z).toVar();
     const dir = vel.div(max(length(vel), 1e-5)).toVar();
@@ -423,6 +449,8 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   const NP = ATMO.PLUMES;
   const plA = uniformArray(Array.from({ length: NP }, () => new THREE.Vector4()), 'vec4'); // vent x, y, z, strength
   const plB = uniformArray(Array.from({ length: NP }, () => new THREE.Vector4()), 'vec4'); // wind dir x, z, drift length, umbrella y
+  /** World box around every active plume (x0, y0, z0) - (x1, y1, z1): plumeShape is exactly 0 outside it. */
+  const plLo = uniform(new THREE.Vector3(9, 9, 9)), plHi = uniform(new THREE.Vector3(-9, -9, -9));
   const plumeShape = (p: V3, billow: F): F => {
     let acc: F = float(0);
     for (let i = 0; i < NP; i++) {
@@ -460,9 +488,20 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
     const up = tWind(p.z, float(0.95));
     const ws = weatherAt(p.x.sub(up.x.mul(2.2)), p.z.sub(up.y.mul(2.2))).toVar();
     const cum = float(0).toVar(), cir = float(0).toVar(), ash = float(0).toVar();
-    const ashShape = plumeShape(p, float(0.5)).toVar();
+    const ashShape = float(0).toVar();
+    If(p.x.greaterThan(plLo.x).and(p.x.lessThan(plHi.x)).and(p.y.greaterThan(plLo.y)).and(p.y.lessThan(plHi.y))
+      .and(p.z.greaterThan(plLo.z)).and(p.z.lessThan(plHi.z)), () => { ashShape.assign(plumeShape(p, float(0.5))); });
+    // the dome can only be non-zero within [base - 0.08, base + 0.08 + its tallest top] (hb's noise terms are
+    // bounded by ±0.08, top by the bn = 1 case), the anvil only in its lens band: skip the noise elsewhere
+    const Hmax = mix(mix(mix(float(0.3), float(0.07), strat), float(0.5), cong), float(0.78), storm).toVar();
+    const topMax = Hmax.mul(pow(max(cov, 1e-4), 0.6)).mul(1.35).mul(mix(float(1), float(0.7), strat));
+    const needBody = cov.greaterThanEqual(0.002).and(p.y.greaterThan(base.sub(0.08))).and(p.y.lessThan(base.add(0.08).add(max(topMax, 1e-3))));
+    const aTop = ws.w.add(float(0.78).mul(ws.y)).toVar();
+    const needAnvil = ws.y.greaterThan(0).and(ws.x.greaterThan(ATMO.ANVIL_COV0)).and(p.y.greaterThan(aTop.sub(0.16))).and(p.y.lessThan(aTop.add(0.02)));
+    const needNoise = needBody.or(needAnvil).toVar();
     // most of the slab is clear air: skip the noise there (early out keeps the pass cheap)
-    If(cov.greaterThan(0.002).or(ws.y.greaterThan(0.01)).or(ashShape.greaterThan(0.0005)), () => {
+    If(needNoise.or(ashShape.greaterThan(0.0005)), () => {
+     If(needNoise, () => {
       // base shape noise in the drifting frame (second band only where two bands meet), Perlin-Worley
       const fl = bandFlow(p.z);
       const pt = p.xz.sub(tilt(p.z, p.y)).toVar();
@@ -477,7 +516,6 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       // heaps: each coverage cell becomes a dome — tallest where coverage peaks, thin at its rim, the top
       // surface pushed in and out by the 3D billow noise (cauliflower bulges); flat base at the
       // condensation level. Fair cumulus / flat stratus / towering cumulonimbus by type.
-      const Hmax = mix(mix(mix(float(0.3), float(0.07), strat), float(0.5), cong), float(0.78), storm);
       const top = Hmax.mul(pow(max(cov, 1e-4), 0.6)).mul(mix(float(0.5), float(1.35), bn)).mul(mix(float(1), float(0.7), strat));
       // bases undulate per cloud (thin cells float higher, big ones sag) and are ragged, not a ruler line
       const hb = p.y.sub(base).sub(bn.sub(0.5).mul(0.1)).sub(float(0.5).sub(cov).mul(0.06));
@@ -485,11 +523,11 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       const shell = smoothstep(1.0, 0.5, hl).mul(smoothstep(0.0, top.mul(0.25).add(0.015), hb)).mul(step(0.002, cov));
       // Nubis-style carve: the shell only decides how much of the billow noise becomes cloud → lobes
       const body = saturate(bn.mul(0.85).add(0.15).sub(float(1).sub(shell)).div(max(shell, 0.08)).mul(1.35));
-      const aTop = ws.w.add(float(0.78).mul(ws.y));
       // (only the dense cores of storm cells spread an anvil: a stormy region gets separate anvils, never one deck)
       const anvil = ws.y.mul(smoothstep(ATMO.ANVIL_COV0, ATMO.ANVIL_COV1, ws.x)).mul(smoothstep(aTop.sub(0.16), aTop.sub(0.1), p.y)).mul(smoothstep(aTop.add(0.02), aTop.sub(0.04), p.y))
         .mul(mix(float(0.5), float(1.1), bn));
       cum.assign(max(body, anvil));
+     });
       // volcanic ash: carved by a finer, slowly churning billow noise (plume-sized lumps: the cloud-scale
       // noise is wider than the umbrella is thick, which left it a smooth pill / sausage)
       If(ashShape.greaterThan(0.0005), () => {
@@ -515,9 +553,27 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       .mul(smoothstep(u.yHi, u.yHi.sub(0.06), p.y)).mul(smoothstep(u.yLo, u.yLo.add(0.02), p.y));
     const tot = max(max(cum, cir), ash);
     const ashF = ash.div(max(tot, 1e-4));
+    const val = tot.mul(edge).toVar();
+    // occupancy: mark every coarse cell whose trilinear footprint (±1 voxel) reaches this voxel
+    If(val.greaterThan(OCC_EPS), () => {
+      const cix = (i: THREE.Node<'uint'>, n: number, cs: number, d: number) =>
+        uint(iMax(iMin(int(i).add(int(d)), int(n - 1)), int(0))).div(uint(cs));
+      const x0 = cix(ix, VX, OCC_XZ, -1), x1 = cix(ix, VX, OCC_XZ, 1);
+      const y0 = cix(iy, VY, OCC_Y, -1), y1 = cix(iy, VY, OCC_Y, 1);
+      const z0 = cix(iz, VX, OCC_XZ, -1), z1 = cix(iz, VX, OCC_XZ, 1);
+      const mark = (a: THREE.Node<'uint'>, b: THREE.Node<'uint'>, c: THREE.Node<'uint'>) => occ.element(a.add(b.mul(uint(OX))).add(c.mul(uint(OX * OY)))).assign(uint(1));
+      mark(x0, y0, z0);
+      If(x0.notEqual(x1).or(y0.notEqual(y1)).or(z0.notEqual(z1)), () => {
+        mark(x1, y0, z0); mark(x0, y1, z0); mark(x1, y1, z0); mark(x0, y0, z1); mark(x1, y0, z1); mark(x0, y1, z1); mark(x1, y1, z1);
+      });
+    });
     // a = cirrus share: the march erodes cirrus far less (thin ice veils would otherwise erode to nothing)
-    textureStore(density, uvec3(ix, iy, iz), vec4(tot.mul(edge), storm.mul(step(cir, cum)).mul(float(1).sub(ashF)), ashF, cir.div(max(tot, 1e-4)))).toWriteOnly();
+    textureStore(density, uvec3(ix, iy, iz), vec4(val, storm.mul(step(cir, cum)).mul(float(1).sub(ashF)), ashF, cir.div(max(tot, 1e-4)))).toWriteOnly();
   })().compute(VX * VY * VX);
+  const occClearK = Fn(() => {
+    If(instanceIndex.greaterThanEqual(uint(OX * OY * OX)), () => { Return(); });
+    occ.element(instanceIndex).assign(uint(0));
+  })().compute(OX * OY * OX);
 
   const uvw = (p: V3) => vec3(p.x.add(HALF).div(BLOCK_SIZE), p.y.sub(u.yLo).div(u.yHi.sub(u.yLo)), p.z.add(HALF).div(BLOCK_SIZE));
 
@@ -601,12 +657,27 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       const keyCol = tKeyColor();
       const skyTop = skyU.zenith, skyLow = mix(skyU.horizon, skyU.zenith, 0.35);
       const t = t0.add(jit.mul(dtEmpty)).toVar();
+      const it = int(0).toVar(); // samples taken or strided over (the iteration budget)
+      const csY = u.yHi.sub(u.yLo).div(OY);
       Loop({ start: int(0), end: int(steps), type: 'int', condition: '<' }, () => {
         const p = ro.add(rd.mul(t)).toVar();
-        const c = uvw(p);
-        const v = texture3D(density, c).level(lvl0).toVar();
+        const c = uvw(p).toVar();
         const stepLen = dt.toVar();
-        If(v.r.greaterThan(0.004), () => {
+        const v = vec4(0).toVar();
+        // empty occupancy cell: every sample inside it reads ≤ MARCH_EPS, so stride over all of them at once
+        // (same sample positions as one-by-one empty strides; they count against the budget as before)
+        const ocx = clamp(floor(c.x.mul(OX)), 0, OX - 1), ocy = clamp(floor(c.y.mul(OY)), 0, OY - 1), ocz = clamp(floor(c.z.mul(OX)), 0, OX - 1);
+        const cellOcc = occ.element(uint(ocx).add(uint(ocy).mul(uint(OX))).add(uint(ocz).mul(uint(OX * OY)))).toVar();
+        If(cellOcc.equal(uint(0)), () => {
+          const lo = vec3(ocx.mul(BLOCK_SIZE / OX).sub(HALF), u.yLo.add(ocy.mul(csY)), ocz.mul(BLOCK_SIZE / OX).sub(HALF));
+          const hi = lo.add(vec3(BLOCK_SIZE / OX, csY, BLOCK_SIZE / OX));
+          const te = max(lo.sub(p).mul(inv), hi.sub(p).mul(inv));
+          const tEx = min(min(te.x, te.y), te.z);
+          const n = max(floor(tEx.div(dtEmpty)).add(1), 1);
+          stepLen.assign(dtEmpty.mul(n));
+          it.addAssign(int(n).sub(1));
+        }).Else(() => { v.assign(texture3D(density, c).level(lvl0)); });
+        If(v.r.greaterThan(MARCH_EPS), () => {
           // detail erosion (2 Worley octaves) in the same drifting frame as the base shape
           const fl = bandFlow(p.z);
           const qd = vec3(p.xz.sub(fl.o0), p.y).xzy.toVar();
@@ -668,9 +739,10 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
           acc.addAssign(col.mul(T).mul(float(1).sub(Ts)));
           T.mulAssign(Ts);
           If(hit.lessThan(0.5).and(T.lessThan(0.9)), () => { front.assign(t); hit.assign(1); });
-        }).Else(() => { stepLen.assign(dtEmpty); }); // empty space: stride
+        }).ElseIf(cellOcc.notEqual(uint(0)), () => { stepLen.assign(dtEmpty); }); // empty space: stride
         t.addAssign(stepLen);
-        If(T.lessThan(0.02).or(t.greaterThan(t1)), () => { Break(); });
+        it.addAssign(1);
+        If(T.lessThan(0.02).or(t.greaterThan(t1)).or(it.greaterThanEqual(int(steps))), () => { Break(); });
       });
     });
     const cur = finite4(vec4(acc, float(1).sub(T)), vec4(0));
@@ -766,7 +838,7 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
   let hq = opts.highQuality;
   let frame = 0;
   return {
-    object: mesh, summary, cells, weather, cirrusMap, density, sampleSummary, weatherAt,
+    object: mesh, summary, cells, weather, cirrusMap, density, kernels: { summaryK, blurK, weatherK, occClearK, densityK, shadowK, cellsK }, sampleSummary, weatherAt,
     occlusion: (c: V3): F => {
       const col = curColor.sample(screenUV), fr = curFront.sample(screenUV).x;
       const behind = smoothstep(fr.sub(0.03), fr.add(0.03), length(c.sub(cameraPosition)));
@@ -780,8 +852,8 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       frame++;
       const slot = frame % 3;
       // high tier: weather + density on even frames, shadow on odd ones
-      if (hq ? frame % 2 === 0 : slot === 0) { renderer.compute(summaryK); renderer.compute(weatherK); }
-      if (hq ? frame % 2 === 0 : slot === 1) renderer.compute(densityK);
+      if (hq ? frame % 2 === 0 : slot === 0) { renderer.compute(summaryK); renderer.compute(blurK); renderer.compute(weatherK); }
+      if (hq ? frame % 2 === 0 : slot === 1) { renderer.compute(occClearK); renderer.compute(densityK); }
       if (hq ? frame % 2 === 1 : slot === 2) renderer.compute(shadowK);
       if (frame % 15 === 1) renderer.compute(cellsK);
       cloudShadowU.on.value = u.fade.value;
@@ -792,6 +864,16 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
         const q = list[i];
         (plA.array[i] as THREE.Vector4).set(q?.x ?? 0, q?.y ?? -10, q?.z ?? 0, q?.s ?? 0);
         (plB.array[i] as THREE.Vector4).set(q?.dx ?? 1, q?.dz ?? 0, q?.len ?? 0.5, q?.top ?? -9);
+      }
+      // box around every plume with strength > 0 (plumeShape: column ≤ 1.08·height above the vent, umbrella and
+      // head within its drift length and 0.4 across, ±0.2 around the umbrella height), padded
+      plLo.value.set(9, 9, 9); plHi.value.set(-9, -9, -9);
+      for (let i = 0; i < NP; i++) {
+        const q = list[i];
+        if (!q || !(q.s > 0)) continue;
+        const r = Math.max(q.len, 0.22 * q.len + 0.2) + 0.55, hh = Math.max(q.top - q.y, 0.05);
+        plLo.value.min(new THREE.Vector3(q.x - r, q.y - 0.05, q.z - r));
+        plHi.value.max(new THREE.Vector3(q.x + r, Math.max(q.top + 0.3, q.y + 1.1 * hh), q.z + r));
       }
     },
     setHighQuality(v) {
