@@ -181,3 +181,28 @@ test('high ground relaxes to a gentler talus than the coast', async ({ page }) =
   expect(res.hi, `high ground ${res.hi.toFixed(2)}`).toBeLessThan(res.D.talusHigh + 0.3);
   expect(res.lo, `coast ${res.lo.toFixed(2)}`).toBeGreaterThan(res.D.talusHigh + 0.4); // coast keeps its steeper talus
 });
+
+// Sea cliffs stood forever (user: "steep cliff walls across the whole globe"): the sea must cut a dry cliff facing
+// open water back toward the water surface (beach), without cutting any column below sea level (B9 drowning).
+test('waves cut sea cliffs back to a beach, never below the water surface', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeHydroRig, voxFromHeights, idx, NX, NZ, NCOL } = await import('/src/sim/hydroRig.ts');
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const E = await import('/src/sim/erosion.ts');
+    const r = await makeRenderer();
+    const SEA = 76, land = (z: number) => z >= 64 && z < 192;
+    const h = (_x: number, z: number) => (land(z) ? 86 : 64); // 10-layer cliff above a sea floor 12 below sea
+    const water = new Float32Array(NCOL);
+    for (let z = 0; z < NZ; z++) for (let x = 0; x < NX; x++) if (!land(z)) water[idx(x, z)] = SEA - 64;
+    const rig = await makeHydroRig(r, voxFromHeights(h), water);
+    rig.params.set('erosionRate', 0);
+    for (let t = 0; t < 200; t++) rig.tick(1);
+    const s = await rig.readF('surfY'), w = await rig.readF('water');
+    let edge = 0, minLand = 1e9;
+    for (let x = 0; x < NX; x++) { edge = Math.max(edge, s[idx(x, 64)]!); }
+    for (let z = 64; z < 192; z++) for (let x = 0; x < NX; x++) if (w[idx(x, z)]! < 0.5) minLand = Math.min(minLand, s[idx(x, z)]!);
+    return { edge, minLand, talusWave: E.EROSION_DEFAULTS.talusWave, SEA };
+  });
+  expect(res.edge, `cliff edge column ${res.edge.toFixed(1)}`).toBeLessThan(res.SEA + res.talusWave + 2);
+  expect(res.minLand, 'no dry land cut below the sea').toBeGreaterThan(res.SEA - 0.5);
+});

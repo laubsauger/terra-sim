@@ -1,5 +1,5 @@
 // §T.43 post (pulled forward) + §T.40 screen-space AO/GI.
-// high quality: MRT scene pass → SSGI (AO + one diffuse bounce) → TRAA → bloom → tilt-shift DOF
+// high quality: MRT scene pass → SSGI (AO + one diffuse bounce) → bloom → tilt-shift DOF
 //               → AgX tone map → grade (split tone, contrast, saturation) → vignette + grain.
 // low quality:  scene pass → bloom → tone map → grade → FXAA (no SSGI / TRAA / DOF, V9 low tier).
 // Post reads the rendered image only; it never touches sim state (V15).
@@ -100,7 +100,9 @@ export const TONE_MAPPING = THREE.ACESFilmicToneMapping;
  * (half-res AO, ~1 ms). High tier defaults to GTAO to hold the V9 render budget; SSGI is opt-in.
  */
 export interface PostFeatures { ssgi: boolean; gtao: boolean; traa: boolean; dof: boolean; bloom: boolean }
-export const tierFeatures = (high: boolean): PostFeatures => ({ ssgi: false, gtao: high, traa: high, dof: high, bloom: true });
+// TRAA off: its sub-pixel jitter never settled (shader-animated vertices have no motion vectors), so ~3.8k pixels
+// per frame jumped and snapped back even while paused and the whole diorama shimmered; FXAA is stable (297)
+export const tierFeatures = (high: boolean): PostFeatures => ({ ssgi: false, gtao: high, traa: false, dof: high, bloom: true });
 
 export function createPost(renderer: THREE.WebGPURenderer, scene: THREE.Scene, camera: THREE.PerspectiveCamera,
   opts: { highQuality: boolean; features?: Partial<PostFeatures>; toneMapping?: THREE.ToneMapping }): Post {

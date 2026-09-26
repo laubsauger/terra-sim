@@ -183,5 +183,7 @@ B22|2026-09-27|faster slumping fed trench slabs; ocean-ocean trenches accreted n
 B23|2026-09-27|collision fronts pinned at the 100-layer cap delaminated ~1/3 of colliding continental crust (jammed plates never slowed below MIN_SPEED, crust flow 1 layer/face) → continents drained into the mantle; reservoir at ~0 with melt floor starved volcanism|V35
 B24|2026-09-27|oceanic trench winners: contMass − bestMass uint underflow stacked OROGENY_MAX per run at every ocean-ocean trench|V34
 B25|2026-09-27|TSL assigns a node where first built: inside a branch, other reads see 0 → plume spawn dir/seed/wind 0 for most particle kinds (blobs, vertical fountains), flora base y = 0 with culling off|V36
+B26|2026-09-27|sea cliffs stood forever: coastal talus measured against the seabed (B9 guard) never cut dry land facing water; now wave erosion cuts toward the water surface (never below sea)|V33
+B27|2026-09-27|TRAA sub-pixel jitter never settled (shader-animated vertices lack motion vectors): ~3.8k pixels/frame jumped even paused, whole diorama shimmered|V36
 B20|2026-09-27|plate display offset followed sim steps instantly; at normal speed a 0.1-0.3 cell step every few frames read as jerking plates|V32
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26

@@ -46,13 +46,13 @@ export const MAX_CRUST_LAYERS = 100;
  * magma (granite on continental plates), the mantle's only steady supply once melting follows the reservoir
  * (at 0.9 volcanism starved).
  */
-export const ACCRETE_FRAC = 0.7;
+export const ACCRETE_FRAC = 0.6;
 /**
  * Share accreted where the trench winner is oceanic (island arcs). Lower than ACCRETE_FRAC: ocean-ocean
  * subduction returns the rest to the mantle, which feeds arc magma; at 0.9 the reservoir starved and
  * volcanism stalled.
  */
-export const ACCRETE_FRAC_OCEAN = 0.5;
+export const ACCRETE_FRAC_OCEAN = 0.4;
 /** Rift fill thickness as a fraction of the neighbouring continental crust (B18). */
 export const RIFT_THIN = 0.6;
 /**

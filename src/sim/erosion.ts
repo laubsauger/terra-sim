@@ -60,6 +60,12 @@ export const EROSION_DEFAULTS = {
   // high ground slumps at a gentler talus: 2.5 layers/cell renders ~70° on the diorama, so mountain fronts read as
   // walls. Coasts keep `talus` (margins must not slump into the sea, B9); fades in between these heights above sea.
   talusHigh: 1.3,
+  // Wave erosion: a dry column facing open water relaxes to talusWave above the water SURFACE (not the seabed),
+  // so sea cliffs are cut back to beaches and the rubble fills the shelf, but no column is ever cut below sea
+  // level (the B9 drowning came from slumping margins toward the seabed). Low coastal land also slumps gentler.
+  talusWave: 1.0,
+  talusCoastLow: 1.2, // subaerial talus right above sea level, blending to `talus` by coastBlendTo layers up
+  coastBlendTo: 6,
   talusHighFrom: 4,
   talusHighTo: 14,
   thermalRate: 0.5,  // fraction of talus excess relaxed per tick (× 'thermalErosion'), clamped to 1
@@ -248,12 +254,20 @@ export function createErosionPass(fields: GpuFields, params: Params, opts: { sea
     // submarine slopes stand steeper (real continental slopes ≈ 4° ≈ 5 layers/cell here); a subaerial talus
     // underwater slumped every continental margin into the ocean (B9)
     const above = h.sub(seaLevel);
-    const talAir = mix(talus, float(D.talusHigh), smoothstep(D.talusHighFrom, D.talusHighTo, above));
+    const talLow = mix(float(D.talusCoastLow), talus, smoothstep(0, D.coastBlendTo, above));
+    const talAir = mix(talLow, float(D.talusHigh), smoothstep(D.talusHighFrom, D.talusHighTo, above));
+    const dry = water.element(i).lessThan(0.5);
     const tal = select(water.element(i).greaterThan(1), talus.mul(D.submarineTalusMul), talAir).toVar();
     const nbs: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
     const ex = nbs.map(([dx, dz]) => {
-      const hn = surfY.element(tColIdx(x.add(int(dx)), z.add(int(dz))));
-      return select(hn.lessThan(NY - 5.01), max(h.sub(hn).sub(tal), 0), float(0)).toVar(); // room for 4 new voxels
+      const n = tColIdx(x.add(int(dx)), z.add(int(dz))).toVar();
+      const hn = surfY.element(n).toVar();
+      const wn = water.element(n);
+      const normal = max(h.sub(hn).sub(tal), 0);
+      // dry land over open water: cut back toward the water surface only (wave-cut cliff → beach)
+      const wave = max(h.sub(hn.add(wn)).sub(D.talusWave), 0);
+      const e = select(dry.and(wn.greaterThan(1)), max(normal, wave), normal);
+      return select(hn.lessThan(NY - 5.01), e, float(0)).toVar(); // room for 4 new voxels
     });
     const exSum = ex[0]!.add(ex[1]!).add(ex[2]!).add(ex[3]!).toVar();
     const exMax = max(max(ex[0]!, ex[1]!), max(ex[2]!, ex[3]!));
