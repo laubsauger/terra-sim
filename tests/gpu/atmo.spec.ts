@@ -290,6 +290,38 @@ test('a deep submarine vent raises a slim dark smoker column that is actually dr
   expect(problems, problems.join('\n')).toEqual([]);
 });
 
+test('lava bombs that fall into the sea go out instead of resting on it as glowing discs', async ({ page }) => {
+  // user / render agent: 'rings of round orange dots' around coastal and submarine vents
+  const problems = watchProblems(page);
+  await open(page, 'world=paint&look=0');
+  await page.evaluate(() => (window as any).at.paint({}));
+  const water: number[] = await page.evaluate(() => (window as any).at.water());
+  const wet = (x: number, z: number) => water[((z + 256) % 256) * 256 + ((x + 256) % 256)]! > 0.05;
+  // a dry coastal column: sea within a few cells, so part of the bomb ring comes down on water
+  let s: { x: number; z: number } | null = null;
+  for (let z = 130; z < 236 && !s; z += 2) for (let x = 120; x < 236 && !s; x += 2) {
+    if (wet(x, z)) continue;
+    let nWet = 0;
+    for (let a = 0; a < 16; a++) if (wet(Math.round(x + 10 * Math.cos(a * Math.PI / 8)), Math.round(z + 10 * Math.sin(a * Math.PI / 8)))) nWet++;
+    if (nWet >= 5 && nWet <= 11) s = { x, z };
+  }
+  expect(s, 'a coastal site on the painted world').not.toBeNull();
+  await page.evaluate((v) => (window as any).at.trigger({ kind: 'volcano', x: v!.x, z: v!.z, magnitude: 1.2 }), s);
+  let resting = 0, overSea = 0;
+  for (let i = 0; i < 12; i++) {
+    await page.evaluate(() => (window as any).at.frames(20, 1 / 30));
+    for (const p of (await page.evaluate(() => (window as any).at.particles())).live) {
+      if (Math.abs(p.kind - 8) > 0.5 || Math.hypot(p.vx, p.vy, p.vz) > 1e-6) continue; // resting bombs only
+      resting++;
+      if (wet(colOf(p.x), colOf(p.z))) overSea++;
+    }
+  }
+  console.log(`resting lava bombs: ${resting} samples, ${overSea} over the sea`);
+  expect(resting, 'bombs that land on the flanks still glow out there').toBeGreaterThan(10);
+  expect(overSea, 'none rests on the water').toBe(0);
+  expect(problems, problems.join('\n')).toEqual([]);
+});
+
 test('hydrothermal vents sit on young crust: bubbles and smokers under water stay below the surface', async ({ page }) => {
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');

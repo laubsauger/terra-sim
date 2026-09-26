@@ -445,7 +445,10 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       // ejecta: fountain spray dies when it falls back; a bomb lands, stops and glows out on the ground
       If(ballistic.greaterThan(0.5).and(pos.y.lessThan(ground)).and(vel.y.lessThan(0)), () => {
         pos.y.assign(ground);
-        If(isK(PK.BOMB).lessThan(0.5), () => { age.assign(life); }).Else(() => { vel.assign(vec3(0)); life.assign(age.add(1.4)); });
+        // (a bomb falling into the sea just goes out: resting on the water it showed as flat orange discs;
+        // the column's own water depth decides, the coarse summary ground is the max over its cell)
+        const wd = water.element(tColIdx(int(floor(pos.x.add(HALF).div(CELL))), int(floor(pos.z.add(HALF).div(CELL))))) as unknown as F;
+        If(isK(PK.BOMB).lessThan(0.5).or(wd.greaterThan(0.05)), () => { age.assign(life); }).Else(() => { vel.assign(vec3(0)); life.assign(age.add(1.4)); });
       });
       pos.y.assign(mix(max(pos.y, ground), pos.y, max(underwater, floating)));
       // leaving the block or reaching the water surface: die (the render fades them before that)
@@ -484,12 +487,12 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
     // start size and growth per kind; ash widens with height above its (slim) vent
     const hAb = q0.y.sub(q2.w);
     const pdcLoft = step(1.5, q2.z);
-    const size0 = dot(kA, vec4(0.016, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
+    const size0 = dot(kA, vec4(0.02, 0.012, 0.04, 0.18)).add(kA.y.mul(q2.z).mul(0.012))
       .add(kB.x.mul(hash(q2.y.mul(91)).mul(0.002).add(0.003))).add(dot(kB.yzw, vec3(0.01, 0.01, mix(float(0.04), float(0.05), pdcLoft))))
       .add(dot(kC, vec3(0.007, 0.011, 0.009))).add(dot(kD, vec2(0.004, 0.05)));
     // a PDC widens as it runs out (base) and billows up as it lofts
-    const grow = dot(kA, vec4(0.05, 0.07, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.28));
-    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.3))));
+    const grow = dot(kA, vec4(0.07, 0.11, 0.15, 0.25)).add(dot(kB.xyz, vec3(0.001, 0.06, 0.03))).add(kB.w.mul(mix(float(0.17), float(0.26), pdcLoft))).add(kD.y.mul(0.16));
+    const size = size0.add(grow.mul(sqrt(tl))).add(kA.x.mul(saturate(hAb.mul(0.45))));
     // ejecta streak along their screen-space velocity (ember trails)
     const vv = cameraViewMatrix.mul(vec4(q1.xyz, 0)).xyz;
     const speed = length(q1.xyz);
@@ -517,9 +520,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const q = quv.mul(2).sub(1);
       const rr = length(q);
       // billowy puff: Perlin-Worley eats the disc edge, evolving with age (soft, noise-eroded sprites)
-      // (PDC: slightly finer, faster-churning noise and deeper erosion: lumpy lobes, not smooth tubes)
-      const n3 = texture3D(noise, vec3(q.mul(mix(float(0.32), float(0.38), kb.w)).add(seed.mul(5.7)), age.mul(mix(float(0.03), float(0.07), kb.w)).add(seed.mul(3.1)))).r;
-      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(mix(float(0.75), float(0.88), kb.w))).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
+      // (PDC, ash and steam: slightly finer, faster-churning noise and deeper erosion: lumpy lobes that merge into
+      // one column, not smooth tubes or a string of round beads)
+      const lumpy = kb.w.add(k.x).add(k.y);
+      const n3 = texture3D(noise, vec3(q.mul(mix(float(0.32), float(0.38), lumpy)).add(seed.mul(5.7)), age.mul(mix(float(0.03), float(0.07), lumpy)).add(seed.mul(3.1)))).r;
+      const puff = saturate(float(1).sub(rr).mul(1.3).sub(float(1).sub(n3).mul(mix(float(0.75), float(0.88), lumpy))).mul(2.4)).mul(smoothstep(1.0, 0.75, rr));
       const ring = smoothstep(1.0, 0.75, rr).mul(smoothstep(0.35, 0.8, rr)).add(smoothstep(0.35, 0.0, length(q.sub(vec2(-0.3, 0.3)))).mul(0.8));
       const speck = smoothstep(1.0, 0.4, rr);
       // ember streak: hot head at +x (direction of motion), trail fading behind
@@ -545,9 +550,11 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const lit = mix(litC, vec3(dot(litC, vec3(0.3, 0.55, 0.15))), kb.w.mul(0.35));
       // orange underglow from the lava: ash just above the crater, the foot of a submarine smoker column
       const glow = vec3(1.0, 0.33, 0.07).mul(exp(max(vH.x, 0).mul(-24)).mul(min(heat, 1).mul(k.x))
-        .add(exp(max(vH.x, 0).mul(-45)).mul(kb.z.mul(0.35)))
+        // (smoker foot: only a faint warm tint in the puff core; a brighter glow read as flat orange discs
+        // through the water, the seafloor's own vent glow carries the heat)
+        .add(exp(max(vH.x, 0).mul(-60)).mul(kb.z.mul(0.05)).mul(smoothstep(0.8, 0.0, rr)))
         .add(k.z.mul(0.6).mul(exp(age.mul(-1.5))).mul(min(heat, 1)))
-        .add(kb.w.mul(float(1).sub(loftF)).mul(0.1).mul(exp(age.mul(-1.4))).mul(min(heat, 1))) // PDC base: faint heat near the vent
+        .add(kb.w.mul(float(1).sub(loftF)).mul(0.06).mul(exp(age.mul(-1.4))).mul(min(heat, 1))) // PDC base: faint heat near the vent
         .mul(q.y.negate().mul(0.5).add(0.6)).mul(6));
       // incandescent ejecta cooling from yellow to deep red; tephra is black rock with a brief hot head
       const cool = mix(exp(age.mul(-1.1)), exp(age.mul(-0.3)), kc.y);
@@ -555,7 +562,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       const tephra = mix(vec3(0.035, 0.03, 0.028).mul(amb.add(keyCol.mul(0.2))), vec3(1.0, 0.4, 0.1).mul(2), exp(age.mul(-5)).mul(0.5));
       const streakCol = mix(ember, tephra, kc.z);
       const shimmer = sin(age.mul(9).add(seed.mul(30))).mul(0.2).add(0.8);
-      const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.38)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
+      const alpha = k.x.mul(pow(float(1).sub(t), 1.3).mul(0.32)).mul(float(1).sub(smoothstep(0.12, 0.3, vH.x)))
         .add(k.y.mul(pow(float(1).sub(t), 1.6).mul(0.36)).mul(min(heat.add(0.3), 1)))
         .add(k.z.mul(pow(float(1).sub(t), 1.5).mul(0.75)))
         .add(k.w.mul(sin(t.mul(Math.PI)).mul(0.2)))
@@ -565,14 +572,17 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
         .add(kb.w.mul(mix(pow(float(1).sub(t), 1.4).mul(0.4), smoothstep(0, 0.2, t).mul(pow(float(1).sub(t), 1.2)).mul(0.3), loftF)))
         .add(isStreak.mul(mix(float(0.9), float(1), kc.y)).mul(float(1).sub(pow(t, 6))))
         .add(kd.x.mul(0.85).mul(smoothstep(1, 0.85, t)))
-        .add(kd.y.mul(sin(t.mul(Math.PI)).mul(0.22)));
+        // a slick is a patch on the sea: it fades out toward grazing views instead of stacking into
+        // squashed horizontal slabs (the 'pancake' layers seen from low cameras)
+        .add(kd.y.mul(sin(t.mul(Math.PI)).mul(0.22)).mul(smoothstep(0.12, 0.4, abs(normalize(vPos.sub(cameraPosition)).y))));
       const edge = smoothstep(0, 0.2, float(HALF).sub(max(abs(vXZ.x), abs(vXZ.y))));
       const fadeIn = mix(smoothstep(0, 0.25, age), float(1), isStreak);
       // drawn after the cloud composite: hidden by cloud opacity only where the particle is behind the cloud front
       const occ = under ? float(1) : clouds.occlusion(vPos);
       const near = smoothstep(0.12, 0.55, length(vPos.sub(cameraPosition))); // no balloon particles in the lens
-      // soft contact with the terrain (ground-hugging currents, ash at the vent): no hard intersection lines
-      const soft = under ? float(1) : mix(saturate(vView.x.sub(sceneViewZ(screenUV)).div(max(vView.y.mul(0.5), 1e-3))), float(1), isStreak.add(kd.x).add(kd.y).min(1));
+      // soft contact with the terrain (ground-hugging currents, ash at the vent): no hard intersection lines.
+      // Slicks too: their camera-facing card would otherwise paint over island shores as flat slabs.
+      const soft = under ? float(1) : mix(saturate(vView.x.sub(sceneViewZ(screenUV)).div(max(vView.y.mul(0.5), 1e-3))), float(1), isStreak.add(kd.x).min(1));
       const a = shapeA.mul(alpha).mul(fadeIn).mul(edge).mul(occ).mul(near).mul(soft).mul(tCutHard(vPos));
       return vec4(mix(lit.add(glow), streakCol, isStreak), a);
     })();

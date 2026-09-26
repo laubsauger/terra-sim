@@ -349,9 +349,15 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
       const anvil = ws.y.mul(smoothstep(0.1, 0.5, ws.x)).mul(smoothstep(aTop.sub(0.16), aTop.sub(0.1), p.y)).mul(smoothstep(aTop.add(0.02), aTop.sub(0.04), p.y))
         .mul(mix(float(0.5), float(1.1), bn));
       cum.assign(max(body, anvil));
-      // volcanic ash: same billow noise carves the plume column and umbrella into lumpy, eroded puffs
-      const shp = plumeShape(p, bn);
-      ash.assign(saturate(shp.mul(1.3).sub(float(1).sub(bn).mul(0.95)).mul(1.9)).mul(min(shp.mul(2), 1)));
+      // volcanic ash: carved by a finer, slowly churning billow noise (plume-sized lumps: the cloud-scale
+      // noise is wider than the umbrella is thick, which left it a smooth pill / sausage)
+      If(ashShape.greaterThan(0.0005), () => {
+        const qa = p.add(vec3(0, u.time.mul(-0.006), 0)).xzy;
+        const na = texture3D(noise, qa.div(ATMO.DETAIL_TILE)).level(lvl0), na2 = texture3D(noise, qa.div(ATMO.DETAIL_TILE * 0.5).add(0.61)).level(lvl0);
+        const ba = na.r.mul(0.6).add(na2.g.mul(0.4));
+        const shp = plumeShape(p, ba);
+        ash.assign(saturate(shp.mul(1.3).sub(float(1).sub(ba).mul(1.05)).mul(1.9)).mul(min(shp.mul(2), 1)));
+      });
     });
     // cirrus: sparse streaks near the slab top, stretched along the jet, uniform drift (no shear)
     const cy = saturate(float(1).sub(abs(p.y.sub(u.yHi.sub(0.1)).div(0.045)))).toVar();
@@ -467,7 +473,8 @@ export function createClouds(fields: GpuFields, opts: { highQuality: boolean; re
           // erode wispy edges, dense cores barely (cauliflower edges, soft interiors)
           // near the cut faces the detail noise eats the cloud (ragged edge, never a planar slice)
           const nearEdge = float(1).sub(smoothstep(0.03, 0.16, float(HALF).sub(max(abs(p.x), abs(p.z)))));
-          const ero = float(1).sub(fbm).mul(0.62).mul(float(1).sub(smoothstep(0.12, 0.7, v.r)).mul(0.78).add(0.22)).add(nearEdge.mul(0.8));
+          // (ash is eroded through its dense core as well: lumpy plume, never a smooth solid lens)
+          const ero = float(1).sub(fbm).mul(0.62).mul(mix(float(1).sub(smoothstep(0.12, 0.7, v.r)).mul(0.78).add(0.22), float(0.85), v.b)).add(nearEdge.mul(0.8));
           const d = saturate(v.r.sub(ero).div(max(float(1).sub(ero), 0.05)))
             .mul(smoothstep(ATMO.NEAR_FADE0, ATMO.NEAR_FADE1, t)).mul(tCutSoft(p));
           const sigma = d.mul(ATMO.SIGMA).mul(v.b.mul(0.4).add(1));
