@@ -96,8 +96,9 @@ export class GodTools {
       const top = int(colInfo.element(c).x.shiftRight(uint(8)).bitAnd(uint(0xff))).toVar();
       const base = int(colInfo.element(c).x.bitAnd(uint(0xff)));
       If(d.lessThan(1), () => {
-        // bowl: dig (1 - d²)·depth layers of crust from the top, never below base + 2
-        const depth = int(float(1).sub(d.mul(d)).mul(this.strength).mul(this.radius).mul(0.5).round());
+        // bowl: dig (1 - d²)·depth layers of crust from the top, never below base + 2 (0.5·radius read as a
+        // shallow dent: craters should stay visible for a while before they slump and fill)
+        const depth = int(float(1).sub(d.mul(d)).mul(this.strength).mul(this.radius).mul(0.9).round());
         const dig = iMin(depth, iMax(int(0), top.sub(base).sub(2))).toVar();
         const removed = int(0).toVar();
         Loop({ start: int(0), end: dig, condition: '<' }, ({ i }) => {
@@ -110,6 +111,17 @@ export class GodTools {
           });
         });
         atomicAdd(ctr.element(CTR_RESERVOIR), removed);
+        // impact melt: the new crater floor turns to dark glassy basalt (same fill, no mass change) — a lasting
+        // charred scar once the FX scorch has faded
+        const fy = top.sub(dig).toVar();
+        If(fy.greaterThanEqual(int(1)), () => {
+          const fi = tVoxIdx(x, fy, z);
+          const fv = vox.element(fi).toVar();
+          const fm = tMat(fv);
+          If(fm.notEqual(uint(Mat.AIR)).and(fm.notEqual(uint(Mat.PERIDOTITE))).and(fm.notEqual(uint(Mat.MAGMA))), () => {
+            vox.element(fi).assign(tPack(uint(Mat.BASALT), tFill(fv), uint(0), tFlags(fv)));
+          });
+        });
       }).Else(() => {
         // ejecta rim: up to 3 layers of loose sediment, drawn from the reservoir
         const rim = float(1).sub(d.sub(1).div(float(0.6).add(downrange.max(0).mul(obl).mul(0.25)))).clamp(0, 1)

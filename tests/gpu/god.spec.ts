@@ -99,9 +99,15 @@ test('oblique meteor throws ejecta downrange', async ({ page }) => {
     derive.run(r);
     const s1 = new Float32Array(await f.read(r, 'surfY'));
     const d = (x: number) => s1[L.colIdx(x, 128)]! - s0[L.colIdx(x, 128)]!;
-    let down = 0, up = 0; for (let k = 10; k <= 16; k++) { down += d(200 + k); up += d(200 - k); }
-    return { down, up, centre: d(201) };
+    // ejecta rim band (radius 10, bowl shifted ~1.5 cells downrange): 12-18 cells out, clear of the bowl edge
+    let down = 0, up = 0; for (let k = 12; k <= 18; k++) { down += d(200 + k); up += d(200 - k); }
+    const vox = new Uint32Array(await f.read(r, 'vox'));
+    const c = L.colIdx(201, 128), top = Math.ceil(s1[c]!) - 1;
+    return { down, up, centre: d(201), floorMat: vox[c + top * L.NCOL]! & 0xff, BASALT: L.Mat.BASALT };
   });
-  expect(res.centre).toBeLessThan(-2);
+  // user: craters should be deeper and visible, with charring: a radius-10 strike digs well over 5 layers
+  // and leaves a dark impact-melt (basalt) floor
+  expect(res.centre).toBeLessThan(-5);
+  expect(res.floorMat, 'impact-melt floor').toBe(res.BASALT);
   expect(res.down).toBeGreaterThan(res.up * 1.5);
 });
