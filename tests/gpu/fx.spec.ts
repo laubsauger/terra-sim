@@ -9,6 +9,9 @@
 //  - a meteor strike streaks in, hits on schedule, calls back exactly once at the impact frame (the god tool
 //    enqueues the sim's crater there) and throws its ejecta downrange; the sim's own meteors (event log) get a
 //    short streak instead of a second sequence; an ocean impact raises a tsunami;
+//  - the impact reads like the plumes, not like a grey ball hanging over the map: a brief fireball, a dust
+//    column whose height follows the impact size (a small strike stays small) and that is gone a few
+//    seconds later (nothing but the entry smoke tail outlives it);
 //  - idle FX cost nothing (hidden, no dispatches).
 import { test, expect, type Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
@@ -206,7 +209,7 @@ test('meteor strike: streak, impact on schedule with one sim event, ejecta downr
   const f = fxp(page);
   const { ocean, land } = await f.sites();
   const events = () => page.evaluate(() => (window as any).fxp.events());
-  const parts = (px = 0, pz = 0) => page.evaluate(([x, z]) => (window as any).fxp.meteorParticles(x, z), [px, pz]);
+  const parts = (px = 0, pz = 0, py = 0) => page.evaluate(([x, z, y]) => (window as any).fxp.meteorParticles(x, z, y), [px, pz, py]);
   const e0 = await events();
   // god-tool flow: travel azimuth 0 = +x; the sim event is enqueued in onImpact
   await page.evaluate(([x, z]) => (window as any).fxp.strikeAsync(x, z, 0, 1.0), [land.x, land.z]);
@@ -225,15 +228,27 @@ test('meteor strike: streak, impact on schedule with one sim event, ejecta downr
   await f.frames(30);
   const after = await parts(q.position[0], q.position[2]);
   console.log(`meteor on land: particles by kind ${JSON.stringify(after.byKind)}, curtain centroid offset (${after.curtain[0].toFixed(3)}, ${after.curtain[1].toFixed(3)}) world, travel +x`);
-  expect(after.byKind[1], 'ejecta curtain').toBeGreaterThan(300);
+  expect(after.byKind[1], 'ejecta curtain').toBeGreaterThan(150);
   expect(after.byKind[2], 'incandescent ejecta').toBeGreaterThan(40);
   expect(after.byKind[3], 'rising column').toBeGreaterThan(20);
+  expect(after.byKind[5], 'fireball').toBeGreaterThan(10);
   // oblique impact: the curtain is thrown downrange (+x), not uprange
   expect(after.curtain[0]).toBeGreaterThan(0.02);
   expect(after.curtain[0]).toBeGreaterThan(3 * Math.abs(after.curtain[1]));
   // the log entry of our own strike does not replay a second sequence
   await f.frames(20);
   expect((await page.evaluate(() => (window as any).fxp.quakes)).length).toBe(1);
+  // ~2.9 s after the impact: the fireball was brief, the column stands at a plume-like height (world units;
+  // the volcanic ash columns top out at ~0.2–0.5)
+  await f.frames(100);
+  const col = await parts(q.position[0], q.position[2], q.position[1]);
+  expect(col.byKind[5], 'the fireball is over within ~1.5 s').toBe(0);
+  expect(col.colTop, 'the column rises').toBeGreaterThan(0.15);
+  expect(col.colTop, 'but stays a plume, not a sky-high cloud').toBeLessThan(0.6);
+  // ~7 s: curtain, column, fireball and secondary puffs are all gone (no lingering dust cloud)
+  await f.frames(250);
+  const late = await parts();
+  expect([late.byKind[1], late.byKind[3], late.byKind[4], late.byKind[5]], 'impact dust fades within a few seconds').toEqual([0, 0, 0, 0]);
   // a meteor the sim applied on its own: a short streak that lands right away
   await page.evaluate(([x, z]) => (window as any).fxp.godMeteor(x, z, 1.1), [ocean.x, ocean.z]);
   await f.frames(3);
@@ -250,6 +265,27 @@ test('meteor strike: streak, impact on schedule with one sim event, ejecta downr
   const mv = await page.evaluate(() => (window as any).fxp.meteorVisible());
   expect(mv.every(([, v]: [string, boolean]) => !v), JSON.stringify(mv)).toBe(true);
   expect(await page.evaluate(() => (window as any).fxp.updateCalls())).toBe(0);
+  expect(problems).toEqual([]);
+});
+
+test('meteor impact size follows the strike: a small meteor raises a small column, a big one a plume-sized one', async ({ page }) => {
+  const problems = watchProblems(page);
+  // same site on a fresh world each time (a second strike would land in the first one's crater)
+  const column = async (mag: number, radius: number) => {
+    await open(page, 'quality=low');
+    const { land } = await fxp(page).sites();
+    await page.evaluate(([x, z, m, r]) => (window as any).fxp.strikeAsync(x, z, 0, m, r), [land.x, land.z, mag, radius]);
+    await fxp(page).frames(3);
+    await fxp(page).frames(93); // past the 1.5 s entry
+    const q = await page.evaluate(() => (window as any).fxp.strikeResult());
+    await fxp(page).frames(140); // ~2.4 s after the impact: the column stands, the cap has formed
+    return page.evaluate(([x, z, y]) => (window as any).fxp.meteorParticles(x, z, y), [q.position[0], q.position[2], q.position[1]]);
+  };
+  const small = await column(0.25, 4), big = await column(1, 12);
+  console.log(`column top above the impact: M0.25 r4 ${small.colTop.toFixed(3)} (${small.byKind[3]} puffs), M1 r12 ${big.colTop.toFixed(3)} (${big.byKind[3]} puffs) world`);
+  expect(small.byKind[3], 'a small strike still raises a little column').toBeGreaterThan(5);
+  expect(small.colTop, 'small impacts stay small').toBeLessThan(0.6 * big.colTop);
+  expect(small.byKind[3] + small.byKind[1], 'and throw less dust').toBeLessThan(0.6 * (big.byKind[3] + big.byKind[1]));
   expect(problems).toEqual([]);
 });
 
@@ -278,7 +314,7 @@ test('perf: active FX cost and idle FX hidden with no dispatches; hero-view mete
   // ocean impact → tsunami
   await page.evaluate(([x, z]) => (window as any).fxp.godMeteor(x, z, 1.3), [ocean.x, ocean.z]);
   for (let i = 0; i < 8; i++) { await f.frames(60); await page.screenshot({ path: `${OUT}/fx_tsunami_${i}.png` }); }
-  // GPU cost while active: an ocean meteor impact 0.5 s in (flash, dome, ejecta, column, ground ring,
+  // GPU cost while active: an ocean meteor impact 0.5 s in (flash, fireball, ejecta, column, ground ring,
   // tsunami). Wall-clock A/B, each layer drawn 8× to stand above the frame-time noise; sweeps back to back.
   await page.evaluate(([x, z]) => (window as any).fxp.strikeAsync(x, z, 2.2, 1.2), [ocean.x, ocean.z]);
   await f.frames(120);

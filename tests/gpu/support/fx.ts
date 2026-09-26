@@ -283,18 +283,22 @@ async function main() {
       }, radius).then((q) => ({ ...q, position: q.position.toArray() }));
     },
     strikeResult: () => (window as any).__strike,
-    /** Live meteor particles by kind (smoke, curtain, ember, column, secondary); curtain centroid offset from (px, pz). */
-    meteorParticles: async (px = 0, pz = 0) => {
+    /**
+     * Live meteor particles by kind (smoke, curtain, ember, column, secondary, fireball); curtain centroid offset
+     * from (px, pz); column top above py (world).
+     */
+    meteorParticles: async (px = 0, pz = 0, py = 0) => {
       const P0 = await f32(fx.meteor.P0), P1 = await f32(fx.meteor.P1), P2 = await f32(fx.meteor.P2);
-      const byKind = [0, 0, 0, 0, 0];
-      let maxY = -1e9, cx = 0, cz = 0, nc = 0;
+      const byKind = [0, 0, 0, 0, 0, 0];
+      let maxY = -1e9, cx = 0, cz = 0, nc = 0, colTop = -1e9;
       for (let i = 0; i < P0.length / 4; i++) {
         if (P0[i * 4 + 3]! >= P1[i * 4 + 3]!) continue;
         const k = Math.round(P2[i * 4]!);
         byKind[k]!++; maxY = Math.max(maxY, P0[i * 4 + 1]!);
         if (k === 1) { cx += P0[i * 4]! - px; cz += P0[i * 4 + 2]! - pz; nc++; }
+        if (k === 3) colTop = Math.max(colTop, P0[i * 4 + 1]! - py);
       }
-      return { byKind, maxY, light: fx.meteor.light.intensity, active: fx.meteor.active, curtain: [cx / Math.max(1, nc), cz / Math.max(1, nc)] };
+      return { byKind, maxY, colTop, light: fx.meteor.light.intensity, active: fx.meteor.active, curtain: [cx / Math.max(1, nc), cz / Math.max(1, nc)] };
     },
     events: () => sim.events.log.length,
     godMeteor: async (x: number, z: number, magnitude: number) => {
