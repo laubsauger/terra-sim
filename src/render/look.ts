@@ -15,8 +15,8 @@ import { createWater } from './water';
 import { createBackdrop, installAtmosphere, type Backdrop } from './backdrop';
 import { createPost, type Post, type PostFeatures } from './post';
 import { GOLDEN_HOUR, cycleToTod, todToCycle } from './sky';
-import { setAmbTime, voxelToWorldY, HALF, setRenderMotion, type RenderMotion } from './space';
-import { NY } from '../sim/layout';
+import { setAmbTime, voxelToWorldY, HALF, setRenderMotion, Y_RENDER_BOTTOM, type RenderMotion } from './space';
+import { NX, CELL } from '../sim/layout';
 
 export interface LookOptions {
   highQuality?: boolean;
@@ -83,6 +83,32 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
   applyTod(tod);
 
   const keepOut = new THREE.Box3();
+  // Camera ground clamp: CPU copy of the ground / water surface (world y), refreshed ~2×/s from the sim fields.
+  const GROUND_MARGIN = 0.025, GROUND_EVERY_MS = 500;
+  let groundY: Float32Array | null = null, groundBusy = false, groundAt = -1e9;
+  const refreshGround = () => {
+    const now = performance.now();
+    if (groundBusy || now - groundAt < GROUND_EVERY_MS) return;
+    groundBusy = true; groundAt = now;
+    void Promise.all([fields.read(stage.renderer, 'surfY'), fields.read(stage.renderer, 'water')]).then(([sb, wb]) => {
+      const s = new Float32Array(sb), w = new Float32Array(wb);
+      const g = groundY ?? new Float32Array(s.length);
+      for (let i = 0; i < s.length; i++) g[i] = voxelToWorldY(s[i]! + Math.max(0, w[i]!));
+      groundY = g;
+    }).finally(() => { groundBusy = false; });
+  };
+  stage.setGround((x, z) => {
+    if (!groundY || Math.abs(x) > HALF || Math.abs(z) > HALF) return null;
+    // highest of the 2×2 cells around the point: never inside a slope between samples
+    const u = (x + HALF) / CELL - 0.5, v = (z + HALF) / CELL - 0.5;
+    const x0 = Math.floor(u), z0 = Math.floor(v);
+    let m = -Infinity;
+    for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
+      const cx = Math.min(NX - 1, Math.max(0, x0 + dx)), cz = Math.min(NX - 1, Math.max(0, z0 + dz));
+      m = Math.max(m, groundY[cx + cz * NX]!);
+    }
+    return m + GROUND_MARGIN;
+  });
   return {
     lighting, post, backdrop, terrain: terrain.object, sides: sides.object, water: water.object,
     get timeOfDay() { return tod; },
@@ -102,9 +128,11 @@ export function createLook(stage: Stage, fields: GpuFields, opts: LookOptions = 
       lastAmb = ambTime;
       if (dayLength > 0) applyTod(cycleToTod(tod0 + ambTime / dayLength));
       backdrop.update();
-      // Camera keep-out: the slice volume (grid top) + plinth, and the floor.
+      // Camera keep-out: over the block the ground clamp (stage.setGround); the plinth around it up to the
+      // block bottom, and the floor
+      refreshGround();
       keepOut.min.set(-HALF - 0.45, backdrop.floorY - 1, -HALF - 0.45);
-      keepOut.max.set(HALF + 0.45, voxelToWorldY(NY) + 0.08, HALF + 0.45);
+      keepOut.max.set(HALF + 0.45, voxelToWorldY(Y_RENDER_BOTTOM) + 0.04, HALF + 0.45);
       stage.setKeepOut(keepOut, backdrop.floorY + 0.08);
       post.setFocus(camera.position.distanceTo(stage.controls.target));
     },

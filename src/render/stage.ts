@@ -15,6 +15,8 @@ export interface Stage {
    * orbit controls every frame: the camera is pushed out through the nearest box face.
    */
   setKeepOut(box: THREE.Box3 | null, floorY?: number): void;
+  /** Minimum camera height (world y) at (x, z), or null where only the keep-out box applies. */
+  setGround(fn: ((x: number, z: number) => number | null) | null): void;
   /** Default 3/4 hero framing. */
   heroView(): void;
   /** CPU ms spent in the previous frame (callbacks + render submit). */
@@ -49,12 +51,14 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x151924);
 
-  const camera = new THREE.PerspectiveCamera(30, container.clientWidth / container.clientHeight, 0.1, 500);
+  // near 0.02: close-ups down among the trees (0.1 clipped them); far 200 still covers the backdrop
+  const camera = new THREE.PerspectiveCamera(30, container.clientWidth / container.clientHeight, 0.02, 200);
 
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.maxPolarAngle = Math.PI * 0.485;
-  controls.minDistance = 1.2;
+  // may look up at a peak from below it (low shots); the ground / floor clamps keep it out of the terrain
+  controls.maxPolarAngle = Math.PI * 0.62;
+  controls.minDistance = 0.12; // close ground shots (trees in front, mountains behind); was 1.2
   controls.maxDistance = 16;
   const heroView = () => {
     camera.position.set(5.5, 2.7, 5.8);
@@ -65,9 +69,14 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
 
   let keepOut: THREE.Box3 | null = null;
   let floorY = -Infinity;
+  // over the block the camera only has to stay above the actual ground / water (it used to be kept above the
+  // grid ceiling, far above most terrain, so it could never get down among the trees)
+  let ground: ((x: number, z: number) => number | null) | null = null;
   const constrain = () => {
     const p = camera.position;
     if (p.y < floorY) p.y = floorY;
+    const g = ground?.(p.x, p.z);
+    if (g != null && p.y < g) p.y = g;
     if (!keepOut || !keepOut.containsPoint(p)) return;
     // push out through the nearest face (never up through the floor side)
     const b = keepOut;
@@ -99,6 +108,7 @@ export async function createStage(container: HTMLElement, adapter: GPUAdapter): 
     onFrame(cb) { frameCbs.push(cb); },
     setRender(fn) { renderFn = fn; },
     setKeepOut(box, fy) { keepOut = box; floorY = fy ?? -Infinity; },
+    setGround(fn) { ground = fn; },
     heroView,
     start() {
       renderer.setAnimationLoop(() => {

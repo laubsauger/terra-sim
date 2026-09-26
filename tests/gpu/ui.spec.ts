@@ -58,3 +58,25 @@ test('Day pill drags the sun and toggles the day cycle; H keeps the choice', asy
   await pill.locator('button').click();
   expect((await look()).day).toBe(0);
 });
+
+// Close ground shots (trees in front, mountains behind): over the block the camera is only kept above the actual
+// ground, not above the grid ceiling, may look up at a peak, and is never let inside the terrain.
+test('camera can sit just above the ground over the block, never inside it', async ({ page }) => {
+  await page.goto('/?seed=4');
+  await page.waitForFunction(() => (window as unknown as { terraReady?: boolean }).terraReady === true, null, { timeout: 30_000 });
+  await page.waitForTimeout(1500); // ground cache refresh
+  const r = await page.evaluate(async () => {
+    const t = (window as any).terra;
+    const s = new Float32Array(await t.fields.read(t.stage.renderer, 'surfY')), w = new Float32Array(await t.fields.read(t.stage.renderer, 'water'));
+    const { voxelToWorldY } = await import('/src/render/space.ts');
+    const c = 128 + 128 * 256; const g = voxelToWorldY(s[c]! + w[c]!);
+    const place = async (y: number) => {
+      t.stage.camera.position.set(0.004, y, 0.004); t.stage.controls.target.set(0.6, g + 0.3, 0.6); t.stage.controls.update();
+      await new Promise((res) => setTimeout(res, 300));
+      return t.stage.camera.position.y as number;
+    };
+    return { g, low: await place(g + 0.06), inside: await place(g - 0.2) };
+  });
+  expect(r.low, 'stays low (was pushed to the grid ceiling)').toBeLessThan(r.g + 0.1);
+  expect(r.inside, 'pushed out of the terrain').toBeGreaterThan(r.g);
+});
