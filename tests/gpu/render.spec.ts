@@ -364,3 +364,28 @@ test('slice grips: hover cue, drag moves the cut with edge glow, release sweeps'
   expect(after.sweep).toBe(0);
   expect(problems).toEqual([]);
 });
+
+// User: "still occasionally observing jumps in terrain shape or shade". At high speed the sim runs several
+// tectonics passes per frame and 'tecAct' only maps the latest one; a plate that shifted in an earlier pass
+// must still move continuously on screen (no one-cell jump back and forth).
+test('several tectonics runs in one frame still glide', async ({ page }) => {
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  const { peaks, shifts } = await page.evaluate(() => (window as any).rm.run(70, 1 / 60, 4, false, 1, true));
+  expect(shifts.length, 'whole-cell shifts happened').toBeGreaterThanOrEqual(4);
+  for (let i = 1; i < peaks.length; i++) {
+    const step = peaks[i] - peaks[i - 1];
+    expect(step, `frame ${i} step ${step.toFixed(3)} (shift frames ${shifts})`).toBeGreaterThanOrEqual(-0.02);
+    expect(step, `frame ${i} step ${step.toFixed(3)} (shift frames ${shifts})`).toBeLessThan(0.3);
+  }
+});
+
+// Plate lifecycle ops (split, merge, the majority clean) move columns to another plate with another sub-cell
+// offset; the rendered terrain must slide over to it, not jump up to a cell in one frame.
+test('columns moving to another plate slide, not jump', async ({ page }) => {
+  await page.goto('/tests/gpu/support/renderMotion.html');
+  await page.waitForFunction(() => (window as any).rm?.ready === true, null, { timeout: 60_000 });
+  const peaks: number[] = await page.evaluate(() => (window as any).rm.reassign(60, 1 / 60, 0.6, 10));
+  for (let i = 1; i < peaks.length; i++) expect(Math.abs(peaks[i]! - peaks[i - 1]!), `frame ${i}: ${peaks.map((p) => p.toFixed(2))}`).toBeLessThan(0.15);
+  expect(peaks[0]! - peaks.at(-1)!, 'arrives at the new plate offset').toBeGreaterThan(0.5);
+});

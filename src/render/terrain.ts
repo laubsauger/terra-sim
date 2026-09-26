@@ -8,14 +8,14 @@
 import * as THREE from 'three/webgpu';
 import {
   Fn, vec2, vec3, vec4, float, uniform, varying, positionGeometry, positionWorld, transformNormalToView,
-  mix, smoothstep, saturate, normalize, exp, uint, texture, max, min, dot, hash, floor, reflect,
+  mix, smoothstep, saturate, normalize, exp, texture, max, min, dot, hash, floor, reflect,
   color, step, cos, int, fract, sin, abs, cameraPosition, length,
 } from 'three/tsl';
-import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL, Mat } from '../sim/layout';
+import { NX, NZ, CELL, VOXEL_H, Y_SEA_NOMINAL } from '../sim/layout';
 import { tMat, tColIdx } from '../sim/tslLayout';
 import type { GpuFields } from '../core/gpu';
 import { HALF, vertEx, tWorldY, tWorldToCell, columnSampler, voxReader, tTopVoxel, ambTime, viewDirWorld, tVoxelY, heatSampler, biomeSampler, seamGlow, volcanoSampler, advect, displayBuffers } from './space';
-import { createPaletteNodes, createBiomeNodes, biomeColor } from './palette';
+import { createBiomeNodes, biomeColor } from './palette';
 import { lookTextures } from './textures';
 import { skyU } from './sky';
 import { shadowProxy } from './lighting';
@@ -120,7 +120,6 @@ export function causticsAt(p: V3, depth: F): F {
 export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { object: THREE.Mesh; dispose(): void } {
   const S = columnSampler(fields);
   const vox = voxReader(fields);
-  const pal = createPaletteNodes();
   const bio = createBiomeNodes();
   const tex = lookTextures();
   const seaLevel = uniform(opts.seaLevel ?? Y_SEA_NOMINAL);
@@ -221,14 +220,14 @@ export function createTerrain(fields: GpuFields, opts: TerrainOptions = {}): { o
     let top = vec3(0) as V3;
     let bedTint = vec3(0) as V3;
     let rockR = float(0) as F;
+    // eased display colours of the top / bed voxel materials (space.ts): the shade never flips on a tick
+    const { top: dTop, bed: dBed } = displayBuffers(fields);
     for (const k of c) {
-      const ty = tTopVoxel(k.raw);
-      const m = tMat(vox(k.x, ty, k.z));
-      const mb = tMat(vox(k.x, ty.sub(2), k.z));
-      const bed = m.add(mb.sub(m).mul(uint(m.equal(uint(Mat.SEDIMENT))))); // branch-free select
-      top = top.add(pal.color(m).mul(k.w));
-      bedTint = bedTint.add(pal.color(bed).mul(k.w));
-      rockR = rockR.add(pal.rough(bed).mul(k.w));
+      const t4 = dTop.element(tColIdx(k.x, k.z)) as unknown as THREE.Node<'vec4'>;
+      const b4 = dBed.element(tColIdx(k.x, k.z)) as unknown as THREE.Node<'vec4'>;
+      top = top.add(t4.rgb.mul(k.w));
+      bedTint = bedTint.add(b4.rgb.mul(k.w));
+      rockR = rockR.add(b4.w.mul(k.w));
     }
     const n = nVary.xyz.normalize();
     const slope = float(1).sub(n.y);

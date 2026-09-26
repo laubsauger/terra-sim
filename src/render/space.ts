@@ -8,11 +8,11 @@ import {
   exp,
   positionWorld, cameraPosition,
 } from 'three/tsl';
-import { NX, NY, NCOL, CELL, BLOCK_SIZE, VOXEL_H } from '../sim/layout';
-import { tColIdx, tVoxIdx, tColXZ, uMin } from '../sim/tslLayout';
+import { NX, NY, NCOL, CELL, BLOCK_SIZE, VOXEL_H, Mat } from '../sim/layout';
+import { tColIdx, tVoxIdx, tColXZ, uMin, tMat } from '../sim/tslLayout';
 import { ACT_NEW as ACT_NEW_BIT } from '../sim/tectonics';
 import { MAX_PLATES as MAX_PLATES_R } from '../sim/worldData';
-import { createBiomeNodes, BIOME_SLOTS } from './palette';
+import { createBiomeNodes, createPaletteNodes, BIOME_SLOTS } from './palette';
 import type { GpuFields, StorageNode } from '../core/gpu';
 
 type F = THREE.Node<'float'>;
@@ -92,7 +92,6 @@ export interface Corner {
 
 /** Display easing time constant (real seconds). */
 export const DISPLAY_TAU = 0.45;
-const SNAP = -1e9; // remap sentinel: "no history, take the sim value"
 
 /** What the display needs from the sim to follow plate motion (Sim.tectonics provides both). */
 export interface RenderMotion {
@@ -107,11 +106,17 @@ export interface RenderMotion {
 type V4 = THREE.Node<'vec4'>;
 interface Display {
   cols: StorageNode<'vec4'>; heat: StorageNode<'vec4'>; bioG: StorageNode<'vec4'>; bioV: StorageNode<'vec4'>;
-  volc: StorageNode<'vec4'>;
+  volc: StorageNode<'vec4'>; top: StorageNode<'vec4'>; bed: StorageNode<'vec4'>;
   motion: StorageNode<'vec4'>;
   kernels: THREE.ComputeNode[];
   alpha: THREE.UniformNode<'float', number>;
+  /** Motion easing weight this frame (per-column offset glide, MOTION_TAU). */
+  alphaM: THREE.UniformNode<'float', number>;
+  /** 0 no remap, 1 by 'tecAct' (one tectonics run since the last frame), 2 by per-plate shift (several). */
   remapOn: THREE.UniformNode<'uint', number>;
+  /** Whole cells each plate moved since the last frame (remap mode 2), and the running (travel − accum). */
+  plateShift: THREE.Vector2[];
+  intPrev: Float64Array;
   offsets: THREE.Vector2[];
   offsetArr: Float32Array;
   travel: Float64Array;   // sim plate travel (cells)
@@ -125,6 +130,12 @@ interface Display {
   initialised: boolean;
 }
 const displays = new WeakMap<GpuFields, Display>();
+/**
+ * Real seconds over which a column's drawn plate offset follows a sudden change of its target: a split,
+ * merge or majority clean moves columns to a plate with another sub-cell offset (up to a cell apart), and a
+ * resync after a stall. Short, so it adds no visible lag to normal motion (all columns of a plate lag alike).
+ */
+const MOTION_TAU = 0.15;
 /** Field sets that have render samplers; the stage refreshes them before every frame. */
 const activeFields = new Set<GpuFields>();
 
@@ -137,31 +148,57 @@ function display(fields: GpuFields): Display {
   const cols = mk('dispCols'), heat = mk('dispHeat'), bioG = mk('dispBioG'), bioV = mk('dispBioV'), motion = mk('dispMotion');
   const volc = mk('dispVolc'), sVolc = mk('dispVolcPrev');
   const sCols = mk('dispColsPrev'), sHeat = mk('dispHeatPrev'), sBioG = mk('dispBioGPrev'), sBioV = mk('dispBioVPrev');
-  const alpha = uniform(1);
+  const alpha = uniform(1), alphaM = uniform(1);
   const remapOn = uniform(0, 'uint');
+  const plateShift = [...Array(MAX_PLATES_R)].map(() => new THREE_Vector2());
+  const shiftU = uniformArray(plateShift, 'vec2');
   const act = has('tecAct') ? fields.cur<'uint'>('tecAct') : null;
+  const pidPair = has('plateId') ? fields.pair<'uint'>('plateId') : null;
+  const pidParity = uniform(0, 'uint').onRenderUpdate(() => (pidPair ? fields.parity('plateId') : 0));
   const i = instanceIndex;
   const guard = () => If(i.greaterThanEqual(uint(NCOL)), () => { Return(); });
+  /** Plate id of column j on the current parity (needs a Fn stack). */
+  const pidAt = (j: U): U => {
+    const idx = j.toVar(); // var before the If: see voxReader
+    const pid = uint(0).toVar();
+    if (pidPair) If(pidParity.equal(uint(0)), () => { pid.assign(pidPair[0].element(idx)); }).Else(() => { pid.assign(pidPair[1].element(idx)); });
+    return pid;
+  };
+  const wrapD = (d: F): F => d.sub(float(NX).mul(floor(d.div(NX).add(0.5)))) as F;
+  /**
+   * Where column i's content was last frame: mode 1 from 'tecAct' (exact, flags fresh crust), mode 2 (several
+   * runs this frame; 'tecAct' maps only the latest) from the column's plate's total whole-cell shift.
+   * Returns (source index, fresh 0|1, displacement dx, dz in cells). Needs a Fn stack.
+   */
+  const source = () => {
+    const srcI = i.toVar(), fresh = float(0).toVar(), k = vec2(0).toVar();
+    const { x, z } = tColXZ(i);
+    If(remapOn.equal(uint(1)), () => {
+      if (!act) return;
+      const t = act.element(i).toVar();
+      srcI.assign(t.bitAnd(uint(0xffff)));
+      fresh.assign(float(t.bitAnd(uint(ACT_NEW_BIT)).notEqual(uint(0))));
+      k.assign(vec2(wrapD(float(x).sub(float(srcI.mod(uint(NX))))), wrapD(float(z).sub(float(srcI.div(uint(NX)))))));
+    }).ElseIf(remapOn.equal(uint(2)), () => {
+      const K = (shiftU.element(uMin(pidAt(i), uint(MAX_PLATES_R - 1))) as unknown as THREE.Node<'vec2'>).toVar();
+      srcI.assign(tColIdx(x.sub(int(K.x)), z.sub(int(K.y))));
+      k.assign(K);
+    });
+    return { srcI, fresh, k };
+  };
 
-  // (1) remap: scratch[d] = disp[src(d)]; fresh crust → SNAP
+  // (1) remap: scratch[d] = disp[src(d)]; fresh crust (opened at a spreading seam) eases from what was drawn
+  // at that spot before, instead of snapping to the sim value (no one-frame pop along the ridges)
   const remap = (a: StorageNode<'vec4'>, b: StorageNode<'vec4'>, sa: StorageNode<'vec4'>, sb: StorageNode<'vec4'>) => Fn(() => {
     guard();
-    const srcI = i.toVar();
-    const fresh = float(0).toVar();
-    if (act) {
-      If(remapOn.equal(uint(1)), () => {
-        const t = act.element(i).toVar();
-        srcI.assign(t.bitAnd(uint(0xffff)));
-        fresh.assign(float(t.bitAnd(uint(ACT_NEW_BIT)).notEqual(uint(0))));
-      });
-    }
+    const { srcI, fresh } = source();
     const va = (a.element(srcI) as unknown as V4).toVar(), vb = (b.element(srcI) as unknown as V4).toVar();
-    If(fresh.greaterThan(0.5), () => { va.x.assign(SNAP); vb.x.assign(SNAP); });
+    If(fresh.greaterThan(0.5), () => { va.assign(a.element(i) as unknown as V4); vb.assign(b.element(i) as unknown as V4); });
     sa.element(i).assign(va); sb.element(i).assign(vb);
   })().compute(NCOL);
 
   const ease = (prev: V4, target: V4): V4 =>
-    mix(prev, target, max(alpha, float(prev.x.lessThan(SNAP / 2)))) as unknown as V4;
+    mix(prev, target, alpha) as unknown as V4;
 
   // (2a) cols from surfY / water / veg
   const surf = fields.cur('surfY'), water = fields.cur('water');
@@ -220,6 +257,24 @@ function display(fields: GpuFields): Display {
     bioV.element(i).assign(ease(sBioV.element(i) as unknown as V4, vec4(bioN.veg(bId), f.y)));
   })().compute(NCOL);
 
+  // (2e) terrain albedo inputs: colour of the top voxel's material, and of the bedrock under loose
+  // sediment (steep faces) with its roughness. Erosion, deposition and lava freezing change the top
+  // material within a tick; eased like the rest, the terrain shade blends over DISPLAY_TAU, never flips.
+  const top = mk('dispTop'), bed = mk('dispBed'), sTop = mk('dispTopPrev'), sBed = mk('dispBedPrev');
+  const voxR = has('vox') ? voxReader(fields) : null;
+  const palN = createPaletteNodes();
+  const kTop = Fn(() => {
+    guard();
+    if (!voxR) { top.element(i).assign(vec4(0.3, 0.3, 0.3, 0)); bed.element(i).assign(vec4(0.3, 0.3, 0.3, 0.8)); return; }
+    const { x, z } = tColXZ(i);
+    const ty = tTopVoxel(surf.element(i) as unknown as F).toVar();
+    const m = tMat(voxR(x, ty, z)).toVar();
+    const mb = tMat(voxR(x, ty.sub(2), z));
+    const bm = m.add(mb.sub(m).mul(uint(m.equal(uint(Mat.SEDIMENT))))); // branch-free select
+    top.element(i).assign(ease(sTop.element(i) as unknown as V4, vec4(palN.color(m), 0)));
+    bed.element(i).assign(ease(sBed.element(i) as unknown as V4, vec4(palN.color(bm), palN.rough(bm))));
+  })().compute(NCOL);
+
   // (2d) volcano activity + lava channel memory; z, w = spreading-seam glow (see seamGlow) from crust age.
   // Core: a thin crack about a cell wide on the seam axis. Crust ages come quantised by the tectonics
   // steps (the youngest seam cells are 0, 0.25 or 0.5 My depending on the step phase), so the core is
@@ -254,40 +309,45 @@ function display(fields: GpuFields): Display {
   })().compute(NCOL);
   const remapVolc = Fn(() => {
     guard();
-    const srcI = i.toVar();
-    if (act) {
-      If(remapOn.equal(uint(1)), () => { srcI.assign(act.element(i).bitAnd(uint(0xffff))); });
-    }
+    const { srcI } = source();
     sVolc.element(i).assign(volc.element(srcI));
   })().compute(NCOL);
 
-  // (3) motion: plate offset blended over the 3×3 neighbourhood (no cracks at plate boundaries)
+  // (3) motion: plate offset blended over the 3×3 neighbourhood (no cracks at plate boundaries), eased per
+  // column over MOTION_TAU: a column that changes plate (split / merge / clean) slides to its new plate's
+  // offset instead of jumping. The eased offset rides the remap like the other display buffers, less the
+  // cells the content moved, so a whole-cell plate shift still cancels exactly.
   const offsets = [...Array(MAX_PLATES_R)].map(() => new THREE_Vector2());
   const offU = uniformArray(offsets, 'vec2');
-  const pidPair = has('plateId') ? fields.pair<'uint'>('plateId') : null;
-  const pidParity = uniform(0, 'uint').onRenderUpdate(() => (pidPair ? fields.parity('plateId') : 0));
+  const sMot = mk('dispMotionPrev');
+  const remapMot = Fn(() => {
+    guard();
+    const { srcI, fresh, k } = source();
+    sMot.element(i).assign(vec4((motion.element(srcI) as unknown as V4).xy.sub(k), 0, fresh));
+  })().compute(NCOL);
   const kMotion = Fn(() => {
     guard();
     const { x, z } = tColXZ(i);
     const o = vec2(0).toVar();
     if (pidPair) {
       for (let dz = -1; dz <= 1; dz++) for (let dx = -1; dx <= 1; dx++) {
-        const j = tColIdx(x.add(dx), z.add(dz)).toVar(); // var before the If: see voxReader
-        const pid = uint(0).toVar();
-        If(pidParity.equal(uint(0)), () => { pid.assign(pidPair[0].element(j)); }).Else(() => { pid.assign(pidPair[1].element(j)); });
+        const pid = pidAt(tColIdx(x.add(dx), z.add(dz)));
         const w = (dx === 0 ? 2 : 1) * (dz === 0 ? 2 : 1) / 16;
         o.addAssign((offU.element(uMin(pid, uint(MAX_PLATES_R - 1))) as unknown as THREE.Node<'vec2'>).mul(w));
       }
     }
+    const prev = (sMot.element(i) as unknown as V4).toVar();
+    const oe = mix(prev.xy, o, max(alphaM, prev.w));
     const c = (cols.element(i) as unknown as V4);
-    motion.element(i).assign(vec4(o, c.y.sub(surf.element(i) as unknown as F), 0));
+    motion.element(i).assign(vec4(oe, c.y.sub(surf.element(i) as unknown as F), 0));
   })().compute(NCOL);
 
   d = {
-    cols, heat, bioG, bioV, volc, motion, alpha, remapOn, offsets, offsetArr: new Float32Array(MAX_PLATES_R * 2),
+    cols, heat, bioG, bioV, volc, top, bed, motion, alpha, alphaM, remapOn, plateShift, intPrev: new Float64Array(MAX_PLATES_R * 2), offsets, offsetArr: new Float32Array(MAX_PLATES_R * 2),
     travel: new Float64Array(MAX_PLATES_R * 2), travelEased: new Float64Array(MAX_PLATES_R * 2),
     travelPrev: new Float64Array(MAX_PLATES_R * 2), travelFrom: new Float64Array(MAX_PLATES_R * 2), clock: 0, lastStep: 0, stepGap: 1 / 60,
-    kernels: [remap(cols, heat, sCols, sHeat), remap(bioG, bioV, sBioG, sBioV), remapVolc, kCols, kHeat, kBio, kVolc, kMotion],
+    kernels: [remap(cols, heat, sCols, sHeat), remap(bioG, bioV, sBioG, sBioV), remap(top, bed, sTop, sBed), remapVolc, remapMot,
+      kCols, kHeat, kBio, kTop, kVolc, kMotion],
     src: null, lastRun: -1, snap: true, initialised: false,
   };
   displays.set(fields, d);
@@ -320,10 +380,13 @@ export function updateRenderColumns(renderer: THREE.WebGPURenderer, fields: GpuF
   }
   d.initialised = true;
   const run = d.src ? d.src.runId : -1;
-  d.remapOn.value = d.src && run !== d.lastRun ? 1 : 0;
+  const runs = d.src ? run - d.lastRun : 0;
+  // several runs since the last frame (high speed): 'tecAct' maps only the latest → remap by plate shift
+  d.remapOn.value = runs === 0 ? 0 : runs > 1 && d.src?.plateTravel ? 2 : 1;
   d.lastRun = run;
   const alpha = d.snap || dt === undefined ? 1 : 1 - Math.exp(-Math.max(dt, 0) / DISPLAY_TAU);
   d.alpha.value = alpha;
+  d.alphaM.value = alpha === 1 ? 1 : 1 - Math.exp(-Math.max(dt ?? 0, 0) / MOTION_TAU);
   d.snap = false;
   if (d.src) {
     d.src.plateOffsets(d.offsetArr);
@@ -334,6 +397,12 @@ export function updateRenderColumns(renderer: THREE.WebGPURenderer, fields: GpuF
     // stats window, then a readback wait); the glide spreads those too. > 6 cells behind (load, teleport) → jump.
     const tr = d.travel, te = d.travelEased;
     d.src.plateTravel?.(tr);
+    // whole cells each plate moved since the last frame: travel − accum counts the integer shifts
+    for (let k = 0; k < tr.length; k++) {
+      const n = tr[k]! - d.offsetArr[k]!;
+      d.plateShift[k >> 1]![(k & 1) ? 'y' : 'x'] = alpha === 1 ? 0 : Math.round(n - d.intPrev[k]!);
+      d.intPrev[k] = n;
+    }
     const now = (d.clock += Math.max(dt ?? 0, 0));
     let moved = false;
     for (let k = 0; k < tr.length; k++) if (tr[k] !== d.travelPrev[k]) { moved = true; break; }
@@ -369,7 +438,7 @@ export function displayPlateOffsets(fields: GpuFields): number[] {
 /** Display buffers, for tests and tools (read-only use). */
 export function displayBuffers(fields: GpuFields) {
   const d = display(fields);
-  return { cols: d.cols, heat: d.heat, bioG: d.bioG, bioV: d.bioV, volc: d.volc, motion: d.motion };
+  return { cols: d.cols, heat: d.heat, bioG: d.bioG, bioV: d.bioV, volc: d.volc, top: d.top, bed: d.bed, motion: d.motion };
 }
 
 /** Bilinear read of a display buffer at a continuous cell coordinate (wraps, V1). */

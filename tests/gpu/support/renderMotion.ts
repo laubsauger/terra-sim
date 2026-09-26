@@ -47,10 +47,11 @@ async function main() {
   writeWorld();
 
   let offset = 0, runId = 0, travel = 0;
+  let offset1 = 0; // plate 1: stationary at this sub-cell offset (reassignment test)
   const motion: RenderMotion = {
     get runId() { return runId; },
-    plateOffsets(out: Float32Array) { out.fill(0); out[0] = offset; },
-    plateTravel(out: Float64Array) { out.fill(0); out[0] = travel; },
+    plateOffsets(out: Float32Array) { out.fill(0); out[0] = offset; out[2] = offset1; },
+    plateTravel(out: Float64Array) { out.fill(0); out[0] = travel; out[2] = offset1; },
   };
   setRenderMotion(fields, motion);
 
@@ -78,7 +79,7 @@ async function main() {
      * stepEvery > 1: the plate advances only every stepEvery frames (the sim runs tectonics every
      * TEC_EVERY ticks, so at normal speed plates step every few frames).
      */
-    async run(frames: number, dt: number, cellsPerSec: number, foreignCalls = false, stepEvery = 1) {
+    async run(frames: number, dt: number, cellsPerSec: number, foreignCalls = false, stepEvery = 1, extraRun = false) {
       snapRenderColumns(fields); updateRenderColumns(renderer, fields, 1 / 60);
       const peaks: number[] = [], heights: number[] = [], shifts: number[] = [];
       for (let f = 0; f < frames; f++) {
@@ -95,6 +96,13 @@ async function main() {
           fields.markDirty('tecAct');
           writeWorld();
           shifts.push(f);
+          if (extraRun) {
+            // a second tectonics run in the same frame that shifts nothing: 'tecAct' now holds only this
+            // run's identity map (the sim at high speed runs several per frame)
+            runId++;
+            for (let c = 0; c < NCOL; c++) act[c] = c;
+            fields.markDirty('tecAct');
+          }
         }
         // another module (life/flora) asking for the display mid-frame must not snap or re-ease it
         if (foreignCalls && f % 3 === 0) updateRenderColumns(renderer, fields);
@@ -135,6 +143,26 @@ async function main() {
       const h: number[] = [], lv: number[] = [];
       for (let i = 0; i < SAMPLES; i++) { h.push(a[i * 2]!); lv.push(a[i * 2 + 1]!); }
       return { h, lv, centre: C * 4, sea: SEA };
+    },
+    /**
+     * Plate reassignment (split / merge / majority clean): the mountain sits still on plate 0 at sub-cell
+     * offset `o0`; at frame `at` its rows move to plate 1 (offset 0). Returns the rendered peak per frame.
+     */
+    async reassign(frames: number, dt: number, o0: number, at: number) {
+      offset = o0; travel = o0; offset1 = 0;
+      AMP = 20; cx = 100;
+      writeWorld();
+      snapRenderColumns(fields); updateRenderColumns(renderer, fields, dt);
+      const peaks: number[] = [];
+      for (let f = 0; f < frames; f++) {
+        if (f === at) {
+          for (const par of [0, 1]) for (let c = 0; c < NCOL; c++) if (pid[par]![c] === 0) pid[par]![c] = 1;
+          fields.markDirty('plateId');
+        }
+        updateRenderColumns(renderer, fields, dt);
+        peaks.push((await readPeak()).u);
+      }
+      return peaks;
     },
     /** Rendered peak on each 'plateId' parity (the sim swaps it every tectonics run). */
     async parityPeaks() {
