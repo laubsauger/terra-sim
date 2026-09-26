@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- terra-sim: an isometric slice of the diorama — sea + island on top, strata on the cut faces, glowing mantle -->
+  <defs>
+    <linearGradient id="sea" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5fd6e0"/><stop offset="1" stop-color="#1f8fb8"/></linearGradient>
+    <linearGradient id="mantle" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ffb347"/><stop offset="1" stop-color="#e2461c"/></linearGradient>
+  </defs>
+  <!-- left face: strata -->
+  <path d="M6 22 L32 36 L32 58 L6 44 Z" fill="#6b4a36"/>
+  <path d="M6 26 L32 40 L32 44 L6 30 Z" fill="#c9a36b"/>
+  <path d="M6 33 L32 47 L32 50 L6 36 Z" fill="#8a6a55"/>
+  <path d="M6 40 L32 54 L32 58 L6 44 Z" fill="url(#mantle)"/>
+  <!-- right face: strata -->
+  <path d="M58 22 L32 36 L32 58 L58 44 Z" fill="#553827"/>
+  <path d="M58 26 L32 40 L32 44 L58 30 Z" fill="#b08a58"/>
+  <path d="M58 33 L32 47 L32 50 L58 36 Z" fill="#735645"/>
+  <path d="M58 40 L32 54 L32 58 L58 44 Z" fill="url(#mantle)"/>
+  <!-- top: sea -->
+  <path d="M6 22 L32 8 L58 22 L32 36 Z" fill="url(#sea)"/>
+  <!-- island: sand rim, green land, a small peak -->
+  <path d="M20 21 C22 15 32 12 40 16 C46 19 45 25 38 27 C31 29 21 27 20 21 Z" fill="#e7c98c"/>
+  <path d="M23 20.5 C25 16 32 14 38 17 C42 19 41.5 23.5 36.5 25 C31 26.5 24 25 23 20.5 Z" fill="#4f9a3c"/>
+  <path d="M29 20 L33 13.5 L37 20.5 Z" fill="#8c6b52"/>
+  <path d="M31.6 16 L33 13.5 L34.5 16.3 L33 15.4 Z" fill="#f4f1ea"/>
+  <!-- edge highlight -->
+  <path d="M6 22 L32 36 L58 22" fill="none" stroke="#ffffff" stroke-opacity=".35" stroke-width="1"/>
+</svg>
