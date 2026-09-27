@@ -17,7 +17,7 @@ import { createColumnGrid } from '../render/terrain';
 import { skyU } from '../render/sky';
 import { sceneViewZ } from '../render/shared';
 import { lookTextures } from '../render/textures';
-import { RING, DUST, SCORCH_S, ringRadius, ringWidth } from './fxModel';
+import { RING, DUST, SCORCH_S, SCORCH_WET_S, ringRadius, ringWidth } from './fxModel';
 import { tTorusD, fxMRT, type F, type V3 } from './fxTsl';
 
 type V4 = THREE.Node<'vec4'>;
@@ -35,8 +35,11 @@ export interface QuakeFx {
   P0: StorageNode<'vec4'>; P1: StorageNode<'vec4'>; P2: StorageNode<'vec4'>;
   /** Start a quake's ground FX (now = FX clock s). Returns the slot index used. */
   start(renderer: THREE.WebGPURenderer, q: Omit<QuakeSlot, 't0'>, now: number, seaLevel: number, dust?: boolean): number;
-  /** Scorched, glowing crater floor + darkened dust blanket around an impact (x, z cells, r crater radius cells). */
-  scorch(x: number, z: number, r: number, now: number): void;
+  /**
+   * Scorched, glowing crater floor + darkened dust blanket around an impact (x, z cells, r crater radius cells).
+   * wet: an ocean impact (a short-lived faint glow and a stirred-up seabed instead, SCORCH_WET_S).
+   */
+  scorch(x: number, z: number, r: number, now: number, wet?: boolean): void;
   /** Advance; returns true while anything is still visible. */
   update(renderer: THREE.WebGPURenderer, dt: number, now: number): boolean;
   setHighQuality(v: boolean): void;
@@ -51,7 +54,8 @@ export function createQuakeFx(fields: GpuFields, renderer: THREE.WebGPURenderer,
   const qA = uniformArray(Array.from({ length: QUAKE_SLOTS }, () => new THREE.Vector4(0, 0, -1, 0)), 'vec4');
   const qB = uniformArray(Array.from({ length: QUAKE_SLOTS }, () => new THREE.Vector4(1, 1, 0, 0)), 'vec4');
   const scorchU = uniform(new THREE.Vector4(0, 0, 1, -1)); // (x, z, crater radius cells, age s; < 0 off)
-  let scorchT0 = -1e9;
+  let scorchT0 = -1e9, scorchLife = SCORCH_S;
+  const scorchLifeU = uniform(SCORCH_S);
 
   // ---------------------------------------------------------------- ground overlay
   const gu = tWorldToCell(positionGeometry.x), gv = tWorldToCell(positionGeometry.z);
@@ -121,7 +125,7 @@ export function createQuakeFx(fields: GpuFields, renderer: THREE.WebGPURenderer,
     const nz = texture(lookTextures().detail, positionWorld.xz.mul(7)).r;
     const nz2 = texture(lookTextures().detail, positionWorld.xz.mul(2.3)).g;
     const hot = smoothstep(1.05, 0.2, sd.add(nz.mul(0.35))).mul(exp(sa.div(-1.7))).mul(on);
-    const hold = smoothstep(SCORCH_S, SCORCH_S * 0.25, sa).mul(smoothstep(0, 0.4, sa)).mul(on);
+    const hold = smoothstep(scorchLifeU, scorchLifeU.mul(0.25), sa).mul(smoothstep(0, 0.4, sa)).mul(on);
     const crater = smoothstep(2.0, 1.15, sd.add(nz.sub(0.5).mul(0.3))); // floor, walls and the raised rim
     const blanket = smoothstep(3.0, 1.3, sd.add(nz2.sub(0.5).mul(0.9)).add(nz.sub(0.5).mul(0.3))).mul(nz2.mul(0.45).add(0.55));
     const ang = atan(dv, du);
@@ -132,8 +136,20 @@ export function createQuakeFx(fields: GpuFields, renderer: THREE.WebGPURenderer,
     const glowCol = mix(vec3(1.0, 0.18, 0.03), vec3(1.0, 0.62, 0.22), hot).mul(hot.mul(hot).mul(6));
     // sooty, not only darker: toward a warm black
     const scorched = mix(col, col.mul(0.12).add(vec3(0.026, 0.022, 0.018)), char).add(glowCol);
-    const dry = step(info.y, -0.02); // under water the sea draws over it anyway
-    return vec4(scorched, saturate(abs(crest).mul(3).add(tint.mul(4)).add(char.mul(3)).add(hot.mul(4))).mul(dry));
+    const dry = step(info.y, -0.02); // the quake ring and the soot are dry-land marks
+    // on the seabed (seen through the water): a faint dim glow on the crater floor cooling in ~2–3 s, a
+    // muddy darker silt ring at the rim and a turbid, silty tint around it; no soot, no rays
+    const wet = float(1).sub(dry);
+    const holdW = smoothstep(scorchLifeU, scorchLifeU.mul(0.3), sa).mul(smoothstep(0, 0.3, sa)).mul(on);
+    const glowW = smoothstep(1.0, 0.25, sd.add(nz.mul(0.3))).mul(exp(sa.div(-1.1))).mul(on);
+    const silt = smoothstep(0.75, 1.15, sd.add(nz.sub(0.5).mul(0.3))).mul(smoothstep(2.3, 1.3, sd.add(nz2.sub(0.5).mul(0.8))));
+    const turbid = smoothstep(2.8, 0.6, sd.add(nz2.sub(0.5).mul(0.9))).mul(nz2.mul(0.4).add(0.6));
+    const lumW = dot(col, vec3(0.3, 0.55, 0.15));
+    const seabed = mix(mix(col, vec3(0.46, 0.4, 0.3).mul(lumW.mul(1.3).add(0.05)), turbid.mul(0.5).mul(holdW)), col.mul(0.5), silt.mul(0.55).mul(holdW))
+      .add(vec3(1.0, 0.35, 0.08).mul(glowW.mul(glowW).mul(1.4)));
+    const aW = saturate(turbid.mul(0.6).add(silt.mul(0.6)).mul(holdW).add(glowW.mul(1.5))).mul(wet);
+    const aD = saturate(abs(crest).mul(3).add(tint.mul(4)).add(char.mul(3)).add(hot.mul(4))).mul(dry);
+    return vec4(mix(seabed, scorched, dry), max(aD, aW));
   })();
   gmat.colorNode = vec4(shade.rgb, 1);
   gmat.opacityNode = shade.a;
@@ -315,14 +331,18 @@ export function createQuakeFx(fields: GpuFields, renderer: THREE.WebGPURenderer,
       ground.visible = dust.visible = true;
       return k;
     },
-    scorch(x, z, rc, now) {
+    scorch(x, z, rc, now, wet = false) {
+      // one scar at a time: a short-lived seabed mark never replaces a land scar that would outlast it
+      if (wet && scorchLife - (now - scorchT0) > SCORCH_WET_S) return;
       scorchT0 = now;
+      scorchLife = wet ? SCORCH_WET_S : SCORCH_S;
+      scorchLifeU.value = scorchLife;
       scorchU.value.set(x, z, Math.max(2, rc), 0);
-      groundUntil = Math.max(groundUntil, now + SCORCH_S);
+      groundUntil = Math.max(groundUntil, now + scorchLife);
       ground.visible = true;
     },
     update(r, dt, now) {
-      scorchU.value.w = now - scorchT0 < SCORCH_S ? now - scorchT0 : -1;
+      scorchU.value.w = now - scorchT0 < scorchLife ? now - scorchT0 : -1;
       for (let k = 0; k < QUAKE_SLOTS; k++) {
         const s = slots[k];
         const a = qA.array[k] as THREE.Vector4;

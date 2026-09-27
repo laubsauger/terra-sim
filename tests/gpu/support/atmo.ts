@@ -216,6 +216,9 @@ async function main() {
 
   const w = window as unknown as Record<string, unknown>;
   w.at = {
+    atmo, // (profiling: stub passes in place)
+    /** A trivial 64-thread compute pass (profiling: per-pass overhead). */
+    dummyK: (() => { const b = instancedArray(64, 'float'); return Fn(() => { b.element(instanceIndex).assign(1); })().compute(64); })(),
     frames, clouds, summary, particles, rain, shadowAt, perf, perfParts,
     paint: (p: Paint) => paintWeather(fields, p),
     setCam: (pos: number[], target: number[]) => { camera.position.set(pos[0]!, pos[1]!, pos[2]!); stage.controls.target.set(target[0]!, target[1]!, target[2]!); stage.controls.update(); camera.lookAt(stage.controls.target); },
@@ -303,8 +306,9 @@ async function main() {
     /** Cirrus map (r = where high veils may form) on an n×n grid. */
     cirrusGrid: (n = 64, x0 = -2, z0 = -2, size = 4) => runGrid(cirK, x0, z0, size, Math.min(n, WXN)),
     /** GPU ms per cloud compute kernel (each run alone n×, median), for perf work. */
-    kernelTimes: async (n = 40) => {
-      const ks = (atmo.clouds as unknown as { kernels?: Record<string, THREE.ComputeNode> }).kernels ?? {};
+    kernelTimes: async (n = 40, which: 'clouds' | 'particles' = 'clouds') => {
+      const ks = which === 'particles' ? { ...atmo.plumes.kernels, ...atmo.rain.kernels }
+        : (atmo.clouds as unknown as { kernels?: Record<string, THREE.ComputeNode> }).kernels ?? {};
       const out: Record<string, number> = {};
       await renderer.resolveTimestampsAsync('compute');
       for (const [name, k] of Object.entries(ks)) {

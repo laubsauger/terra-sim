@@ -35,6 +35,8 @@ export const QUAKE = {
  * blanket and (big strikes) dark ejecta rays hold, then fade out gradually by SCORCH_S.
  */
 export const SCORCH_S = 50;
+/** An underwater impact's mark (real s): a faint floor glow cooling in ~2–3 s and a silty, turbid seabed, gone by then. */
+export const SCORCH_WET_S = 18;
 
 export const RING = {
   /** Shock ring speed over the ground (cells/s). */

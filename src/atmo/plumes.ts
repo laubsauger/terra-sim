@@ -101,6 +101,8 @@ export interface Plumes {
   addBurst(b: Omit<Burst, 'rate'> & { rate?: number }): void;
   /** dt: real s; fxTime: monotonic FX clock (s) that burst t0 values refer to. */
   compute(renderer: THREE.WebGPURenderer, dt: number, fxTime: number): void;
+  /** Compute passes by name (profiling; the vent scan follows the crustAge parity). */
+  readonly kernels: Record<string, THREE.ComputeNode>;
   setHighQuality(v: boolean): void;
   dispose(): void;
 }
@@ -194,7 +196,8 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       });
     });
   })().compute(S * S);
-  const ventK = new ReaderKernel<'float'>(fields, 'crustAge', buildVentK);
+  const ventVariants: THREE.ComputeNode[] = []; // (both parities, for profiling)
+  const ventK = new ReaderKernel<'float'>(fields, 'crustAge', (c) => { const k = buildVentK(c); ventVariants.push(k); return k; });
 
   // ---- particles ----
   // TSL codegen rule for these kernels: a plain node used in more than one If/ElseIf branch is emitted as a
@@ -691,6 +694,7 @@ export function createPlumes(fields: GpuFields, clouds: Clouds, opts: { highQual
       bursts.push({ ...b, rate: b.rate ?? BURST_RATE[b.kind] ?? 100 });
       burstAcc[bursts.length - 1] = 0;
     },
+    get kernels() { return { plumeClear: clearK, plumeVents: ventVariants[fields.parity('crustAge')]!, plumeParticles: hq ? partHigh : partLow }; },
     compute(renderer, dt, fxTime) {
       u.dt.value = dt;
       u.time.value = fxTime % 1000;

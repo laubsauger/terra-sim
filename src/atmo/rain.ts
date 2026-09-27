@@ -30,6 +30,7 @@ export interface Rain {
   R0: StorageNode<'vec4'>; R1: StorageNode<'vec4'>;
   uniforms: { time: THREE.UniformNode<'float', number>; dt: THREE.UniformNode<'float', number>; frame: THREE.UniformNode<'float', number> };
   compute(renderer: THREE.WebGPURenderer, dt: number): void;
+  readonly kernels: Record<string, THREE.ComputeNode>;
   setHighQuality(v: boolean): void;
   dispose(): void;
 }
@@ -143,6 +144,7 @@ export function createRain(fields: GpuFields, clouds: Clouds, opts: { highQualit
   let hq = opts.highQuality;
   return {
     drops, curtain, R0, R1, uniforms: u,
+    get kernels() { return { rain: hq ? kHigh : kLow }; },
     compute(renderer, dt) {
       u.dt.value = dt;
       u.frame.value = (u.frame.value + 1) % 4096;

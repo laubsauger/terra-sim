@@ -148,7 +148,7 @@ export function createFx(fields: GpuFields, renderer: THREE.WebGPURenderer, scen
     if (!enabled) return q;
     const strength = Math.min(1, Math.max(0.3, (mag - 4.5) / 3.5));
     quake.start(renderer, { x, z, mag, strength }, now, seaLevel(), kind !== 'impact'); // impacts bring their own ejecta
-    if (crater > 0 && water < 0.5) quake.scorch(x, z, crater, now);
+    if (crater > 0) quake.scorch(x, z, crater, now, water >= 0.5);
     shakes.push({ t0: now, mag, pos: position, ph: Array.from({ length: 6 }, () => rng() * Math.PI * 2) });
     if (shakes.length > 3) shakes.shift();
     if (kind === 'impact' && (opts.nudge ?? true)) nudges.splice(0, nudges.length, { t0: now, from: position.clone(), k: Math.min(1.5, meteorMag) });

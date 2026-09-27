@@ -15,7 +15,7 @@
 //  - idle FX cost nothing (hidden, no dispatches).
 import { test, expect, type Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
-import { QuakeScheduler, QUAKE, TSUNAMI, SCORCH_S, activity, type QuakeSites, type QuakePick } from '../../src/fx/fxModel';
+import { QuakeScheduler, QUAKE, TSUNAMI, SCORCH_S, SCORCH_WET_S, activity, type QuakeSites, type QuakePick } from '../../src/fx/fxModel';
 
 const OUT = process.env.FX_SHOTS ?? 'test-results/fx';
 test.use({ viewport: { width: 1280, height: 800 } });
@@ -290,6 +290,25 @@ test('meteor impact size follows the strike: a small meteor raises a small colum
   expect(small.byKind[3], 'a small strike still raises a little column').toBeGreaterThan(5);
   expect(small.colTop, 'small impacts stay small').toBeLessThan(0.6 * big.colTop);
   expect(small.byKind[3] + small.byKind[1], 'and throw less dust').toBeLessThan(0.6 * (big.byKind[3] + big.byKind[1]));
+  expect(problems).toEqual([]);
+});
+
+test('an ocean impact marks the seabed briefly (faint glow, silt), then clears; no long scorch', async ({ page }) => {
+  // user: 'shouldn't we get some sort of discoloration underwater too and a subtle glow maybe? just shorter'
+  const problems = watchProblems(page);
+  await open(page, 'quality=low');
+  const f = fxp(page);
+  const { ocean } = await f.sites();
+  await page.evaluate(([x, z]) => (window as any).fxp.strikeAsync(x, z, 0.7, 1.1), [ocean.x, ocean.z]);
+  await f.frames(3);
+  await f.frames(93); // past the entry
+  const q = await page.evaluate(() => (window as any).fxp.strikeResult());
+  expect(q.waterDepth, 'an open-ocean strike').toBeGreaterThan(1);
+  const ground = async () => (await page.evaluate(() => (window as any).fxp.visible())).find(([n]: [string]) => n === 'quakeGround')?.[1];
+  await f.frames(Math.round(9 / 0.25), 0.25); // ~9 s: the shock ring is long gone, the seabed mark remains
+  expect(await ground(), 'the seabed mark shows ~9 s after the impact').toBe(true);
+  await f.frames(Math.round((SCORCH_WET_S - 9 + 3) / 0.25), 0.25);
+  expect(await ground(), 'and clears by SCORCH_WET_S (much sooner than a land scar)').toBe(false);
   expect(problems).toEqual([]);
 });
 
