@@ -13,7 +13,7 @@ import * as THREE from 'three/webgpu';
 import { Fn, If, Loop, float, int, uint, instanceIndex, Return, select, sqrt, uniform, uniformArray, atomicAdd, atomicStore, atomicMax, vec2, sin } from 'three/tsl';
 import { PingPongKernel, type GpuFields } from '../core/gpu';
 import { NCOL, NVOX, NX, NY, Mat, MAT_DENSITY, FLAG_CONTINENTAL, packVoxel } from './layout';
-import { tColIdx, tColXZ, uMin, iMax, tMat, tFill } from './tslLayout';
+import { tColIdx, tColXZ, uMin, iMax, iMin, tMat, tFill } from './tslLayout';
 import { MAX_PLATES, type Plate } from './worldData';
 import { COL_CONTINENTAL } from './derive';
 import { CTR_PLATE, CTR_RESERVOIR, CTR_SIZE, CTR_QUAKE } from './fields';
@@ -206,7 +206,10 @@ export class Tectonics {
         // oceanic winners accrete too (island arcs grow from their trench wedge): with continental winners only,
         // every ocean-ocean trench sent its slab sediment and slumped debris into the reservoir, which grew to
         // 7 layers/col while land shrank from 27 % to 13 %
-        If(count.greaterThan(uint(1)), () => {
+        // only a column with crust can take a thrust sheet: a crustless winner (base = NY, e.g. a stripped ocean
+        // column) put the insertion point at the grid top and read the sheet from past the column: a gneiss
+        // voxel floating over ~60 layers of air (needle spikes over the sea, B28)
+        If(count.greaterThan(uint(1)).and(base.lessThan(uint(NY))), () => {
           const room = uint(MAX_CRUST_LAYERS).sub(uMin(bestMass.div(uint(255)), uint(MAX_CRUST_LAYERS)));
           const floorRoom = base.sub(uMin(base, uint(1))); // root must stay above y=0
           // continental losers stack fully; oceanic losers accrete ACCRETE_FRAC of what they carry beyond
@@ -400,7 +403,8 @@ export class Tectonics {
         const cx = float(c.bitAnd(uint(NX - 1))), cz = float(c.shiftRight(uint(Math.log2(NX))));
         const f = sin(cx.mul(0.21).add(cz.mul(0.13))).mul(0.18).add(sin(cx.mul(0.057).sub(cz.mul(0.083)).add(1.3)).mul(0.12)).add(0.42);
         const span = iMax(top.sub(base), int(0));
-        const hIns = base.add(int(float(span).mul(f))).toVar(); // source y where the thrust sheet enters
+        // (decide never stacks onto a crustless column; hIns stays inside the column even if one slips through)
+        const hIns = iMin(base.add(int(float(span).mul(f))), top).toVar(); // source y where the thrust sheet enters
         const dl = v.add(up).sub(k), du = v.add(up);
         const out0 = uint(0).toVar();
         If(y.lessThan(hIns.add(dl)), () => {

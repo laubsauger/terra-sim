@@ -215,3 +215,48 @@ test('ocean-ocean convergence accretes little: no crust walls at the trench', as
   // rig: ~30 at the front. The underflow stacked OROGENY_MAX per run and hit the 100-layer cap within a few runs.
   expect(res.maxT).toBeLessThan(50);
 });
+
+// B28: a crustless column (base = NY) winning a convergence with accretion put the thrust insertion point at the
+// grid top and read the sheet from past the column: a gneiss voxel floating over ~60 layers of air (needle spikes
+// over the sea, water-filled pits beside them). No column may ever hold air below solid rock.
+test('convergence onto crustless columns never leaves air under rock', async ({ page }) => {
+  const res = await page.evaluate(async () => {
+    const { makeRenderer } = await import('/tests/gpu/support/harness.ts');
+    const { twoPlateWorld } = await import('/tests/gpu/support/tecWorld.ts');
+    const { GpuFields } = await import('/src/core/gpu.ts');
+    const L = await import('/src/sim/layout.ts');
+    const { registerSimFields, uploadWorld } = await import('/src/sim/fields.ts');
+    const { createDerivePass } = await import('/src/sim/derive.ts');
+    const { Tectonics } = await import('/src/sim/tectonics.ts');
+    const r = await makeRenderer();
+    const f = new GpuFields(); registerSimFields(f); f.freeze();
+    const w = twoPlateWorld([0, 0], [-4, 0], { bothOceanic: true });
+    // plate 1: every other band stripped to bare mantle (no crust) and young, so these crustless columns WIN the
+    // convergence; plate 0: thick old ocean crust, so the losers carry plenty of excess to accrete (k > 0)
+    for (let z = 0; z < L.NZ; z++) for (let x = 0; x < L.NX; x++) {
+      const c = L.colIdx(x, z);
+      if (x < 128) { for (let y = 61; y < 81; y++) w.vox[L.voxIdx(x, y, z)] = L.packVoxel(L.Mat.BASALT, 255, 0, 0); w.water[c] = 0; continue; }
+      if ((x >> 3) % 2 !== 0) continue;
+      for (let y = 0; y < L.NY; y++) {
+        const i = L.voxIdx(x, y, z), m = w.vox[i]! & 0xff;
+        if (m !== L.Mat.AIR && m !== L.Mat.PERIDOTITE) w.vox[i] = L.packVoxel(L.Mat.PERIDOTITE, 255, 0, 0);
+      }
+      w.crustAge[c] = 1;
+    }
+    uploadWorld(f, w);
+    const derive = createDerivePass(f); derive.run(r);
+    const tec = new Tectonics(f, w.plates);
+    for (let t = 1; t <= 120; t++) if (tec.tick(r, t, 0.05, { speedMul: 1, isoEvery: 4 })) derive.run(r);
+    const vox = new Uint32Array(await f.read(r, 'vox'));
+    let bad = 0;
+    for (let c = 0; c < L.NCOL; c++) {
+      let seenAir = false;
+      for (let y = 0; y < L.NY; y++) {
+        const air = (vox[c + y * L.NCOL]! & 0xff) === L.Mat.AIR;
+        if (air) seenAir = true; else if (seenAir) { bad++; break; }
+      }
+    }
+    return { bad };
+  });
+  expect(res.bad, 'columns with air below solid rock').toBe(0);
+});

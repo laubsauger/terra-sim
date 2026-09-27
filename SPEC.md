@@ -185,5 +185,6 @@ B24|2026-09-27|oceanic trench winners: contMass − bestMass uint underflow stac
 B25|2026-09-27|TSL assigns a node where first built: inside a branch, other reads see 0 → plume spawn dir/seed/wind 0 for most particle kinds (blobs, vertical fountains), flora base y = 0 with culling off|V36
 B26|2026-09-27|sea cliffs stood forever: coastal talus measured against the seabed (B9 guard) never cut dry land facing water; now wave erosion cuts toward the water surface (never below sea)|V33
 B27|2026-09-27|TRAA sub-pixel jitter never settled (shader-animated vertices lack motion vectors): ~3.8k pixels/frame jumped even paused, whole diorama shimmered|V36
+B28|2026-09-27|crustless winner column (base = NY) with accretion k > 0: thrust insertion at the grid top read past the column → gneiss voxel floating over ~60 air layers (needle spikes over the sea, water-filled pits)|V30
 B20|2026-09-27|plate display offset followed sim steps instantly; at normal speed a 0.1-0.3 cell step every few frames read as jerking plates|V32
 B4|2026-09-25|pipe model friction 0.02 → deep ocean rang w/ persistent waves, level rough ~5 voxels|V26
