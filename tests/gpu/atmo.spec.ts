@@ -562,9 +562,13 @@ test('storm lightning, meteor haze (strike itself is src/fx), flood-basalt haze'
   const problems = watchProblems(page);
   await open(page, 'world=paint&look=0');
   await page.evaluate(() => (window as any).at.paint({}));
-  await page.evaluate(() => (window as any).at.frames(100, 1 / 10)); // 10 s of storm
-  const st = await page.evaluate(() => (window as any).at.stats());
-  console.log('lightning strikes in 10 s:', st.lightning);
+  // strikes are random at ~1-3 per 10 s: P(none in 10 s) ~13 % flaked; poll up to 30 s (P(none) ~0.25 %)
+  let st: { lightning: number } = { lightning: 0 };
+  for (let k = 0; k < 3 && st.lightning === 0; k++) {
+    await page.evaluate(() => (window as any).at.frames(100, 1 / 10)); // 10 s of storm
+    st = await page.evaluate(() => (window as any).at.stats());
+  }
+  console.log('lightning strikes:', st.lightning);
   expect(st.lightning, 'storm cells flash').toBeGreaterThan(0);
   // meteor: the cinematic strike (flash, curtain, dust column) is src/fx; atmosphere adds only a regional
   // haze, so the two never double up (user: 'random grey poof out of nowhere')
